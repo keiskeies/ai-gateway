@@ -45,5 +45,9 @@ export const deleteBackend = (id: string) => api.delete(`/backends/${id}`)
 // Stats
 export const getOverview = () => api.get('/stats/overview').then(r => r.data)
 
+// Settings
+export const getSettings = () => api.get('/settings').then(r => r.data)
+export const updateSettings = (data: any) => api.put('/settings', data).then(r => r.data)
+
 // Export proxy base URL for direct proxy endpoint access
 export { proxyBaseURL }

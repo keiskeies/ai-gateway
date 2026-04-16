@@ -3,13 +3,14 @@ import { Layout, Menu, Typography, theme, Dropdown, Button, Space, Modal } from 
 import {
   DashboardOutlined, CloudServerOutlined, RobotOutlined, ApiOutlined,
   SunOutlined, MoonOutlined, DesktopOutlined, GlobalOutlined,
-  BookOutlined,
+  BookOutlined, SettingOutlined,
 } from '@ant-design/icons'
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import Platforms from './pages/Platforms'
 import Models from './pages/Models'
 import Proxies from './pages/Proxies'
+import Settings from './pages/Settings'
 import { useAppContext } from './ThemeContext'
 import { t, type Locale, type ThemeMode } from './i18n'
 
@@ -27,6 +28,7 @@ export default function App() {
     { key: '/platforms', icon: <CloudServerOutlined />, label: t(locale, 'platforms') },
     { key: '/models', icon: <RobotOutlined />, label: t(locale, 'models') },
     { key: '/proxies', icon: <ApiOutlined />, label: t(locale, 'proxies') },
+    { key: '/settings', icon: <SettingOutlined />, label: t(locale, 'settings') },
   ]
 
   const themeIcon = themeMode === 'dark' ? <MoonOutlined /> : themeMode === 'light' ? <SunOutlined /> : <DesktopOutlined />
@@ -38,9 +40,12 @@ export default function App() {
     <Layout style={{ minHeight: '100vh', margin: 0, padding: 0 }}>
       <Sider width={220} style={{ background: token.colorBgContainer, display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '20px 16px', textAlign: 'center' }}>
-          <Title level={4} style={{ margin: 0, color: token.colorPrimary }}>
-            <ApiOutlined /> AI Gateway
-          </Title>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+            <img src="/logo.png" alt="AI Gateway" style={{ width: 32, height: 32 }} />
+            <Title level={4} style={{ margin: 0, color: token.colorPrimary }}>
+              AI Gateway
+            </Title>
+          </div>
           <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 4 }}>
             {t(locale, 'appSubtitle')}
           </div>
@@ -91,6 +96,7 @@ export default function App() {
             <Route path="/platforms" element={<Platforms />} />
             <Route path="/models" element={<Models />} />
             <Route path="/proxies" element={<Proxies />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </Content>
       </Layout>

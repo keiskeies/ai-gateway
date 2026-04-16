@@ -3,6 +3,7 @@ pub mod model;
 pub mod proxy;
 pub mod route;
 pub mod stats;
+pub mod settings;
 
 use actix_web::web;
 
@@ -42,5 +43,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/backends/{id}", web::delete().to(route::delete_backend))
                 // 统计
                 .route("/stats/overview", web::get().to(stats::overview))
+                // 设置
+                .route("/settings", web::get().to(settings::get_config))
+                .route("/settings", web::put().to(settings::update_config))
         );
 }

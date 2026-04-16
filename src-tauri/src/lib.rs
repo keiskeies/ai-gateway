@@ -1,4 +1,7 @@
 use std::sync::Arc;
+use parking_lot::RwLock;
+
+use ai_gateway::api::settings::SharedAppConfig;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -51,6 +54,7 @@ fn start_backend_server() {
             .build()
             .expect("Failed to create HTTP client");
 
+        let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
         let selector = Arc::new(ai_gateway::lb::BackendSelector::new());
         let proxy_state = Arc::new(ai_gateway::proxy::handler::ProxyState {
             db: db_pool.clone(),
@@ -72,6 +76,7 @@ fn start_backend_server() {
                 .wrap(middleware::Logger::default())
                 .app_data(web::Data::new(db_pool.clone()))
                 .app_data(web::Data::new(proxy_state.clone()))
+                .app_data(web::Data::new(shared_config.clone()))
                 .configure(ai_gateway::api::configure)
                 .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
                 .route("/v1/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))

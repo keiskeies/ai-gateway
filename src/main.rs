@@ -2,9 +2,11 @@ use actix_cors::Cors;
 use actix_web::{web, App, HttpServer, HttpResponse, middleware};
 use actix_files as actix_files;
 use std::sync::Arc;
+use parking_lot::RwLock;
 
 use ai_gateway::proxy::handler::ProxyState;
 use ai_gateway::lb::BackendSelector;
+use ai_gateway::api::settings::SharedAppConfig;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -30,6 +32,7 @@ async fn main() -> std::io::Result<()> {
         .build()
         .expect("Failed to create HTTP client");
 
+    let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
     let selector = Arc::new(BackendSelector::new());
     let proxy_state = Arc::new(ProxyState {
         db: db_pool.clone(),
@@ -50,6 +53,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(proxy_state.clone()))
+            .app_data(web::Data::new(shared_config.clone()))
             .configure(ai_gateway::api::configure)
             .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
             .route("/v1/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))

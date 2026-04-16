@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="logo.png" width="128" height="128" alt="AI Gateway Logo" />
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Rust-1.77+-orange?logo=rust" alt="Rust" />
   <img src="https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-green" alt="Platform" />
@@ -9,8 +13,40 @@
 
 <p align="center">
   <strong>跨平台 AI 接口聚合与智能流量负载均衡工具</strong><br/>
-  统一接入 OpenAI · Anthropic · DeepSeek · Qwen · 月之暗面 · 智谱AI · 豆包 · Ollama · NVIDIA NIM · Azure · 更多...
+  统一接入 OpenAI · Anthropic · Google Gemini · DeepSeek · Qwen · 月之暗面 · 智谱AI · 豆包 · Ollama · NVIDIA NIM · Azure · 更多...<br/><br/>
+  <strong>双协议原生支持：</strong>同时兼容 OpenAI 与 Anthropic Messages API 格式，一个网关覆盖全部生态
 </p>
+
+<p align="center">
+  <a href="README.md">中文</a> | <a href="README_EN.md">English</a>
+</p>
+
+---
+
+## 🌟 双协议原生支持 — OpenAI & Anthropic
+
+AI Gateway 不仅仅是一个 OpenAI 兼容代理——它**原生支持 Anthropic Messages API 协议**，无需任何协议转换中间件：
+
+```
+你的应用代码
+    │
+    ├── 使用 OpenAI SDK ──────→ POST /v1/chat/completions ──┐
+    │                                                       │
+    └── 使用 Anthropic SDK ──→ POST /v1/messages ───────────┤
+                                                            │
+                                                     AI Gateway
+                                                            │
+                                          ┌─────────────────┼─────────────────┐
+                                          ↓                 ↓                 ↓
+                                      DeepSeek            Qwen            OpenAI
+                                     (权重 3)           (权重 2)          (权重 1)
+```
+
+**这意味着：**
+- 🔄 **OpenAI SDK 用户**：直接将 `base_url` 指向 Gateway，零代码修改
+- 🔄 **Anthropic SDK 用户**：同样直接指向 Gateway，支持 `x-api-key` 认证、`messages` 格式、流式输出
+- 🔄 **混合使用**：同一个 Gateway 同时服务两种协议的客户端，后端可自由选择任何平台的模型
+- 💡 **Anthropic 直通**：当你选择 Anthropic 平台的后端模型时，请求以原生 Anthropic 协议转发，保持完整功能（tool_use、thinking 等）
 
 ---
 
@@ -42,14 +78,15 @@ AI Gateway 的核心能力——**将多个 AI 后端聚合为统一入口，智
 - **高可用**：某个后端宕机，流量自动切换到健康后端
 - **成本优化**：优先使用性价比高的模型，贵模型只做兜底
 - **零代码改造**：客户端只需将 API Base URL 指向 Gateway，无需任何修改
-- **多协议兼容**：同时支持 OpenAI 和 Anthropic API 格式
+- **双协议兼容**：同时原生支持 OpenAI 和 Anthropic API 格式
 
 ### 🌐 其他特性
 
-- **一键添加平台**：内置 12+ 主流 AI 平台预设，点击即用
+- **一键添加平台**：内置 15+ 主流 AI 平台预设（含 Google Gemini），点击即用
 - **模型预设**：热门模型 ID 自动填充，无需手动查找
 - **日/夜间模式**：支持浅色、深色、跟随系统三种模式
 - **中英双语**：完整国际化支持，一键切换语言
+- **端口可配置**：管理端口可在界面内修改，默认 1994
 - **跨平台桌面应用**：macOS / Windows / Linux 原生支持（基于 Tauri）
 - **也可独立部署**：单二进制文件，零依赖运行，适合服务器部署
 
@@ -85,7 +122,7 @@ AI Gateway 的核心能力——**将多个 AI 后端聚合为统一入口，智
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/ai-gateway.git
+git clone https://github.com/keiskeies/ai-gateway.git
 cd ai-gateway
 
 # 编译运行
@@ -146,6 +183,8 @@ retry_backoff_ms = 500
 request_timeout_secs = 120
 ```
 
+> 💡 管理端口也可在桌面应用的「设置」页面中直接修改，无需手动编辑配置文件。
+
 ---
 
 ## 📖 使用指南
@@ -160,7 +199,7 @@ request_timeout_secs = 120
 
 ### 3️⃣ 创建代理
 
-进入「代理管理」→ 点击「新建代理」→ 设置名称和端口 → 选择协议（OpenAI/Anthropic）
+进入「代理管理」→ 点击「新建代理」→ 设置名称和端口 → 选择协议（OpenAI / Anthropic）
 
 ### 4️⃣ 配置路由
 
@@ -169,21 +208,43 @@ request_timeout_secs = 120
 ### 5️⃣ 调用 API
 
 ```bash
-# OpenAI 兼容格式
+# OpenAI 兼容格式（支持所有 OpenAI SDK）
 curl http://localhost:1994/v1/chat/completions \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}]}'
 
-# Anthropic 兼容格式
+# Anthropic 兼容格式（支持所有 Anthropic SDK）
 curl http://localhost:1994/v1/messages \
   -H "x-api-key: YOUR_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
 
 # 模型列表
 curl http://localhost:1994/v1/models \
   -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+**Python 示例：**
+
+```python
+# OpenAI SDK
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:1994/v1", api_key="YOUR_TOKEN")
+response = client.chat.completions.create(
+    model="your-virtual-model",
+    messages=[{"role": "user", "content": "hello"}]
+)
+
+# Anthropic SDK
+import anthropic
+client = anthropic.Anthropic(base_url="http://localhost:1994", api_key="YOUR_TOKEN")
+response = client.messages.create(
+    model="your-virtual-model",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "hello"}]
+)
 ```
 
 ---

@@ -217,7 +217,7 @@ impl AppConfig {
         app_dir.join("static")
     }
 
-    fn to_toml_string(&self) -> Result<String, String> {
+    pub fn to_toml_string(&self) -> Result<String, String> {
         Ok(format!(
             r#"[server]
 host = "{}"

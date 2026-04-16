@@ -114,6 +114,15 @@ export const platformPresets: PlatformPreset[] = [
     ]
   },
   {
+    name: 'Google Gemini', nameZh: 'Google Gemini', nameEn: 'Google Gemini',
+    platform_type: 'OpenAI', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    models: [
+      { model_id: 'gemini-2.5-pro-preview-03-25', display_name: 'Gemini 2.5 Pro', display_name_zh: 'Gemini 2.5 Pro', max_tokens: 65536, context_window: 1048576, capabilities: ['chat', 'vision', 'reasoning'] },
+      { model_id: 'gemini-2.0-flash', display_name: 'Gemini 2.0 Flash', display_name_zh: 'Gemini 2.0 Flash', max_tokens: 8192, context_window: 1048576, capabilities: ['chat', 'vision'] },
+      { model_id: 'gemini-2.0-flash-lite', display_name: 'Gemini 2.0 Flash Lite', display_name_zh: 'Gemini 2.0 Flash Lite', max_tokens: 8192, context_window: 1048576, capabilities: ['chat'] },
+    ]
+  },
+  {
     name: 'Together AI', nameZh: 'Together AI', nameEn: 'Together AI',
     platform_type: 'OpenAI', base_url: 'https://api.together.xyz/v1',
     models: [

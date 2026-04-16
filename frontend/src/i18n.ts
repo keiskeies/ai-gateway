@@ -117,6 +117,19 @@ export const translations = {
     customType: 'Custom',
     // Docs
     documentation: '操作文档',
+    // Settings
+    settings: '系统设置',
+    serverSettings: '服务器设置',
+    defaultSettings: '默认策略',
+    adminPort: '管理端口',
+    listenHost: '监听地址',
+    logLevel: '日志级别',
+    maxRetries: '最大重试次数',
+    retryBackoffMs: '重试间隔(ms)',
+    requestTimeoutSecs: '请求超时(秒)',
+    settingsNote: '修改管理端口或监听地址后，需要重启应用才能生效。其他设置立即生效。',
+    portChangeHint: '管理端口已修改，请重启应用使新端口生效。',
+    loadFailed: '加载失败',
   },
   en: {
     appTitle: 'AI Gateway',
@@ -220,6 +233,18 @@ export const translations = {
     azureType: 'Azure OpenAI',
     customType: 'Custom',
     documentation: 'Documentation',
+    settings: 'Settings',
+    serverSettings: 'Server Settings',
+    defaultSettings: 'Default Policies',
+    adminPort: 'Admin Port',
+    listenHost: 'Listen Host',
+    logLevel: 'Log Level',
+    maxRetries: 'Max Retries',
+    retryBackoffMs: 'Retry Backoff (ms)',
+    requestTimeoutSecs: 'Request Timeout (sec)',
+    settingsNote: 'Changing the admin port or listen host requires a restart to take effect. Other settings take effect immediately.',
+    portChangeHint: 'Admin port changed. Please restart the app for the new port to take effect.',
+    loadFailed: 'Load failed',
   },
 } as const
 

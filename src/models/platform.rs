@@ -107,6 +107,7 @@ impl PlatformPreset {
             Self { name: "Doubao".into(), platform_type: PlatformType::OpenAI, base_url: "https://ark.cn-beijing.volces.com/api/v3".into() },
             Self { name: "SiliconFlow".into(), platform_type: PlatformType::OpenAI, base_url: "https://api.siliconflow.cn/v1".into() },
             Self { name: "Groq".into(), platform_type: PlatformType::OpenAI, base_url: "https://api.groq.com/openai/v1".into() },
+            Self { name: "Google Gemini".into(), platform_type: PlatformType::OpenAI, base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into() },
             Self { name: "Together AI".into(), platform_type: PlatformType::OpenAI, base_url: "https://api.together.xyz/v1".into() },
             Self { name: "OpenRouter".into(), platform_type: PlatformType::OpenAI, base_url: "https://openrouter.ai/api/v1".into() },
         ]
