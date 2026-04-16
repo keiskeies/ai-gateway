@@ -6,6 +6,10 @@ import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import { AppProvider, useAppContext } from './ThemeContext'
 import App from './App'
+import { initConfig } from './api'
+
+// Initialize API config (detect Tauri backend port)
+initConfig()
 
 function ThemedApp() {
   const { isDark, locale } = useAppContext()

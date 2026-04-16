@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "ai-gateway"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -334,13 +334,14 @@ dependencies = [
 
 [[package]]
 name = "ai-gateway-tauri"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "actix-cors",
  "actix-files",
  "actix-web",
  "ai-gateway",
  "log",
+ "parking_lot",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

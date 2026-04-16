@@ -1,13 +1,59 @@
 import axios from 'axios'
 
-// In Tauri desktop mode, the frontend is loaded from tauri:// protocol
-// so we need to point API requests to the localhost backend server
+// Detect Tauri desktop mode
 const isTauri = !!(window as any).__TAURI_INTERNALS__
 
-const baseURL = isTauri ? 'http://localhost:1994/api' : '/api'
-const proxyBaseURL = isTauri ? 'http://localhost:1994' : ''
+// In Tauri desktop mode, frontend is loaded from tauri:// protocol
+// We must use 127.0.0.1 (not localhost) to avoid mixed-content blocking
+let configuredPort = 1994
 
-const api = axios.create({ baseURL })
+function buildBaseURL(): string {
+  if (isTauri) {
+    return `http://127.0.0.1:${configuredPort}/api`
+  }
+  return '/api'
+}
+
+function buildProxyBaseURL(): string {
+  if (isTauri) {
+    return `http://127.0.0.1:${configuredPort}`
+  }
+  return ''
+}
+
+const api = axios.create({ baseURL: buildBaseURL() })
+
+// Fetch settings to get the actual configured port on startup
+export async function initConfig(): Promise<void> {
+  if (!isTauri) return
+  try {
+    const resp = await fetch(`http://127.0.0.1:${configuredPort}/api/settings`)
+    const data = await resp.json()
+    if (data.admin_port && data.admin_port !== configuredPort) {
+      configuredPort = data.admin_port
+      api.defaults.baseURL = buildBaseURL()
+    }
+  } catch {
+    // If default port fails, try common alternatives
+    const ports = [18080, 8080, 3000]
+    for (const p of ports) {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${p}/api/settings`)
+        const data = await resp.json()
+        if (data.admin_port) {
+          configuredPort = data.admin_port
+          api.defaults.baseURL = buildBaseURL()
+          return
+        }
+      } catch { continue }
+    }
+  }
+}
+
+// Dynamic proxy base URL getter
+export function proxyBaseURL(): string {
+  return buildProxyBaseURL()
+}
 
 // Platforms
 export const listPlatforms = () => api.get('/platforms').then(r => r.data)
@@ -48,6 +94,3 @@ export const getOverview = () => api.get('/stats/overview').then(r => r.data)
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (data: any) => api.put('/settings', data).then(r => r.data)
-
-// Export proxy base URL for direct proxy endpoint access
-export { proxyBaseURL }

@@ -11,7 +11,7 @@ import {
   listProxies, createProxy, deleteProxy, startProxy, stopProxy,
   listRoutes, createRoute, deleteRoute,
   listBackends, addBackend, deleteBackend,
-  listPlatforms, listModels, proxyBaseURL,
+  listPlatforms, listModels, proxyBaseURL as getProxyBaseURL,
 } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
@@ -201,11 +201,11 @@ export default function Proxies() {
               <Card size="small" style={{ marginTop: 12, background: '#f6ffed', borderColor: '#b7eb8f' }}>
                 <Text strong>{t(locale, 'usage')}：</Text>
                 <Paragraph style={{ marginBottom: 0, marginTop: 4 }}>
-                  {t(locale, 'openaiCompat')}：<Text code>{proxyBaseURL || `http://localhost:${detailProxy.listen_port}`}/v1/chat/completions</Text>
+                  {t(locale, 'openaiCompat')}：<Text code>{getProxyBaseURL() || `http://localhost:${detailProxy.listen_port}`}/v1/chat/completions</Text>
                 </Paragraph>
                 {detailProxy.protocols?.includes('Anthropic') && (
                   <Paragraph style={{ marginBottom: 0 }}>
-                    {t(locale, 'anthropicCompat')}：<Text code>{proxyBaseURL || `http://localhost:${detailProxy.listen_port}`}/v1/messages</Text>
+                    {t(locale, 'anthropicCompat')}：<Text code>{getProxyBaseURL() || `http://localhost:${detailProxy.listen_port}`}/v1/messages</Text>
                   </Paragraph>
                 )}
               </Card>

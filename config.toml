@@ -12,6 +12,6 @@ admin_token = ""
 
 [defaults]
 lb_strategy = "RoundRobin"
-max_retries = 2
+max_retries = 5
 retry_backoff_ms = 500
 request_timeout_secs = 120
