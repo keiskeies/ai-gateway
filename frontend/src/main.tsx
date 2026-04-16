@@ -19,6 +19,12 @@ function ThemedApp() {
       theme={{
         algorithm: isDark ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
         token: { colorPrimary: '#1677ff', borderRadius: 6 },
+        ...(isDark ? {
+          components: {
+            Layout: { colorBgBody: '#141414', colorBgLayout: '#000', colorBgContainer: '#1f1f1f', colorBgElevated: '#262626' },
+            Menu: { colorBgContainer: '#1f1f1f', colorItemBgSelected: '#111d2c' },
+          },
+        } : {}),
       }}
     >
       <BrowserRouter>

@@ -31,3 +31,4 @@ frontend/tsconfig.tsbuildinfo
 # Environment
 .env
 .env.local
+.gstack/

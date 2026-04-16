@@ -25,7 +25,7 @@ function getSystemDark(): boolean {
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [themeMode, setThemeModeState] = useState<ThemeMode>(() => {
-    return (localStorage.getItem('theme') as ThemeMode) || 'system'
+    return (localStorage.getItem('theme') as ThemeMode) || 'dark'
   })
   const [locale, setLocaleState] = useState<Locale>(() => {
     return (localStorage.getItem('locale') as Locale) || 'zh'
