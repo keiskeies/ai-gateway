@@ -1,0 +1,17 @@
+[server]
+host = "0.0.0.0"
+admin_port = 1994
+log_level = "info"
+
+[database]
+path = "data/ai-gateway.db"
+
+[security]
+encrypt_key = "ai-gateway-default-key-change-me"
+admin_token = ""
+
+[defaults]
+lb_strategy = "RoundRobin"
+max_retries = 2
+retry_backoff_ms = 500
+request_timeout_secs = 120

@@ -1,0 +1,33 @@
+# Build
+/target/
+/src-tauri/target/
+/src-tauri/config.toml
+/dist/
+/static/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Environment
+.env
+.env.local

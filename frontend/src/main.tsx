@@ -1,0 +1,33 @@
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import { ConfigProvider, theme as antTheme } from 'antd'
+import zhCN from 'antd/locale/zh_CN'
+import enUS from 'antd/locale/en_US'
+import { AppProvider, useAppContext } from './ThemeContext'
+import App from './App'
+
+function ThemedApp() {
+  const { isDark, locale } = useAppContext()
+  return (
+    <ConfigProvider
+      locale={locale === 'zh' ? zhCN : enUS}
+      theme={{
+        algorithm: isDark ? antTheme.darkAlgorithm : antTheme.defaultAlgorithm,
+        token: { colorPrimary: '#1677ff', borderRadius: 6 },
+      }}
+    >
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ConfigProvider>
+  )
+}
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <AppProvider>
+      <ThemedApp />
+    </AppProvider>
+  </React.StrictMode>,
+)
