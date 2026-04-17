@@ -1,8 +1,8 @@
 [package]
 name = "ai-gateway"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2021"
-description = "AI API Gateway - 跨平台AI接口聚合与负载均衡工具"
+description = "AI Gateway - 跨平台AI接口聚合与负载均衡网关"
 
 [lib]
 name = "ai_gateway"

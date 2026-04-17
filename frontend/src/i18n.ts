@@ -5,7 +5,7 @@ export const translations = {
   zh: {
     // App
     appTitle: 'AI Gateway',
-    appSubtitle: 'AI 接口聚合管理平台',
+    appSubtitle: 'AI 接口聚合与负载均衡网关',
     // Menu
     dashboard: '概览',
     platforms: '平台',
@@ -161,7 +161,7 @@ export const translations = {
   },
   en: {
     appTitle: 'AI Gateway',
-    appSubtitle: 'AI API Aggregation Platform',
+    appSubtitle: 'AI API Aggregation & Load Balancing Gateway',
     dashboard: 'Overview',
     platforms: 'Platforms',
     models: 'Models',

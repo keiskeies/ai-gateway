@@ -6,6 +6,7 @@ import {
 import {
   PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
   SettingOutlined, CopyOutlined, CodeOutlined, EditOutlined, KeyOutlined,
+  EyeOutlined, EyeInvisibleOutlined,
 } from '@ant-design/icons'
 import {
   listProxies, createProxy, updateProxy, deleteProxy, startProxy, stopProxy,
@@ -45,10 +46,12 @@ export default function Proxies() {
   const [addBackendModalOpen, setAddBackendModalOpen] = useState(false)
   const [currentRouteId, setCurrentRouteId] = useState('')
   const [backendForm] = Form.useForm()
+  const [selectedBackendPlatformId, setSelectedBackendPlatformId] = useState<string>('')
 
   // Edit proxy modal state
   const [editProxyModalOpen, setEditProxyModalOpen] = useState(false)
   const [editProxyForm] = Form.useForm()
+  const [tokenVisible, setTokenVisible] = useState(false)
 
   // Usage code modal state
   const [usageModalOpen, setUsageModalOpen] = useState(false)
@@ -149,6 +152,12 @@ export default function Proxies() {
 
   const handleEditProxy = async (values: any) => {
     try {
+      const wasRunning = detailProxy.status === 'Running'
+      const tokenChanged = values.auth_token !== detailProxy.auth_token
+      // If token changed and proxy is running, stop it first
+      if (wasRunning && tokenChanged) {
+        await stopProxy(detailProxy.id)
+      }
       await updateProxy(detailProxy.id, values)
       message.success(t(locale, 'updateSuccess'))
       setEditProxyModalOpen(false)
@@ -156,6 +165,11 @@ export default function Proxies() {
       const updated = { ...detailProxy, ...values }
       setDetailProxy(updated)
       loadAll()
+      // If token changed and proxy was running, restart it
+      if (wasRunning && tokenChanged) {
+        try { await startProxy(detailProxy.id) } catch {}
+        loadAll()
+      }
     } catch { message.error(t(locale, 'updateFailed')) }
   }
 
@@ -164,6 +178,7 @@ export default function Proxies() {
       name: detailProxy.name,
       listen_port: detailProxy.listen_port,
       protocols: detailProxy.protocols || ['OpenAI'],
+      auth_token: detailProxy.auth_token || '',
     })
     setEditProxyModalOpen(true)
   }
@@ -421,7 +436,7 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
           </Form.Item>
           <Form.Item name="auth_token" label={t(locale, 'authToken')}>
             <Space.Compact style={{ width: '100%' }}>
-              <Input.Password placeholder={t(locale, 'authTokenPlaceholder')} style={{ flex: 1 }} />
+              <Input placeholder={t(locale, 'authTokenPlaceholder')} style={{ flex: 1 }} />
               <Button icon={<KeyOutlined />} onClick={() => form.setFieldsValue({ auth_token: generateAgToken() })}>
                 {t(locale, 'generateToken')}
               </Button>
@@ -497,6 +512,17 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
               <Descriptions.Item label={t(locale, 'status')}>
                 <Tag color={detailProxy.status === 'Running' ? 'success' : 'default'}>{detailProxy.status}</Tag>
               </Descriptions.Item>
+              <Descriptions.Item label={t(locale, 'authToken')} span={2}>
+                {detailProxy.auth_token ? (
+                  <Space>
+                    <Text code style={{ fontSize: 12 }}>{tokenVisible ? detailProxy.auth_token : '••••••••••••'}</Text>
+                    <Button type="text" size="small" icon={tokenVisible ? <EyeInvisibleOutlined /> : <EyeOutlined />} onClick={() => setTokenVisible(!tokenVisible)} />
+                    <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(detailProxy.auth_token)} />
+                  </Space>
+                ) : (
+                  <Text type="secondary">-</Text>
+                )}
+              </Descriptions.Item>
             </Descriptions>
 
             <Divider orientation="left" style={{ marginTop: 20 }}>
@@ -559,6 +585,14 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
           <Form.Item name="protocols" label={t(locale, 'protocols')} rules={[{ required: true }]}>
             <Select mode="multiple" options={PROTOCOL_OPTIONS} />
           </Form.Item>
+          <Form.Item name="auth_token" label={t(locale, 'authToken')}>
+            <Space.Compact style={{ width: '100%' }}>
+              <Input placeholder={t(locale, 'authTokenPlaceholder')} style={{ flex: 1 }} />
+              <Button icon={<KeyOutlined />} onClick={() => editProxyForm.setFieldsValue({ auth_token: generateAgToken() })}>
+                {t(locale, 'generateToken')}
+              </Button>
+            </Space.Compact>
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -582,12 +616,28 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
                         <Select placeholder={t(locale, 'selectPlatform')} options={platforms.map((p: any) => {
                           const preset = platformPresets.find(pr => pr.name === p.name)
                           return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
-                        })} size="small" />
+                        })} size="small" onChange={() => {
+                          // Clear model selection when platform changes
+                          routeForm.setFieldsValue({ backends: routeForm.getFieldValue('backends')?.map((b: any, i: number) => i === name ? { ...b, model_id: undefined } : b) })
+                        }} />
                       </Form.Item>
                     </Col>
                     <Col span={7}>
+                      <Form.Item {...rest} name={[name, 'platform_id']} noStyle>
+                        <Input type="hidden" />
+                      </Form.Item>
                       <Form.Item {...rest} name={[name, 'model_id']} style={{ marginBottom: 0 }}>
-                        <Select placeholder={t(locale, 'selectModel')} options={models.map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))} size="small" showSearch optionFilterProp="label" />
+                        <Select placeholder={t(locale, 'selectModel')} size="small" showSearch optionFilterProp="label"
+                          options={
+                            (() => {
+                              const backends = routeForm.getFieldValue('backends') || []
+                              const pid = backends[name]?.platform_id
+                              return models
+                                .filter((m: any) => !pid || m.platform_id === pid)
+                                .map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))
+                            })()
+                          }
+                        />
                       </Form.Item>
                     </Col>
                     <Col span={4}>
@@ -613,16 +663,27 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
       </Modal>
 
       {/* Add Backend */}
-      <Modal title={t(locale, 'addBackendModel')} open={addBackendModalOpen} onCancel={() => setAddBackendModalOpen(false)} onOk={() => backendForm.submit()}>
+      <Modal title={t(locale, 'addBackendModel')} open={addBackendModalOpen} onCancel={() => { setAddBackendModalOpen(false); setSelectedBackendPlatformId('') }} onOk={() => backendForm.submit()}>
         <Form form={backendForm} layout="vertical" onFinish={handleAddBackend}>
           <Form.Item name="platform_id" label={t(locale, 'platforms')} rules={[{ required: true }]}>
-            <Select options={platforms.map((p: any) => {
-              const preset = platformPresets.find(pr => pr.name === p.name)
-              return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
-            })} />
+            <Select
+              options={platforms.map((p: any) => {
+                const preset = platformPresets.find(pr => pr.name === p.name)
+                return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
+              })}
+              onChange={(value: string) => {
+                setSelectedBackendPlatformId(value)
+                backendForm.setFieldsValue({ model_id: undefined })
+              }}
+            />
           </Form.Item>
           <Form.Item name="model_id" label={t(locale, 'models')} rules={[{ required: true }]}>
-            <Select options={models.map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))} showSearch optionFilterProp="label" />
+            <Select
+              options={models
+                .filter((m: any) => !selectedBackendPlatformId || m.platform_id === selectedBackendPlatformId)
+                .map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))}
+              showSearch optionFilterProp="label"
+            />
           </Form.Item>
           <Form.Item name="weight" label={t(locale, 'weight')} initialValue={1}>
             <InputNumber min={1} />

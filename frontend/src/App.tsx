@@ -193,14 +193,14 @@ function DocZh() {
   }
   return (
     <div style={{ lineHeight: 1.8 }}>
-      <Title level={4}>AI Gateway 使用帮助</Title>
+      <Title level={4}>📖 AI Gateway 使用帮助</Title>
       <Paragraph>
         <Text strong>AI Gateway</Text> 是一个跨平台 AI 接口聚合与负载均衡工具，支持 OpenAI、Anthropic、Ollama 等多种 AI 平台的统一接入。下面将从零开始，一步步教你完成配置和使用。
       </Paragraph>
 
       <Divider />
 
-      <Title level={5}>第一步：添加 AI 平台</Title>
+      <Title level={5}>🔗 第一步：添加 AI 平台</Title>
       <Paragraph>平台是你 AI 模型的来源，比如 OpenAI、Anthropic、NVIDIA 等。每个平台需要配置 API 地址和 API Key。</Paragraph>
       <ol>
         <li>点击左侧菜单进入「<Text strong>平台</Text>」页面</li>
@@ -212,7 +212,7 @@ function DocZh() {
       </ol>
       <Paragraph type="secondary" style={{ fontSize: 12 }}>提示：API Key 仅存储在本地，不会上传到任何服务器。</Paragraph>
 
-      <Title level={5}>第二步：添加模型</Title>
+      <Title level={5}>🤖 第二步：添加模型</Title>
       <Paragraph>每个平台上可能有多个 AI 模型，你需要把要使用的模型添加进来。</Paragraph>
       <ol>
         <li>点击左侧菜单进入「<Text strong>模型</Text>」页面</li>
@@ -225,7 +225,7 @@ function DocZh() {
       </ol>
       <Paragraph type="secondary" style={{ fontSize: 12 }}>提示：添加模型后，可以点击操作列中的 🔌 图标按钮测试模型的连通性，确认 API Key 和地址配置正确。</Paragraph>
 
-      <Title level={5}>第三步：创建聚合接口</Title>
+      <Title level={5}>🔌 第三步：创建聚合接口</Title>
       <Paragraph>聚合接口是客户端访问的统一入口。你可以把多个后端模型聚合成一个虚拟大模型，实现负载均衡和高可用。</Paragraph>
       <ol>
         <li>点击左侧菜单进入「<Text strong>聚合接口</Text>」页面</li>
@@ -242,7 +242,7 @@ function DocZh() {
         <li>点击「确认」创建接口</li>
       </ol>
 
-      <Title level={5}>第四步：配置虚拟大模型</Title>
+      <Title level={5}>⚙️ 第四步：配置虚拟大模型</Title>
       <Paragraph>虚拟大模型是客户端请求时使用的模型名，它背后可以挂载一个或多个后端模型，实现负载均衡。</Paragraph>
       <ol>
         <li>在聚合接口列表中，点击操作列的 ⚙ 设置按钮，打开接口配置面板</li>
@@ -262,7 +262,7 @@ function DocZh() {
         <li>点击「确认」保存配置</li>
       </ol>
 
-      <Title level={5}>第五步：启动接口并调用</Title>
+      <Title level={5}>🚀 第五步：启动接口并调用</Title>
       <Paragraph>配置完成后，启动接口即可开始使用。</Paragraph>
       <ol>
         <li>在聚合接口列表中，点击操作列的 ▶ 启动按钮</li>
@@ -270,7 +270,7 @@ function DocZh() {
         <li>在虚拟大模型卡片中，点击「使用方式」按钮可以查看各语言的调用代码示例</li>
       </ol>
 
-      <Title level={5}>API 调用方式</Title>
+      <Title level={5}>📡 API 调用方式</Title>
       <Paragraph>假设聚合接口的端口为 <Text code>1998</Text>，虚拟模型名为 <Text code>gpt-4</Text>：</Paragraph>
 
       <Text strong>OpenAI 兼容接口：</Text>
@@ -301,7 +301,7 @@ x-api-key: <your-token>
 
       <Paragraph type="secondary" style={{ fontSize: 12 }}>提示：如果聚合接口设置了访问 Token，请在请求头中携带 <Text code>Authorization: Bearer &lt;token&gt;</Text>（OpenAI 协议）或 <Text code>x-api-key: &lt;token&gt;</Text>（Anthropic 协议）。</Paragraph>
 
-      <Title level={5}>其他功能</Title>
+      <Title level={5}>💡 其他功能</Title>
       <ul>
         <li><Text strong>连通性测试</Text>：在模型列表中，点击 🔌 按钮可测试模型是否能正常连接，查看延迟和状态信息</li>
         <li><Text strong>编辑接口基本信息</Text>：在接口配置面板中，点击「编辑」按钮可修改接口名称、端口和支持协议</li>
@@ -329,14 +329,14 @@ function DocEn() {
   }
   return (
     <div style={{ lineHeight: 1.8 }}>
-      <Title level={4}>AI Gateway Help</Title>
+      <Title level={4}>📖 AI Gateway Help</Title>
       <Paragraph>
         <Text strong>AI Gateway</Text> is a cross-platform AI API aggregation and load balancing tool, supporting OpenAI, Anthropic, Ollama and more. This guide will walk you through the setup process step by step.
       </Paragraph>
 
       <Divider />
 
-      <Title level={5}>Step 1: Add an AI Platform</Title>
+      <Title level={5}>🔗 Step 1: Add an AI Platform</Title>
       <Paragraph>A platform is the source of your AI models, such as OpenAI, Anthropic, NVIDIA, etc. Each platform requires an API URL and API Key.</Paragraph>
       <ol>
         <li>Navigate to the <Text strong>"Platforms"</Text> page from the sidebar</li>
@@ -348,7 +348,7 @@ function DocEn() {
       </ol>
       <Paragraph type="secondary" style={{ fontSize: 12 }}>Tip: Your API Key is stored locally and never uploaded to any server.</Paragraph>
 
-      <Title level={5}>Step 2: Add Models</Title>
+      <Title level={5}>🤖 Step 2: Add Models</Title>
       <Paragraph>Each platform may have multiple AI models. You need to add the models you want to use.</Paragraph>
       <ol>
         <li>Navigate to the <Text strong>"Models"</Text> page from the sidebar</li>
@@ -361,7 +361,7 @@ function DocEn() {
       </ol>
       <Paragraph type="secondary" style={{ fontSize: 12 }}>Tip: After adding a model, click the 🔌 button in the action column to test its connectivity and verify your API Key and URL are correct.</Paragraph>
 
-      <Title level={5}>Step 3: Create an Aggregated API</Title>
+      <Title level={5}>🔌 Step 3: Create an Aggregated API</Title>
       <Paragraph>An aggregated API is the unified entry point for clients. You can combine multiple backend models into one virtual model with load balancing and high availability.</Paragraph>
       <ol>
         <li>Navigate to the <Text strong>"Aggregated APIs"</Text> page from the sidebar</li>
@@ -378,7 +378,7 @@ function DocEn() {
         <li>Click "OK" to create the API</li>
       </ol>
 
-      <Title level={5}>Step 4: Configure Virtual Models</Title>
+      <Title level={5}>⚙️ Step 4: Configure Virtual Models</Title>
       <Paragraph>A virtual model is the model name clients use when making requests. It can have one or more backend models behind it for load balancing.</Paragraph>
       <ol>
         <li>In the aggregated API list, click the ⚙ Settings button to open the configuration panel</li>
@@ -398,7 +398,7 @@ function DocEn() {
         <li>Click "OK" to save the configuration</li>
       </ol>
 
-      <Title level={5}>Step 5: Start the API and Make Requests</Title>
+      <Title level={5}>🚀 Step 5: Start the API and Make Requests</Title>
       <Paragraph>Once configured, start the API to begin using it.</Paragraph>
       <ol>
         <li>In the aggregated API list, click the ▶ Start button</li>
@@ -406,7 +406,7 @@ function DocEn() {
         <li>Click the "Usage" button on a virtual model card to see code examples in various languages</li>
       </ol>
 
-      <Title level={5}>API Endpoints</Title>
+      <Title level={5}>📡 API Endpoints</Title>
       <Paragraph>Assuming the aggregated API port is <Text code>1998</Text> and the virtual model name is <Text code>gpt-4</Text>:</Paragraph>
 
       <Text strong>OpenAI Compatible:</Text>
@@ -437,7 +437,7 @@ x-api-key: <your-token>
 
       <Paragraph type="secondary" style={{ fontSize: 12 }}>Tip: If the aggregated API has an auth token set, include <Text code>Authorization: Bearer &lt;token&gt;</Text> (OpenAI protocol) or <Text code>x-api-key: &lt;token&gt;</Text> (Anthropic protocol) in your request headers.</Paragraph>
 
-      <Title level={5}>Other Features</Title>
+      <Title level={5}>💡 Other Features</Title>
       <ul>
         <li><Text strong>Connectivity Test</Text>: Click the 🔌 button in the model list to test if a model can connect properly, and view latency and status info</li>
         <li><Text strong>Edit API Info</Text>: In the API configuration panel, click "Edit" to modify the API name, port, and supported protocols</li>
