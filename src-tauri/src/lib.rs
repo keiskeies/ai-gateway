@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
 
 use ai_gateway::api::settings::SharedAppConfig;
+use ai_gateway::api::sync::{SharedSyncState, SyncState, start_scheduler};
 
 /// Port the backend will listen on (determined at runtime)
 static BACKEND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -11,16 +12,19 @@ static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
-                use tauri::Manager;
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
             }
+
+            // Setup system tray
+            setup_tray(app)?;
 
             // Start the backend actix-web server in a background thread
             std::thread::spawn(move || {
@@ -46,6 +50,17 @@ pub fn run() {
             // Navigate the main window to the backend URL using Tauri's navigate API
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
+                // On close requested, hide to tray instead of closing
+                let window_clone = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        window_clone.hide().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to hide window: {}", e);
+                        });
+                    }
+                });
+
                 match url::Url::parse(&url) {
                     Ok(parsed_url) => {
                         if let Err(e) = window.navigate(parsed_url) {
@@ -70,6 +85,126 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+    use tauri::Manager;
+
+    let show = app.handle().clone();
+    let quit = app.handle().clone();
+
+    TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("AI Gateway")
+        .on_tray_icon_event(move |tray, event| {
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    // Left click: show main window
+                    if let Some(window) = show.get_webview_window("main") {
+                        window.show().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to show window: {}", e);
+                        });
+                        window.set_focus().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to focus window: {}", e);
+                        });
+                    }
+                }
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    // Right click: show context menu
+                    let items = build_tray_menu_items(&show);
+                    tray.set_menu(Some(items)).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to set tray menu: {}", e);
+                    });
+                }
+                _ => {}
+            }
+        })
+        .on_menu_event(move |_tray, event| {
+            let id = event.id().as_ref().to_string();
+            match id.as_str() {
+                "show" => {
+                    if let Some(window) = quit.get_webview_window("main") {
+                        window.show().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to show window: {}", e);
+                        });
+                        window.set_focus().unwrap_or_else(|e| {
+                            tracing::warn!("Failed to focus window: {}", e);
+                        });
+                    }
+                }
+                "quit" => {
+                    std::process::exit(0);
+                }
+                _ => {}
+            }
+        })
+        .build(app)?;
+
+    Ok(())
+}
+
+fn build_tray_menu_items(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+    let db_path = {
+        let app_config = ai_gateway::config::AppConfig::load_or_default();
+        app_config.resolved_db_path()
+    };
+
+    let db_pool = ai_gateway::db::init_pool(&db_path).expect("Failed to init DB for tray menu");
+
+    // Get proxies for tray menu - show token stats instead of toggle
+    let proxies = ai_gateway::db::proxy::list(&db_pool).unwrap_or_default();
+
+    let mut menu = MenuBuilder::new(app);
+
+    // Show window option
+    let show_item = MenuItemBuilder::with_id("show", "Show AI Gateway").build(app).expect("Failed to build show menu item");
+    menu = menu.item(&show_item);
+
+    // Add separator
+    let sep1 = PredefinedMenuItem::separator(app).expect("Failed to build separator");
+    menu = menu.item(&sep1);
+
+    // Add virtual model token stats items
+    for proxy in &proxies {
+        // Get token stats for this proxy
+        let token_stats = ai_gateway::db::stats::proxy_stats(&db_pool, &proxy.id).ok();
+        let total_tokens = token_stats
+            .as_ref()
+            .map(|s| s.total_token_input + s.total_token_output)
+            .unwrap_or(0);
+        let token_str = if total_tokens >= 1_000_000 {
+            format!("{:.1}M", total_tokens as f64 / 1_000_000.0)
+        } else if total_tokens >= 1_000 {
+            format!("{:.1}K", total_tokens as f64 / 1_000.0)
+        } else {
+            total_tokens.to_string()
+        };
+        let label = format!("{}  Tokens: {}", proxy.name, token_str);
+        let item = MenuItemBuilder::with_id(format!("proxy_info_{}", proxy.id), label)
+            .enabled(false)
+            .build(app)
+            .expect("Failed to build proxy menu item");
+        menu = menu.item(&item);
+    }
+
+    // Add separator and quit
+    let sep2 = PredefinedMenuItem::separator(app).expect("Failed to build separator");
+    menu = menu.item(&sep2);
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit AI Gateway").build(app).expect("Failed to build quit menu item");
+    menu = menu.item(&quit_item);
+
+    menu.build().expect("Failed to build tray menu")
 }
 
 fn start_backend_server() {
@@ -102,6 +237,11 @@ fn start_backend_server() {
 
         let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
         let selector = Arc::new(ai_gateway::lb::BackendSelector::new());
+
+        // Initialize auto-sync scheduler
+        let sync_state: SharedSyncState = Arc::new(SyncState::new(db_pool.clone(), shared_config.clone()));
+        start_scheduler(sync_state.clone());
+
         let proxy_state = Arc::new(ai_gateway::proxy::handler::ProxyState {
             db: db_pool.clone(),
             config: app_config.clone(),
@@ -130,6 +270,7 @@ fn start_backend_server() {
                 .app_data(web::Data::new(proxy_state.clone()))
                 .app_data(web::Data::new(shared_config.clone()))
                 .configure(ai_gateway::api::configure)
+                // Global virtual model proxy routes — all on admin port, model name in request body
                 .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
                 .route("/v1/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
                 .route("/v1/models", web::get().to(ai_gateway::proxy::handler::openai_list_models))

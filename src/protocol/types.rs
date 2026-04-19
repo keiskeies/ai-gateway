@@ -19,6 +19,8 @@ pub struct UnifiedRequest {
 pub struct UnifiedMessage {
     pub role: Role,
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<UnifiedToolCall>>,
     pub tool_call_id: Option<String>,
     pub name: Option<String>,

@@ -1,111 +1,104 @@
 import { useEffect, useState } from 'react'
 import {
-  Button, Table, Modal, Form, Input, InputNumber, Select, Tag, Space,
-  message, Card, Drawer, Descriptions, Divider, Row, Col, Popconfirm, Typography, Tabs,
+  Button, Table, Modal, Form, Input, Select, Tag, Space,
+  message, Card, Drawer, Descriptions, Divider, Row, Col, Popconfirm, Typography, InputNumber, Tabs,
 } from 'antd'
 import {
-  PlusOutlined, DeleteOutlined, PlayCircleOutlined, PauseCircleOutlined,
-  SettingOutlined, CopyOutlined, CodeOutlined, EditOutlined, KeyOutlined,
-  EyeOutlined, EyeInvisibleOutlined,
+  PlusOutlined, DeleteOutlined, LoadingOutlined,
+  SettingOutlined, CodeOutlined, CopyOutlined,
 } from '@ant-design/icons'
 import {
-  listProxies, createProxy, updateProxy, deleteProxy, startProxy, stopProxy,
+  listProxies, createProxy, updateProxy, deleteProxy,
   listRoutes, createRoute, deleteRoute,
   listBackends, addBackend, deleteBackend,
-  listPlatforms, listModels, proxyBaseURL as getProxyBaseURL, getSettings,
+  listPlatforms, fetchRemoteModels, getSettings, listApiKeys as fetchApiKeys,
 } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
-import { getPresetName, platformPresets } from '../presets'
+import { getPresetName, platformPresets, getCapabilityLabel, getCapabilityColor, CAPABILITY_OPTIONS, getModelsForPlatform } from '../presets'
 
-const { Text, Paragraph } = Typography
+const { Text, Title } = Typography
 
-// Generate a random token with sk-ag- prefix
-function generateAgToken(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-  let token = 'sk-ag-'
-  for (let i = 0; i < 32; i++) {
-    token += chars.charAt(Math.floor(Math.random() * chars.length))
-  }
-  return token
-}
+const LB_OPTIONS = [
+  { value: 'RoundRobin', label: t('zh', 'roundRobin') },
+  { value: 'WeightedRandom', label: t('zh', 'weightedRandom') },
+  { value: 'LeastConnections', label: t('zh', 'leastConnections') },
+  { value: 'Priority', label: t('zh', 'priorityMode') },
+  { value: 'LatencyBased', label: t('zh', 'latencyBased') },
+]
 
 export default function Proxies() {
   const [proxies, setProxies] = useState<any[]>([])
+  const [proxyRoutes, setProxyRoutes] = useState<Record<string, any>>({})
   const [platforms, setPlatforms] = useState<any[]>([])
-  const [models, setModels] = useState<any[]>([])
   const [createModalOpen, setCreateModalOpen] = useState(false)
   const [form] = Form.useForm()
   const [loading, setLoading] = useState(false)
   const { locale } = useAppContext()
 
+  // Detail drawer
   const [detailProxy, setDetailProxy] = useState<any>(null)
-  const [detailRoutes, setDetailRoutes] = useState<any[]>([])
-  const [addRouteModalOpen, setAddRouteModalOpen] = useState(false)
-  const [routeForm] = Form.useForm()
+  const [detailRoute, setDetailRoute] = useState<any>(null)
   const [addBackendModalOpen, setAddBackendModalOpen] = useState(false)
-  const [currentRouteId, setCurrentRouteId] = useState('')
   const [backendForm] = Form.useForm()
   const [selectedBackendPlatformId, setSelectedBackendPlatformId] = useState<string>('')
+  const [remoteModels, setRemoteModels] = useState<{ id: string; owned_by?: string }[]>([])
+  const [fetchingRemote, setFetchingRemote] = useState(false)
 
-  // Edit proxy modal state
+  // Edit proxy modal
   const [editProxyModalOpen, setEditProxyModalOpen] = useState(false)
   const [editProxyForm] = Form.useForm()
-  const [tokenVisible, setTokenVisible] = useState(false)
 
-  // Usage code modal state
+  // Usage code modal
   const [usageModalOpen, setUsageModalOpen] = useState(false)
   const [usageProxy, setUsageProxy] = useState<any>(null)
-  const [usageRoute, setUsageRoute] = useState<any>(null)
   const [adminPort, setAdminPort] = useState<number>(1994)
+  const [apiKeysList, setApiKeysList] = useState<any[]>([])
 
-  const PROTOCOL_OPTIONS = [
-    { value: 'OpenAI', label: t(locale, 'openaiCompatLabel') },
-    { value: 'Anthropic', label: t(locale, 'anthropicCompatLabel') },
-  ]
-
-  const LB_OPTIONS = [
-    { value: 'RoundRobin', label: t(locale, 'roundRobin') },
-    { value: 'WeightedRandom', label: t(locale, 'weightedRandom') },
-    { value: 'LeastConnections', label: t(locale, 'leastConnections') },
-    { value: 'Priority', label: t(locale, 'priorityMode') },
-    { value: 'LatencyBased', label: t(locale, 'latencyBased') },
-  ]
+  // Create modal: remote models per backend row
+  const [createRemoteModels, setCreateRemoteModels] = useState<Record<number, { id: string; owned_by?: string }[]>>({})
+  const [createFetching, setCreateFetching] = useState<Record<number, boolean>>({})
 
   useEffect(() => { loadAll(); loadAdminPort() }, [])
 
   const loadAdminPort = async () => {
-    try {
-      const settings = await getSettings()
-      setAdminPort(settings.admin_port)
-    } catch {}
+    try { const settings = await getSettings(); setAdminPort(settings.admin_port) } catch {}
   }
 
   const loadAll = async () => {
     setLoading(true)
     try {
-      const [p, pl, m] = await Promise.all([listProxies(), listPlatforms(), listModels()])
-      setProxies(p); setPlatforms(pl); setModels(m)
+      const [p, pl, ak] = await Promise.all([listProxies(), listPlatforms(), fetchApiKeys().catch(() => [])])
+      setProxies(p); setPlatforms(pl); setApiKeysList(ak)
+      const routeMap: Record<string, any> = {}
+      await Promise.all(p.map(async (proxy: any) => {
+        try {
+          const routes = await listRoutes(proxy.id)
+          if (routes.length > 0) routeMap[proxy.id] = routes[0]
+        } catch {}
+      }))
+      setProxyRoutes(routeMap)
     } catch {}
     setLoading(false)
   }
 
   const handleCreate = async (values: any) => {
     try {
-      await createProxy(values)
+      const backends = values.backends || []
+      const proxy = await createProxy({ name: values.name })
+      if (backends.length > 0) {
+        await createRoute(proxy.id, {
+          lb_strategy: values.lb_strategy || 'RoundRobin',
+          backends: backends.filter((b: any) => b.platform_id && b.model_id),
+        })
+      }
       message.success(t(locale, 'createSuccess'))
       setCreateModalOpen(false)
       form.resetFields()
+      setCreateRemoteModels({})
+      setCreateFetching({})
       loadAll()
     } catch { message.error(t(locale, 'createFailed')) }
-  }
-
-  const handleStart = async (id: string) => {
-    try { await startProxy(id); message.success(t(locale, 'running')); loadAll() } catch (e: any) { message.error(e?.response?.data?.error?.message || 'Start failed') }
-  }
-
-  const handleStop = async (id: string) => {
-    try { await stopProxy(id); message.success(t(locale, 'stopped')); loadAll() } catch {}
   }
 
   const handleDelete = async (id: string) => {
@@ -114,36 +107,40 @@ export default function Proxies() {
 
   const openDetail = async (proxy: any) => {
     setDetailProxy(proxy)
-    try { setDetailRoutes(await listRoutes(proxy.id)) } catch { setDetailRoutes([]) }
+    try {
+      const routes = await listRoutes(proxy.id)
+      setDetailRoute(routes.length > 0 ? routes[0] : null)
+    } catch { setDetailRoute(null) }
   }
 
-  const handleAddRoute = async (values: any) => {
+  const fetchRemote = async (platformId: string): Promise<{ id: string; owned_by?: string }[]> => {
+    if (!platformId) return []
     try {
-      const backends = values.backends || []
-      await createRoute(detailProxy.id, {
-        virtual_model: values.virtual_model,
-        lb_strategy: values.lb_strategy || 'RoundRobin',
-        backends: backends.filter((b: any) => b.platform_id && b.model_id),
-      })
-      message.success(t(locale, 'createSuccess'))
-      setAddRouteModalOpen(false)
-      routeForm.resetFields()
-      openDetail(detailProxy)
-    } catch { message.error(t(locale, 'createFailed')) }
+      const data = await fetchRemoteModels(platformId)
+      return data.models || []
+    } catch {
+      message.error(t(locale, 'fetchRemoteModelsFailed'))
+      return []
+    }
   }
 
   const handleAddBackend = async (values: any) => {
     try {
-      await addBackend(currentRouteId, values)
+      let routeId = detailRoute?.id
+      if (!routeId) {
+        const route = await createRoute(detailProxy.id, { lb_strategy: 'RoundRobin', backends: [values] })
+        routeId = route.id
+        setDetailRoute(route)
+      } else {
+        await addBackend(routeId, values)
+      }
       message.success(t(locale, 'createSuccess'))
       setAddBackendModalOpen(false)
       backendForm.resetFields()
+      setSelectedBackendPlatformId('')
+      setRemoteModels([])
       openDetail(detailProxy)
     } catch { message.error(t(locale, 'createFailed')) }
-  }
-
-  const handleDeleteRoute = async (id: string) => {
-    try { await deleteRoute(id); message.success(t(locale, 'deleteSuccess')); openDetail(detailProxy) } catch {}
   }
 
   const handleDeleteBackend = async (id: string) => {
@@ -152,40 +149,21 @@ export default function Proxies() {
 
   const handleEditProxy = async (values: any) => {
     try {
-      const wasRunning = detailProxy.status === 'Running'
-      const tokenChanged = values.auth_token !== detailProxy.auth_token
-      // If token changed and proxy is running, stop it first
-      if (wasRunning && tokenChanged) {
-        await stopProxy(detailProxy.id)
-      }
       await updateProxy(detailProxy.id, values)
       message.success(t(locale, 'updateSuccess'))
       setEditProxyModalOpen(false)
-      // Refresh detail
-      const updated = { ...detailProxy, ...values }
-      setDetailProxy(updated)
       loadAll()
-      // If token changed and proxy was running, restart it
-      if (wasRunning && tokenChanged) {
-        try { await startProxy(detailProxy.id) } catch {}
-        loadAll()
-      }
+      openDetail({ ...detailProxy, ...values })
     } catch { message.error(t(locale, 'updateFailed')) }
   }
 
   const openEditProxy = () => {
-    editProxyForm.setFieldsValue({
-      name: detailProxy.name,
-      listen_port: detailProxy.listen_port,
-      protocols: detailProxy.protocols || ['OpenAI'],
-      auth_token: detailProxy.auth_token || '',
-    })
+    editProxyForm.setFieldsValue({ name: detailProxy.name })
     setEditProxyModalOpen(true)
   }
 
   const openUsageModal = (proxy: any) => {
     setUsageProxy(proxy)
-    setUsageRoute(null)
     setUsageModalOpen(true)
   }
 
@@ -199,19 +177,69 @@ export default function Proxies() {
     const preset = platformPresets.find(p => p.name === plat.name)
     return preset ? getPresetName(preset, locale) : plat.name
   }
-  const getModelName = (id: string) => models.find((m: any) => m.id === id)?.display_name || id
-  const getModelId = (id: string) => models.find((m: any) => m.id === id)?.model_id || id
 
-  // Build usage code snippets for a proxy or a specific route
-  const getUsageSnippets = (proxy: any, route?: any) => {
+  // Get platform name by id (for preset matching)
+  const getPlatformName = (id: string) => {
+    const plat = platforms.find((p: any) => p.id === id)
+    return plat?.name || ''
+  }
+
+  // Get capabilities for a model from presets
+  const getPresetCapabilities = (platformName: string, modelId: string): string[] => {
+    const presetModels = getModelsForPlatform(platformName)
+    const preset = presetModels.find(m => m.model_id === modelId)
+    return preset?.capabilities || []
+  }
+
+  const columns = [
+    {
+      title: t(locale, 'name'),
+      dataIndex: 'name',
+      key: 'name',
+      width: 160,
+      render: (v: string) => <Tag color="purple" style={{ fontSize: 13, padding: '2px 10px', borderRadius: 4, fontFamily: 'monospace' }}>{v}</Tag>,
+    },
+    {
+      title: t(locale, 'backends'),
+      key: 'backends',
+      render: (_: any, record: any) => {
+        const route = proxyRoutes[record.id]
+        const backends = route?.backends || []
+        if (backends.length === 0) return <Text type="secondary">-</Text>
+        return (
+          <Space size={4} wrap>
+            {backends.map((b: any) => (
+              <Tag key={b.id} style={{ borderRadius: 4, fontFamily: 'monospace', fontSize: 12 }}>{getPlatformDisplayName(b.platform_id)}·{b.model_id}</Tag>
+            ))}
+          </Space>
+        )
+      },
+    },
+    {
+      title: t(locale, 'action'),
+      key: 'action',
+      width: 120,
+      render: (_: any, record: any) => (
+        <Space>
+          <Button type="text" size="small" icon={<CodeOutlined />} onClick={() => openUsageModal(record)} />
+          <Button type="text" size="small" icon={<SettingOutlined />} onClick={() => openDetail(record)} />
+          <Popconfirm title={t(locale, 'deleteConfirm')} onConfirm={() => handleDelete(record.id)}>
+            <Button type="text" danger size="small" icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ]
+
+  // Build usage code snippets
+  const getUsageSnippets = (proxy: any) => {
     const port = adminPort
     const baseUrl = `http://localhost:${port}`
-    const token = proxy.auth_token
-    const modelName = route?.virtual_model || 'your-model-name'
-    const openaiUrl = `${baseUrl}/v1/chat/completions`
-    const anthropicUrl = `${baseUrl}/v1/messages`
+    const relevantKey = apiKeysList.find((k: any) => !k.proxy_id) || apiKeysList.find((k: any) => k.proxy_id === proxy.id)
+    const token = relevantKey?.key || ''
+    const modelName = proxy.name
 
-    const curlOpenai = `curl ${openaiUrl} \\
+    const curlOpenai = `curl ${baseUrl}/v1/chat/completions \\
   -H "Content-Type: application/json" \\
 ${token ? `  -H "Authorization: Bearer ${token}" \\
   ` : '  '}--data '{
@@ -220,7 +248,7 @@ ${token ? `  -H "Authorization: Bearer ${token}" \\
     "max_tokens": 100
   }'`
 
-    const curlAnthropic = `curl ${anthropicUrl} \\
+    const curlAnthropic = `curl ${baseUrl}/v1/messages \\
   -H "Content-Type: application/json" \\
   -H "anthropic-version: 2023-06-01" \\
 ${token ? `  -H "x-api-key: ${token}" \\
@@ -246,7 +274,7 @@ print(response.choices[0].message.content)`
     const pythonAnthropic = `import anthropic
 
 client = anthropic.Anthropic(
-    base_url="${anthropicUrl}",${token ? `\n    api_key="${token}",` : ''}
+    base_url="${baseUrl}/v1/messages",${token ? `\n    api_key="${token}",` : ''}
 )
 
 message = client.messages.create(
@@ -272,7 +300,7 @@ console.log(response.choices[0].message.content);`
     const nodeAnthropic = `import Anthropic from '@anthropic-ai/sdk';
 
 const client = new Anthropic({
-  baseURL: '${anthropicUrl}',${token ? `\n  apiKey: '${token}',` : ''}
+  baseURL: '${baseUrl}/v1/messages',${token ? `\n  apiKey: '${token}',` : ''}
 });
 
 const message = await client.messages.create({
@@ -282,139 +310,35 @@ const message = await client.messages.create({
 });
 console.log(message.content[0].text);`
 
-    const shellOpenai = `# OpenAI Compatible API
-OPENAI_BASE_URL="${baseUrl}/v1"${token ? `\nexport OPENAI_API_KEY="${token}"` : ''}
-
-# Using curl
-curl $OPENAI_BASE_URL/chat/completions \\
-  -H "Content-Type: application/json" \\
-${token ? `  -H "Authorization: Bearer $OPENAI_API_KEY" \\
-  ` : '  '}--data '{
-    "model": "${modelName}",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 100
-  }'`
-
-    const shellAnthropic = `# Anthropic Compatible API
-ANTHROPIC_BASE_URL="${anthropicUrl}"${token ? `\nexport ANTHROPIC_API_KEY="${token}"` : ''}
-
-# Using curl
-curl $ANTHROPIC_BASE_URL \\
-  -H "Content-Type: application/json" \\
-  -H "anthropic-version: 2023-06-01" \\
-${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
-  ` : '  '}--data '{
-    "model": "${modelName}",
-    "max_tokens": 100,
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'`
-
-    const snippets: { key: string; label: string; children: { key: string; label: string; code: string }[] }[] = []
-
-    if (proxy.protocols?.includes('OpenAI') || !proxy.protocols?.length) {
-      snippets.push({
-        key: 'curl',
-        label: t(locale, 'curlExample'),
-        children: [{ key: 'curl-openai', label: t(locale, 'openaiCompat'), code: curlOpenai }],
-      })
-      snippets.push({
-        key: 'python',
-        label: t(locale, 'pythonExample'),
-        children: [{ key: 'python-openai', label: t(locale, 'openaiCompat'), code: pythonOpenai }],
-      })
-      snippets.push({
-        key: 'node',
-        label: t(locale, 'nodeExample'),
-        children: [{ key: 'node-openai', label: t(locale, 'openaiCompat'), code: nodeOpenai }],
-      })
-      snippets.push({
-        key: 'shell',
-        label: t(locale, 'shellExample'),
-        children: [{ key: 'shell-openai', label: t(locale, 'openaiCompat'), code: shellOpenai }],
-      })
-    }
-
-    if (proxy.protocols?.includes('Anthropic')) {
-      const curlTab = snippets.find(s => s.key === 'curl')
-      if (curlTab) curlTab.children.push({ key: 'curl-anthropic', label: t(locale, 'anthropicCompat'), code: curlAnthropic })
-      else snippets.push({ key: 'curl', label: t(locale, 'curlExample'), children: [{ key: 'curl-anthropic', label: t(locale, 'anthropicCompat'), code: curlAnthropic }] })
-
-      const pythonTab = snippets.find(s => s.key === 'python')
-      if (pythonTab) pythonTab.children.push({ key: 'python-anthropic', label: t(locale, 'anthropicCompat'), code: pythonAnthropic })
-      else snippets.push({ key: 'python', label: t(locale, 'pythonExample'), children: [{ key: 'python-anthropic', label: t(locale, 'anthropicCompat'), code: pythonAnthropic }] })
-
-      const nodeTab = snippets.find(s => s.key === 'node')
-      if (nodeTab) nodeTab.children.push({ key: 'node-anthropic', label: t(locale, 'anthropicCompat'), code: nodeAnthropic })
-      else snippets.push({ key: 'node', label: t(locale, 'nodeExample'), children: [{ key: 'node-anthropic', label: t(locale, 'anthropicCompat'), code: nodeAnthropic }] })
-
-      const shellTab = snippets.find(s => s.key === 'shell')
-      if (shellTab) shellTab.children.push({ key: 'shell-anthropic', label: t(locale, 'anthropicCompat'), code: shellAnthropic })
-      else snippets.push({ key: 'shell', label: t(locale, 'shellExample'), children: [{ key: 'shell-anthropic', label: t(locale, 'anthropicCompat'), code: shellAnthropic }] })
-    }
-
-    return snippets
+    return [
+      {
+        key: 'curl', label: 'cURL',
+        children: [
+          { key: 'openai', label: 'OpenAI', code: curlOpenai },
+          { key: 'anthropic', label: 'Anthropic', code: curlAnthropic },
+        ],
+      },
+      {
+        key: 'python', label: 'Python',
+        children: [
+          { key: 'openai', label: 'OpenAI', code: pythonOpenai },
+          { key: 'anthropic', label: 'Anthropic', code: pythonAnthropic },
+        ],
+      },
+      {
+        key: 'node', label: 'Node.js',
+        children: [
+          { key: 'openai', label: 'OpenAI', code: nodeOpenai },
+          { key: 'anthropic', label: 'Anthropic', code: nodeAnthropic },
+        ],
+      },
+    ]
   }
-
-  // Open usage modal for a specific route
-  const openRouteUsageModal = (route: any) => {
-    setUsageProxy(detailProxy)
-    setUsageRoute(route)
-    setUsageModalOpen(true)
-  }
-
-  const columns = [
-    {
-      title: t(locale, 'name'),
-      dataIndex: 'name',
-      key: 'name',
-      render: (v: string) => <Text strong>{v}</Text>,
-    },
-    {
-      title: t(locale, 'port'),
-      dataIndex: 'listen_port',
-      key: 'listen_port',
-      render: (v: number) => <Tag style={{ fontFamily: 'monospace', borderRadius: 4 }}>{v}</Tag>,
-    },
-    {
-      title: t(locale, 'protocols'),
-      dataIndex: 'protocols',
-      key: 'protocols',
-      render: (v: string[]) => (v || []).map((p: string) => <Tag key={p} style={{ borderRadius: 4, fontSize: 11 }}>{p}</Tag>),
-    },
-    {
-      title: t(locale, 'status'),
-      dataIndex: 'status',
-      key: 'status',
-      render: (v: string) => (
-        <Tag color={v === 'Running' ? 'success' : 'default'} style={{ borderRadius: 12, padding: '0 12px' }}>
-          {v === 'Running' ? t(locale, 'running') : t(locale, 'stopped')}
-        </Tag>
-      ),
-    },
-    {
-      title: t(locale, 'action'),
-      key: 'action',
-      width: 160,
-      render: (_: any, record: any) => (
-        <Space>
-          {record.status === 'Running' ? (
-            <Button type="text" size="small" icon={<PauseCircleOutlined />} onClick={() => handleStop(record.id)} />
-          ) : (
-            <Button type="text" size="small" icon={<PlayCircleOutlined />} style={{ color: '#52c41a' }} onClick={() => handleStart(record.id)} />
-          )}
-          <Button type="text" size="small" icon={<SettingOutlined />} onClick={() => openDetail(record)} />
-          <Popconfirm title={t(locale, 'deleteConfirm')} onConfirm={() => handleDelete(record.id)}>
-            <Button type="text" danger size="small" icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ]
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text type="secondary">{t(locale, 'proxyDesc')}</Text>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Title level={5} style={{ margin: 0 }}>{t(locale, 'proxies')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateModalOpen(true)}>{t(locale, 'newProxy')}</Button>
       </div>
 
@@ -422,40 +346,133 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
         <Table columns={columns} dataSource={proxies} rowKey="id" loading={loading} pagination={{ pageSize: 20, showSizeChanger: false }} />
       </Card>
 
-      {/* Create Proxy */}
-      <Modal title={t(locale, 'newProxy')} open={createModalOpen} onCancel={() => setCreateModalOpen(false)} onOk={() => form.submit()}>
+      {/* Create Proxy (Virtual Model) */}
+      <Modal title={t(locale, 'newProxy')} open={createModalOpen} onCancel={() => { setCreateModalOpen(false); setCreateRemoteModels({}); setCreateFetching({}) }} onOk={() => form.submit()} width={680}>
         <Form form={form} layout="vertical" onFinish={handleCreate}>
-          <Form.Item name="name" label={t(locale, 'proxyName')} rules={[{ required: true }]}>
-            <Input />
+          <Form.Item name="name" label={t(locale, 'proxyName')} rules={[{ required: true }]}
+            extra={<Text type="secondary" style={{ fontSize: 12 }}>{t(locale, 'virtualModelPlaceholder')}</Text>}>
+            <Input placeholder="qc480" />
           </Form.Item>
-          <Form.Item name="listen_port" label={t(locale, 'listenPort')} rules={[{ required: true }]}>
-            <InputNumber min={1024} max={65535} style={{ width: '100%' }} placeholder="10888" />
+          <Form.Item name="lb_strategy" label={t(locale, 'lbStrategy')} initialValue="RoundRobin">
+            <Select options={LB_OPTIONS} />
           </Form.Item>
-          <Form.Item name="protocols" label={t(locale, 'protocols')} initialValue={['OpenAI']}>
-            <Select mode="multiple" options={PROTOCOL_OPTIONS} />
-          </Form.Item>
-          <Form.Item name="auth_token" label={t(locale, 'authToken')}>
-            <Space.Compact style={{ width: '100%' }}>
-              <Input placeholder={t(locale, 'authTokenPlaceholder')} style={{ flex: 1 }} />
-              <Button icon={<KeyOutlined />} onClick={() => form.setFieldsValue({ auth_token: generateAgToken() })}>
-                {t(locale, 'generateToken')}
-              </Button>
-            </Space.Compact>
-          </Form.Item>
+          <Form.List name="backends" initialValue={[{}]} >
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name, ...rest }) => (
+                  <div key={key} style={{ border: '1px solid var(--ant-color-border-secondary)', borderRadius: 8, padding: 12, marginBottom: 8 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                      <Text strong style={{ fontSize: 12 }}>{t(locale, 'backendModel')} #{name + 1}</Text>
+                      {name > 0 && <Button danger type="text" size="small" onClick={() => remove(name)}>{t(locale, 'delete')}</Button>}
+                    </div>
+                    <Row gutter={8}>
+                      <Col span={12}>
+                        <Form.Item {...rest} name={[name, 'platform_id']} style={{ marginBottom: 8 }} rules={[{ required: true }]}>
+                          <Select
+                            placeholder={t(locale, 'selectPlatform')}
+                            size="small"
+                            options={platforms.map((p: any) => {
+                              const preset = platformPresets.find(pr => pr.name === p.name)
+                              return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
+                            })}
+                            onChange={async (value: string) => {
+                              form.setFieldsValue({ backends: form.getFieldValue('backends')?.map((b: any, i: number) => i === name ? { ...b, model_id: undefined, capabilities: undefined } : b) })
+                              setCreateRemoteModels(prev => ({ ...prev, [name]: [] }))
+                              // Auto-fetch remote models
+                              setCreateFetching(prev => ({ ...prev, [name]: true }))
+                              const models = await fetchRemote(value)
+                              setCreateRemoteModels(prev => ({ ...prev, [name]: models }))
+                              setCreateFetching(prev => ({ ...prev, [name]: false }))
+                            }}
+                          />
+                        </Form.Item>
+                      </Col>
+                      <Col span={12}>
+                        <Form.Item {...rest} name={[name, 'model_id']} style={{ marginBottom: 8 }} rules={[{ required: true }]}>
+                          <Select
+                            placeholder={createFetching[name] ? t(locale, 'loading') : t(locale, 'selectModel')}
+                            size="small"
+                            showSearch
+                            optionFilterProp="label"
+                            notFoundContent={createFetching[name] ? <LoadingOutlined /> : undefined}
+                            options={
+                              (() => {
+                                const backends = form.getFieldValue('backends') || []
+                                const pid = backends[name]?.platform_id
+                                const pName = getPlatformName(pid)
+                                // Combine remote models and preset models
+                                const remote = createRemoteModels[name] || []
+                                const presetMs = getModelsForPlatform(pName)
+                                const remoteIds = new Set(remote.map(m => m.id))
+                                const presetOnly = presetMs.filter(m => !remoteIds.has(m.model_id))
+                                const remoteOpts = remote.map(m => {
+                                  const pm = presetMs.find(p => p.model_id === m.id)
+                                  const display = pm ? `${locale === 'zh' ? pm.display_name_zh : pm.display_name} (${m.id})` : m.id
+                                  return { value: m.id, label: display }
+                                })
+                                const presetOpts = presetOnly.map(m => ({
+                                  value: m.model_id,
+                                  label: `${locale === 'zh' ? m.display_name_zh : m.display_name} (${m.model_id})`,
+                                }))
+                                return [...remoteOpts, ...presetOpts]
+                              })()
+                            }
+                            onChange={(value: string) => {
+                              const backends = form.getFieldValue('backends') || []
+                              const pid = backends[name]?.platform_id
+                              const pName = getPlatformName(pid)
+                              const caps = getPresetCapabilities(pName, value)
+                              if (caps.length > 0) {
+                                form.setFieldsValue({ backends: form.getFieldValue('backends')?.map((b: any, i: number) => i === name ? { ...b, capabilities: caps } : b) })
+                              }
+                            }}
+                          />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                    <Row gutter={8}>
+                      <Col span={8}>
+                        <Form.Item {...rest} name={[name, 'weight']} initialValue={1} style={{ marginBottom: 0 }}>
+                          <InputNumber min={1} placeholder={t(locale, 'weight')} size="small" style={{ width: '100%' }} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item {...rest} name={[name, 'priority']} initialValue={0} style={{ marginBottom: 0 }}>
+                          <InputNumber min={0} placeholder={t(locale, 'priority')} size="small" style={{ width: '100%' }} />
+                        </Form.Item>
+                      </Col>
+                      <Col span={8}>
+                        <Form.Item {...rest} name={[name, 'capabilities']} style={{ marginBottom: 0 }}>
+                          <Select
+                            mode="multiple"
+                            size="small"
+                            placeholder={t(locale, 'capabilities')}
+                            style={{ width: '100%' }}
+                            options={CAPABILITY_OPTIONS.map(c => ({ value: c.value, label: locale === 'zh' ? c.labelZh : c.labelEn }))}
+                          />
+                        </Form.Item>
+                      </Col>
+                    </Row>
+                  </div>
+                ))}
+                <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>{t(locale, 'addBackendModel')}</Button>
+              </>
+            )}
+          </Form.List>
         </Form>
       </Modal>
 
       {/* Usage Code Modal */}
       <Modal
-        title={`${t(locale, 'usageCode')} - ${usageProxy?.name || ''}${usageRoute ? ` / ${usageRoute.virtual_model}` : ''}`}
+        title={`${t(locale, 'usageCode')} - ${usageProxy?.name || ''}`}
         open={usageModalOpen}
         onCancel={() => setUsageModalOpen(false)}
         footer={null}
         width={720}
       >
         {usageProxy && (
-          <Tabs
-            items={getUsageSnippets(usageProxy, usageRoute || undefined).map(lang => ({
+          <div>
+            <Tabs items={getUsageSnippets(usageProxy).map(lang => ({
               key: lang.key,
               label: lang.label,
               children: (
@@ -492,82 +509,56 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
                   }))}
                 />
               ),
-            }))}
-          />
+            }))} />
+          </div>
         )}
       </Modal>
 
       {/* Proxy Detail Drawer */}
-      <Drawer title={`${t(locale, 'proxyConfig')} - ${detailProxy?.name || ''}`} open={!!detailProxy} onClose={() => setDetailProxy(null)} width={720}>
+      <Drawer title={`${t(locale, 'proxyConfig')} - ${detailProxy?.name || ''}`} open={!!detailProxy} onClose={() => { setDetailProxy(null); setDetailRoute(null) }} width={720}>
         {detailProxy && (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <Text strong style={{ fontSize: 14 }}>{t(locale, 'editProxyInfo')}</Text>
-              <Button size="small" icon={<EditOutlined />} onClick={openEditProxy}>{t(locale, 'edit')}</Button>
+              <Button size="small" onClick={openEditProxy}>{t(locale, 'edit')}</Button>
             </div>
-            <Descriptions column={2} size="small" bordered>
-              <Descriptions.Item label={t(locale, 'name')}>{detailProxy.name}</Descriptions.Item>
-              <Descriptions.Item label={t(locale, 'port')}>{detailProxy.listen_port}</Descriptions.Item>
-              <Descriptions.Item label={t(locale, 'protocols')}>{(detailProxy.protocols || []).map((p: string) => <Tag key={p} style={{ borderRadius: 4 }}>{p}</Tag>)}</Descriptions.Item>
-              <Descriptions.Item label={t(locale, 'status')}>
-                <Tag color={detailProxy.status === 'Running' ? 'success' : 'default'}>{detailProxy.status}</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label={t(locale, 'authToken')} span={2}>
-                {detailProxy.auth_token ? (
-                  <Space>
-                    <Text code style={{ fontSize: 12 }}>{tokenVisible ? detailProxy.auth_token : '••••••••••••'}</Text>
-                    <Button type="text" size="small" icon={tokenVisible ? <EyeInvisibleOutlined /> : <EyeOutlined />} onClick={() => setTokenVisible(!tokenVisible)} />
-                    <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyText(detailProxy.auth_token)} />
-                  </Space>
-                ) : (
-                  <Text type="secondary">-</Text>
-                )}
+            <Descriptions column={1} size="small" bordered>
+              <Descriptions.Item label={t(locale, 'name')}>
+                <Tag color="purple" style={{ fontSize: 13, padding: '2px 10px', borderRadius: 4, fontFamily: 'monospace' }}>{detailProxy.name}</Tag>
               </Descriptions.Item>
             </Descriptions>
 
             <Divider orientation="left" style={{ marginTop: 20 }}>
-              {t(locale, 'virtualModels')}
-              <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => setAddRouteModalOpen(true)}>{t(locale, 'add')}</Button>
+              {t(locale, 'backendModels')}
+              <Button type="link" size="small" icon={<PlusOutlined />} onClick={() => setAddBackendModalOpen(true)}>{t(locale, 'add')}</Button>
             </Divider>
 
-            {detailRoutes.length === 0 ? (
-              <Text type="secondary">{t(locale, 'noVirtualModels')}</Text>
+            {!detailRoute || !detailRoute.backends || detailRoute.backends.length === 0 ? (
+              <Text type="secondary">{t(locale, 'noBackendModels')}</Text>
             ) : (
-              detailRoutes.map((route: any) => (
-                <Card key={route.id} size="small" style={{ marginBottom: 12, borderRadius: 8 }} styles={{ body: { padding: '12px 16px' } }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                    <div>
-                      <Tag color="purple" style={{ fontSize: 13, padding: '2px 10px', borderRadius: 4 }}>{route.virtual_model}</Tag>
-                      <Tag style={{ borderRadius: 4 }}>{route.lb_strategy}</Tag>
-                    </div>
-                    <Space>
-                      <Button size="small" icon={<CodeOutlined />} style={{ color: '#1677ff' }} onClick={() => openRouteUsageModal(route)}>{t(locale, 'usageCode')}</Button>
-                      <Button size="small" icon={<PlusOutlined />} onClick={() => { setCurrentRouteId(route.id); setAddBackendModalOpen(true) }}>{t(locale, 'addBackendModel')}</Button>
-                      <Popconfirm title={t(locale, 'deleteRoute')} onConfirm={() => handleDeleteRoute(route.id)}>
-                        <Button danger type="text" size="small" icon={<DeleteOutlined />} />
-                      </Popconfirm>
-                    </Space>
-                  </div>
-                  <Table
-                    size="small" pagination={false}
-                    dataSource={route.backends || []} rowKey="id"
-                    columns={[
-                      { title: t(locale, 'platforms').slice(0,2), render: (_: any, r: any) => getPlatformDisplayName(r.platform_id) },
-                      { title: t(locale, 'models').slice(0,2), render: (_: any, r: any) => <Tag style={{ borderRadius: 4, fontFamily: 'monospace' }}>{getModelId(r.model_id)}</Tag> },
-                      { title: t(locale, 'weight'), dataIndex: 'weight', width: 60 },
-                      { title: t(locale, 'priority'), dataIndex: 'priority', width: 60 },
-                      {
-                        title: '', width: 40,
-                        render: (_: any, r: any) => (
-                          <Popconfirm title={t(locale, 'deleteBackend')} onConfirm={() => handleDeleteBackend(r.id)}>
-                            <Button danger type="text" size="small" icon={<DeleteOutlined />} />
-                          </Popconfirm>
-                        ),
-                      },
-                    ]}
-                  />
-                </Card>
-              ))
+              <Card size="small" style={{ borderRadius: 8 }} styles={{ body: { padding: '12px 16px' } }}>
+                <div style={{ marginBottom: 8 }}>
+                  <Tag style={{ borderRadius: 4 }}>{detailRoute.lb_strategy}</Tag>
+                </div>
+                <Table
+                  size="small" pagination={false}
+                  dataSource={detailRoute.backends || []} rowKey="id"
+                  columns={[
+                    { title: t(locale, 'platforms').slice(0, 2), render: (_: any, r: any) => getPlatformDisplayName(r.platform_id) },
+                    { title: t(locale, 'models').slice(0, 2), render: (_: any, r: any) => <Tag style={{ borderRadius: 4, fontFamily: 'monospace' }}>{getPlatformDisplayName(r.platform_id)}·{r.model_id}</Tag> },
+                    { title: t(locale, 'weight'), dataIndex: 'weight', width: 60 },
+                    { title: t(locale, 'priority'), dataIndex: 'priority', width: 60 },
+                    {
+                      title: '', width: 40,
+                      render: (_: any, r: any) => (
+                        <Popconfirm title={t(locale, 'deleteBackend')} onConfirm={() => handleDeleteBackend(r.id)}>
+                          <Button danger type="text" size="small" icon={<DeleteOutlined />} />
+                        </Popconfirm>
+                      ),
+                    },
+                  ]}
+                />
+              </Card>
             )}
           </div>
         )}
@@ -579,91 +570,11 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
           <Form.Item name="name" label={t(locale, 'proxyName')} rules={[{ required: true }]}>
             <Input />
           </Form.Item>
-          <Form.Item name="listen_port" label={t(locale, 'listenPort')} rules={[{ required: true }]}>
-            <InputNumber min={1024} max={65535} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item name="protocols" label={t(locale, 'protocols')} rules={[{ required: true }]}>
-            <Select mode="multiple" options={PROTOCOL_OPTIONS} />
-          </Form.Item>
-          <Form.Item name="auth_token" label={t(locale, 'authToken')}>
-            <Space.Compact style={{ width: '100%' }}>
-              <Input placeholder={t(locale, 'authTokenPlaceholder')} style={{ flex: 1 }} />
-              <Button icon={<KeyOutlined />} onClick={() => editProxyForm.setFieldsValue({ auth_token: generateAgToken() })}>
-                {t(locale, 'generateToken')}
-              </Button>
-            </Space.Compact>
-          </Form.Item>
-        </Form>
-      </Modal>
-
-      {/* Add Route */}
-      <Modal title={t(locale, 'addVirtualModel')} open={addRouteModalOpen} onCancel={() => setAddRouteModalOpen(false)} onOk={() => routeForm.submit()} width={600}>
-        <Form form={routeForm} layout="vertical" onFinish={handleAddRoute}>
-          <Form.Item name="virtual_model" label={t(locale, 'virtualModel')} rules={[{ required: true }]}
-            extra={<Text type="secondary" style={{ fontSize: 12 }}>{t(locale, 'virtualModelPlaceholder')}</Text>}>
-            <Input placeholder="gpt-4" />
-          </Form.Item>
-          <Form.Item name="lb_strategy" label={t(locale, 'lbStrategy')} initialValue="RoundRobin">
-            <Select options={LB_OPTIONS} />
-          </Form.Item>
-          <Form.List name="backends" initialValue={[{}]} >
-            {(fields, { add, remove }) => (
-              <>
-                {fields.map(({ key, name, ...rest }) => (
-                  <Row key={key} gutter={8} align="middle" style={{ marginBottom: 8 }}>
-                    <Col span={8}>
-                      <Form.Item {...rest} name={[name, 'platform_id']} style={{ marginBottom: 0 }}>
-                        <Select placeholder={t(locale, 'selectPlatform')} options={platforms.map((p: any) => {
-                          const preset = platformPresets.find(pr => pr.name === p.name)
-                          return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
-                        })} size="small" onChange={() => {
-                          // Clear model selection when platform changes
-                          routeForm.setFieldsValue({ backends: routeForm.getFieldValue('backends')?.map((b: any, i: number) => i === name ? { ...b, model_id: undefined } : b) })
-                        }} />
-                      </Form.Item>
-                    </Col>
-                    <Col span={7}>
-                      <Form.Item {...rest} name={[name, 'platform_id']} noStyle>
-                        <Input type="hidden" />
-                      </Form.Item>
-                      <Form.Item {...rest} name={[name, 'model_id']} style={{ marginBottom: 0 }}>
-                        <Select placeholder={t(locale, 'selectModel')} size="small" showSearch optionFilterProp="label"
-                          options={
-                            (() => {
-                              const backends = routeForm.getFieldValue('backends') || []
-                              const pid = backends[name]?.platform_id
-                              return models
-                                .filter((m: any) => !pid || m.platform_id === pid)
-                                .map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))
-                            })()
-                          }
-                        />
-                      </Form.Item>
-                    </Col>
-                    <Col span={4}>
-                      <Form.Item {...rest} name={[name, 'weight']} initialValue={1} style={{ marginBottom: 0 }}>
-                        <InputNumber min={1} placeholder={t(locale, 'weight')} size="small" style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col span={3}>
-                      <Form.Item {...rest} name={[name, 'priority']} initialValue={0} style={{ marginBottom: 0 }}>
-                        <InputNumber min={0} placeholder={t(locale, 'priority')} size="small" style={{ width: '100%' }} />
-                      </Form.Item>
-                    </Col>
-                    <Col span={2}>
-                      {name > 0 && <Button danger type="text" size="small" onClick={() => remove(name)}>-</Button>}
-                    </Col>
-                  </Row>
-                ))}
-                <Button type="dashed" onClick={() => add()} block icon={<PlusOutlined />}>{t(locale, 'addBackendModel')}</Button>
-              </>
-            )}
-          </Form.List>
         </Form>
       </Modal>
 
       {/* Add Backend */}
-      <Modal title={t(locale, 'addBackendModel')} open={addBackendModalOpen} onCancel={() => { setAddBackendModalOpen(false); setSelectedBackendPlatformId('') }} onOk={() => backendForm.submit()}>
+      <Modal title={t(locale, 'addBackendModel')} open={addBackendModalOpen} onCancel={() => { setAddBackendModalOpen(false); setSelectedBackendPlatformId(''); setRemoteModels([]) }} onOk={() => backendForm.submit()}>
         <Form form={backendForm} layout="vertical" onFinish={handleAddBackend}>
           <Form.Item name="platform_id" label={t(locale, 'platforms')} rules={[{ required: true }]}>
             <Select
@@ -671,18 +582,55 @@ ${token ? `  -H "x-api-key: $ANTHROPIC_API_KEY" \\
                 const preset = platformPresets.find(pr => pr.name === p.name)
                 return { value: p.id, label: preset ? getPresetName(preset, locale) : p.name }
               })}
-              onChange={(value: string) => {
+              onChange={async (value: string) => {
                 setSelectedBackendPlatformId(value)
-                backendForm.setFieldsValue({ model_id: undefined })
+                backendForm.setFieldsValue({ model_id: undefined, capabilities: undefined })
+                setRemoteModels([])
+                setFetchingRemote(true)
+                const models = await fetchRemote(value)
+                setRemoteModels(models)
+                setFetchingRemote(false)
               }}
             />
           </Form.Item>
           <Form.Item name="model_id" label={t(locale, 'models')} rules={[{ required: true }]}>
             <Select
-              options={models
-                .filter((m: any) => !selectedBackendPlatformId || m.platform_id === selectedBackendPlatformId)
-                .map((m: any) => ({ value: m.id, label: `${m.display_name} (${m.model_id})` }))}
-              showSearch optionFilterProp="label"
+              showSearch
+              optionFilterProp="label"
+              notFoundContent={fetchingRemote ? <LoadingOutlined /> : undefined}
+              placeholder={fetchingRemote ? t(locale, 'loading') : t(locale, 'selectModel')}
+              options={
+                (() => {
+                  const pName = getPlatformName(selectedBackendPlatformId)
+                  const presetMs = getModelsForPlatform(pName)
+                  const remoteIds = new Set(remoteModels.map(m => m.id))
+                  const presetOnly = presetMs.filter(m => !remoteIds.has(m.model_id))
+                  const remoteOpts = remoteModels.map(m => {
+                    const pm = presetMs.find(p => p.model_id === m.id)
+                    const display = pm ? `${locale === 'zh' ? pm.display_name_zh : pm.display_name} (${m.id})` : m.id
+                    return { value: m.id, label: display }
+                  })
+                  const presetOpts = presetOnly.map(m => ({
+                    value: m.model_id,
+                    label: `${locale === 'zh' ? m.display_name_zh : m.display_name} (${m.model_id})`,
+                  }))
+                  return [...remoteOpts, ...presetOpts]
+                })()
+              }
+              onChange={(value: string) => {
+                const pName = getPlatformName(selectedBackendPlatformId)
+                const caps = getPresetCapabilities(pName, value)
+                if (caps.length > 0) {
+                  backendForm.setFieldsValue({ capabilities: caps })
+                }
+              }}
+            />
+          </Form.Item>
+          <Form.Item name="capabilities" label={t(locale, 'capabilities')}>
+            <Select
+              mode="multiple"
+              placeholder={t(locale, 'selectCapabilities')}
+              options={CAPABILITY_OPTIONS.map(c => ({ value: c.value, label: locale === 'zh' ? c.labelZh : c.labelEn }))}
             />
           </Form.Item>
           <Form.Item name="weight" label={t(locale, 'weight')} initialValue={1}>

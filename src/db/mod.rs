@@ -4,6 +4,7 @@ pub mod model;
 pub mod proxy;
 pub mod route;
 pub mod stats;
+pub mod api_key;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

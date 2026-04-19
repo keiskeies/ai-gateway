@@ -7,15 +7,14 @@ pub enum ModelStatus {
     Disabled,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Hash, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub enum Capability {
-    Chat,
-    Completion,
-    Embedding,
+    Reasoning,
     Vision,
-    FunctionCall,
-    Streaming,
+    Embedding,
+    Rerank,
+    Tool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

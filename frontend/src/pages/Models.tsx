@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Modal, Form, Input, InputNumber, Select, Tag, Space, message, Popconfirm, Card, Typography, Tooltip } from 'antd'
-import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined } from '@ant-design/icons'
-import { listModels, createModel, updateModel, deleteModel, listPlatforms, testModelConnection } from '../api'
+import { Table, Button, Modal, Form, Input, InputNumber, Select, Tag, Space, message, Popconfirm, Card, Typography, Tooltip, Divider } from 'antd'
+import { PlusOutlined, DeleteOutlined, EditOutlined, SearchOutlined, ApiOutlined, CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, CloudDownloadOutlined } from '@ant-design/icons'
+import { listModels, createModel, updateModel, deleteModel, listPlatforms, testModelConnection, fetchRemoteModels } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
-import { getModelsForPlatform, getModelDisplayName, getPresetName, platformPresets } from '../presets'
+import { getModelsForPlatform, getModelDisplayName, getPresetName, platformPresets, CAPABILITY_OPTIONS, getCapabilityLabel, getCapabilityColor } from '../presets'
 
-const { Text } = Typography
+const { Text, Title } = Typography
 
 export default function Models() {
   const [models, setModels] = useState<any[]>([])
@@ -20,6 +20,9 @@ export default function Models() {
   const [customModelId, setCustomModelId] = useState('')
   const [testingId, setTestingId] = useState<string | null>(null)
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; latency_ms: number; message: string }>>({})
+  const [remoteModels, setRemoteModels] = useState<{ id: string; owned_by: string }[]>([])
+  const [fetchingRemote, setFetchingRemote] = useState(false)
+  const [showRemoteModels, setShowRemoteModels] = useState(false)
   const { locale } = useAppContext()
 
   useEffect(() => { loadModels(); loadPlatforms() }, [])
@@ -58,6 +61,7 @@ export default function Models() {
       display_name: record.display_name,
       max_tokens: record.max_tokens,
       context_window: record.context_window,
+      capabilities: record.capabilities || [],
     })
     setModalOpen(true)
   }
@@ -67,6 +71,8 @@ export default function Models() {
     setSelectedPlatformName(plat?.name || '')
     setUseCustomModelId(false)
     setCustomModelId('')
+    setRemoteModels([])
+    setShowRemoteModels(false)
     form.setFieldsValue({ model_id: undefined, display_name: undefined })
   }
 
@@ -79,8 +85,56 @@ export default function Models() {
         display_name: getModelDisplayName(preset, locale),
         max_tokens: preset.max_tokens,
         context_window: preset.context_window,
+        capabilities: preset.capabilities || [],
       })
     }
+  }
+
+  const handleFetchRemoteModels = async () => {
+    const platformId = form.getFieldValue('platform_id')
+    if (!platformId) {
+      message.warning(t(locale, 'selectPlatform'))
+      return
+    }
+    setFetchingRemote(true)
+    try {
+      const data = await fetchRemoteModels(platformId)
+      const models = data.models || []
+      if (models.length === 0) {
+        message.info(t(locale, 'noRemoteModels'))
+      }
+      setRemoteModels(models)
+      setShowRemoteModels(true)
+    } catch (e: any) {
+      message.error(t(locale, 'fetchRemoteModelsFailed'))
+    }
+    setFetchingRemote(false)
+  }
+
+  const handleRemoteModelSelect = (modelId: string) => {
+    // Try to find preset info for this model
+    const presetModels = getModelsForPlatform(selectedPlatformName)
+    const preset = presetModels.find(m => m.model_id === modelId)
+    if (preset) {
+      form.setFieldsValue({
+        model_id: preset.model_id,
+        display_name: getModelDisplayName(preset, locale),
+        max_tokens: preset.max_tokens,
+        context_window: preset.context_window,
+        capabilities: preset.capabilities || [],
+      })
+    } else {
+      // No preset — use model_id as display name and reasonable defaults
+      form.setFieldsValue({
+        model_id: modelId,
+        display_name: modelId,
+        max_tokens: 4096,
+        context_window: 8192,
+        capabilities: [],
+      })
+    }
+    setUseCustomModelId(false)
+    setCustomModelId('')
   }
 
   const handleSubmit = async (values: any) => {
@@ -139,34 +193,47 @@ export default function Models() {
 
   const columns = [
     {
-      title: t(locale, 'displayName'),
-      dataIndex: 'display_name',
-      key: 'display_name',
-      render: (v: string) => <Text strong>{v}</Text>,
-    },
-    {
-      title: t(locale, 'modelId'),
-      dataIndex: 'model_id',
-      key: 'model_id',
-      render: (v: string) => <Tag style={{ fontFamily: 'monospace' }}>{v}</Tag>,
-    },
-    {
-      title: t(locale, 'belongPlatform'),
-      dataIndex: 'platform_id',
-      key: 'platform_id',
-      render: (v: string) => {
-        const plat = platforms.find((p: any) => p.id === v)
-        if (!plat) return v
-        const preset = platformPresets.find(p => p.name === plat.name)
-        return preset ? getPresetName(preset, locale) : plat.name
+      title: t(locale, 'modelInfo'),
+      key: 'model_info',
+      width: 280,
+      render: (_: any, record: any) => {
+        const plat = platforms.find((p: any) => p.id === record.platform_id)
+        const platDisplay = plat ? (platformPresets.find(p => p.name === plat.name) ? getPresetName(platformPresets.find(p => p.name === plat.name)!, locale) : plat.name) : ''
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '4px 0' }}>
+            <Text strong style={{ fontSize: 14 }}>{record.display_name}</Text>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Tag style={{ fontFamily: 'monospace', fontSize: 11, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{record.model_id}</Tag>
+              {platDisplay && <Text type="secondary" style={{ fontSize: 11 }}>{platDisplay}</Text>}
+            </div>
+          </div>
+        )
       },
     },
-    { title: t(locale, 'maxTokens'), dataIndex: 'max_tokens', key: 'max_tokens' },
-    { title: t(locale, 'contextWindow'), dataIndex: 'context_window', key: 'context_window' },
+    { title: t(locale, 'maxTokens'), dataIndex: 'max_tokens', key: 'max_tokens', width: 100 },
+    { title: t(locale, 'contextWindow'), dataIndex: 'context_window', key: 'context_window', width: 110 },
+    {
+      title: t(locale, 'capabilities'),
+      dataIndex: 'capabilities',
+      key: 'capabilities',
+      width: 180,
+      render: (caps: string[]) => {
+        if (!caps || caps.length === 0) return <Text type="secondary">-</Text>
+        return (
+          <Space size={4} wrap>
+            {caps.map((c: string) => (
+              <Tag key={c} color={getCapabilityColor(c)} style={{ fontSize: 11, borderRadius: 4 }}>
+                {getCapabilityLabel(c, locale)}
+              </Tag>
+            ))}
+          </Space>
+        )
+      },
+    },
     {
       title: t(locale, 'action'),
       key: 'action',
-      width: 200,
+      width: 100,
       render: (_: any, record: any) => (
         <Space>
           <Tooltip title={testResults[record.id]?.success ? `${t(locale, 'connectionSuccess')} (${testResults[record.id].latency_ms}ms)` : testResults[record.id] ? `${t(locale, 'connectionFailed')}: ${testResults[record.id].message}` : t(locale, 'testConnection')}>
@@ -194,8 +261,8 @@ export default function Models() {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text type="secondary">{t(locale, 'modelDesc')}</Text>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Title level={5} style={{ margin: 0 }}>{t(locale, 'models')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t(locale, 'addModel')}</Button>
       </div>
 
@@ -253,6 +320,45 @@ export default function Models() {
                 </Button>
               </Space.Compact>
             )}
+
+            {/* Fetch remote models from platform */}
+            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Button
+                size="small"
+                icon={<CloudDownloadOutlined />}
+                onClick={handleFetchRemoteModels}
+                loading={fetchingRemote}
+                disabled={!form.getFieldValue('platform_id')}
+              >
+                {t(locale, 'fetchFromPlatform')}
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setUseCustomModelId(true)}
+              >
+                {t(locale, 'customInput')}
+              </Button>
+            </div>
+
+            {/* Remote models list */}
+            {showRemoteModels && remoteModels.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ marginBottom: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {t(locale, 'remoteModelsCount', String(remoteModels.length))}
+                  </Text>
+                </div>
+                <Select
+                  showSearch
+                  placeholder={t(locale, 'selectRemoteModel')}
+                  style={{ width: '100%' }}
+                  options={remoteModels.map(m => ({ value: m.id, label: m.id }))}
+                  filterOption={(input, option) => (option?.label as string)?.toLowerCase().includes(input.toLowerCase())}
+                  onSelect={handleRemoteModelSelect}
+                  allowClear
+                />
+              </div>
+            )}
           </Form.Item>
 
           <Form.Item name="display_name" label={t(locale, 'displayName')} rules={[{ required: true }]}>
@@ -263,6 +369,17 @@ export default function Models() {
           </Form.Item>
           <Form.Item name="context_window" label={t(locale, 'contextWindow')} initialValue={8192}>
             <InputNumber min={1} style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="capabilities" label={t(locale, 'capabilities')} initialValue={[]}>
+            <Select
+              mode="multiple"
+              placeholder={t(locale, 'selectCapabilities')}
+              options={CAPABILITY_OPTIONS.map(c => ({
+                value: c.value,
+                label: locale === 'zh' ? c.labelZh : c.labelEn,
+              }))}
+              optionFilterProp="label"
+            />
           </Form.Item>
         </Form>
       </Modal>

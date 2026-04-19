@@ -34,6 +34,7 @@ async fn main() -> std::io::Result<()> {
 
     let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
     let selector = Arc::new(BackendSelector::new());
+
     let proxy_state = Arc::new(ProxyState {
         db: db_pool.clone(),
         config: app_config.clone(),

@@ -73,6 +73,7 @@ export const createPlatform = (data: any) => api.post('/platforms', data).then(r
 export const updatePlatform = (id: string, data: any) => api.put(`/platforms/${id}`, data).then(r => r.data)
 export const deletePlatform = (id: string) => api.delete(`/platforms/${id}`)
 export const listPresets = () => api.get('/platforms/presets').then(r => r.data)
+export const fetchRemoteModels = (id: string) => api.get(`/platforms/${id}/remote-models`).then(r => r.data)
 
 // Models
 export const listModels = () => api.get('/models').then(r => r.data)
@@ -87,8 +88,6 @@ export const getProxy = (id: string) => api.get(`/proxies/${id}`).then(r => r.da
 export const createProxy = (data: any) => api.post('/proxies', data).then(r => r.data)
 export const updateProxy = (id: string, data: any) => api.put(`/proxies/${id}`, data).then(r => r.data)
 export const deleteProxy = (id: string) => api.delete(`/proxies/${id}`)
-export const startProxy = (id: string) => api.post(`/proxies/${id}/start`).then(r => r.data)
-export const stopProxy = (id: string) => api.post(`/proxies/${id}/stop`).then(r => r.data)
 
 // Routes
 export const listRoutes = (proxyId: string) => api.get(`/proxies/${proxyId}/routes`).then(r => r.data)
@@ -100,8 +99,15 @@ export const addBackend = (routeId: string, data: any) => api.post(`/routes/${ro
 export const updateBackend = (id: string, data: any) => api.put(`/backends/${id}`, data).then(r => r.data)
 export const deleteBackend = (id: string) => api.delete(`/backends/${id}`)
 
+// API Keys
+export const listApiKeys = () => api.get('/api-keys').then(r => r.data)
+export const createApiKey = (data: any) => api.post('/api-keys', data).then(r => r.data)
+export const deleteApiKey = (id: string) => api.delete(`/api-keys/${id}`)
+
 // Stats
 export const getOverview = () => api.get('/stats/overview').then(r => r.data)
+export const getProxyStats = (proxyId: string) => api.get(`/stats/proxy/${proxyId}`).then(r => r.data)
+export const getPlatformStats = (platformId: string) => api.get(`/stats/platform/${platformId}`).then(r => r.data)
 
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)

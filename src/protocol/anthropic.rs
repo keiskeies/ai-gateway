@@ -90,6 +90,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                                     messages.push(UnifiedMessage {
                                         role: Role::Tool,
                                         content: Some(content),
+                                        reasoning_content: None,
                                         tool_calls: None,
                                         tool_call_id: Some(tool_use_id),
                                         name: None,
@@ -97,14 +98,14 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                                 }
                                 "text" => {
                                     let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                    messages.push(UnifiedMessage { role: Role::User, content: Some(text), tool_calls: None, tool_call_id: None, name: None });
+                                    messages.push(UnifiedMessage { role: Role::User, content: Some(text), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None });
                                 }
                                 _ => {}
                             }
                         }
                     }
                 } else if let Some(text) = msg.content.as_str() {
-                    messages.push(UnifiedMessage { role: Role::User, content: Some(text.to_string()), tool_calls: None, tool_call_id: None, name: None });
+                    messages.push(UnifiedMessage { role: Role::User, content: Some(text.to_string()), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None });
                 }
             }
             "assistant" => {
@@ -134,7 +135,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                 } else if let Some(text) = msg.content.as_str() {
                     content_text = Some(text.to_string());
                 }
-                messages.push(UnifiedMessage { role: Role::Assistant, content: content_text, tool_calls, tool_call_id: None, name: None });
+                messages.push(UnifiedMessage { role: Role::Assistant, content: content_text, reasoning_content: None, tool_calls, tool_call_id: None, name: None });
             }
             _ => {}
         }
@@ -240,7 +241,7 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
         id: resp.id, model: resp.model,
         choices: vec![UnifiedChoice {
             index: 0,
-            message: Some(UnifiedMessage { role: Role::Assistant, content, tool_calls, tool_call_id: None, name: None }),
+            message: Some(UnifiedMessage { role: Role::Assistant, content, reasoning_content: None, tool_calls, tool_call_id: None, name: None }),
             finish_reason,
         }],
         usage: Some(UnifiedUsage { prompt_tokens: resp.usage.input_tokens, completion_tokens: resp.usage.output_tokens, total_tokens: resp.usage.input_tokens + resp.usage.output_tokens }),

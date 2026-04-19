@@ -29,6 +29,8 @@ pub struct OpenAIMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -139,17 +141,20 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                 messages.push(UnifiedMessage {
                     role: Role::System,
                     content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                    reasoning_content: None,
                     tool_calls: None, tool_call_id: None, name: None,
                 });
             }
             "user" => messages.push(UnifiedMessage {
                 role: Role::User,
                 content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                reasoning_content: None,
                 tool_calls: None, tool_call_id: None, name: None,
             }),
             "assistant" => messages.push(UnifiedMessage {
                 role: Role::Assistant,
                 content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                reasoning_content: msg.reasoning_content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
                 tool_calls: msg.tool_calls.map(|tcs| tcs.into_iter().map(|tc| UnifiedToolCall {
                     id: tc.id, call_type: tc.call_type,
                     function: UnifiedFunctionCall { name: tc.function.name, arguments: tc.function.arguments },
@@ -159,6 +164,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
             "tool" => messages.push(UnifiedMessage {
                 role: Role::Tool,
                 content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                reasoning_content: None,
                 tool_calls: None, tool_call_id: msg.tool_call_id, name: msg.name,
             }),
             _ => {}
@@ -193,6 +199,7 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
         OpenAIMessage {
             role: role.to_string(),
             content: m.content.as_ref().map(|c| serde_json::Value::String(c.clone())),
+            reasoning_content: None,
             tool_calls: m.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| OpenAIToolCall {
                 id: tc.id.clone(), call_type: tc.call_type.clone(),
                 function: OpenAIFunctionCall { name: tc.function.name.clone(), arguments: tc.function.arguments.clone() },
@@ -234,7 +241,8 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
                         "assistant" => Role::Assistant, "user" => Role::User,
                         "system" => Role::System, _ => Role::Assistant,
                     },
-                    content: c.message.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                    content: extract_message_content(&c.message.content, &c.message.reasoning_content),
+                    reasoning_content: c.message.reasoning_content.as_ref().and_then(|v| v.as_str()).map(|s| s.to_string()),
                     tool_calls: c.message.tool_calls.map(|tcs| tcs.into_iter().map(|tc| UnifiedToolCall {
                         id: tc.id, call_type: tc.call_type,
                         function: UnifiedFunctionCall { name: tc.function.name, arguments: tc.function.arguments },
@@ -248,30 +256,66 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
     })
 }
 
+/// Extract content from OpenAI message content field.
+/// Handles both string and null values, preserving empty strings.
+/// Falls back to reasoning_content if content is absent (e.g. NVIDIA reasoning models).
+fn extract_message_content(content: &Option<serde_json::Value>, reasoning_content: &Option<serde_json::Value>) -> Option<String> {
+    let primary = match content {
+        None => None,
+        Some(serde_json::Value::Null) => Some(String::new()),
+        Some(v) => v.as_str().map(|s| s.to_string()),
+    };
+    if primary.is_some() {
+        return primary;
+    }
+    // Fallback to reasoning_content
+    match reasoning_content {
+        None => None,
+        Some(serde_json::Value::Null) => Some(String::new()),
+        Some(v) => v.as_str().map(|s| s.to_string()),
+    }
+}
+
 /// 统一格式 → OpenAI 响应
 pub fn to_response(unified: &UnifiedResponse) -> serde_json::Value {
-    let resp = OpenAIChatResponse {
-        id: unified.id.clone(), object: "chat.completion".to_string(),
-        created: chrono::Utc::now().timestamp(), model: unified.model.clone(),
-        choices: unified.choices.iter().map(|c| {
-            let msg = c.message.as_ref();
-            OpenAIChoice {
-                index: c.index,
-                message: OpenAIMessage {
-                    role: msg.map(|m| match m.role { Role::Assistant => "assistant", Role::User => "user", Role::System => "system", Role::Tool => "tool" }).unwrap_or("assistant").to_string(),
-                    content: msg.and_then(|m| m.content.as_ref()).map(|c| serde_json::Value::String(c.clone())),
-                    tool_calls: msg.and_then(|m| m.tool_calls.as_ref()).map(|tcs| tcs.iter().map(|tc| OpenAIToolCall {
-                        id: tc.id.clone(), call_type: tc.call_type.clone(),
-                        function: OpenAIFunctionCall { name: tc.function.name.clone(), arguments: tc.function.arguments.clone() },
-                    }).collect()),
-                    tool_call_id: msg.and_then(|m| m.tool_call_id.clone()), name: msg.and_then(|m| m.name.clone()),
-                },
-                finish_reason: c.finish_reason.clone(),
-            }
-        }).collect(),
-        usage: unified.usage.as_ref().map(|u| OpenAIUsage { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens, total_tokens: u.total_tokens }),
-    };
-    serde_json::to_value(resp).unwrap_or_default()
+    let choices: Vec<serde_json::Value> = unified.choices.iter().map(|c| {
+        let msg = c.message.as_ref();
+        let role = msg.map(|m| match m.role { Role::Assistant => "assistant", Role::User => "user", Role::System => "system", Role::Tool => "tool" }).unwrap_or("assistant");
+        let content_val = match msg.and_then(|m| m.content.as_ref()) {
+            Some(s) => serde_json::Value::String(s.clone()),
+            None => serde_json::Value::Null,
+        };
+        let mut message_obj = serde_json::Map::new();
+        message_obj.insert("role".into(), serde_json::Value::String(role.to_string()));
+        message_obj.insert("content".into(), content_val);
+        if let Some(rc) = msg.and_then(|m| m.reasoning_content.as_ref()) {
+            message_obj.insert("reasoning_content".into(), serde_json::Value::String(rc.clone()));
+        }
+        if let Some(tcs) = msg.and_then(|m| m.tool_calls.as_ref()) {
+            message_obj.insert("tool_calls".into(), serde_json::to_value(tcs).unwrap_or_default());
+        }
+        if let Some(tcid) = msg.and_then(|m| m.tool_call_id.clone()) {
+            message_obj.insert("tool_call_id".into(), serde_json::Value::String(tcid));
+        }
+        serde_json::json!({
+            "index": c.index,
+            "message": message_obj,
+            "finish_reason": c.finish_reason,
+        })
+    }).collect();
+
+    serde_json::json!({
+        "id": unified.id,
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": unified.model,
+        "choices": choices,
+        "usage": unified.usage.as_ref().map(|u| serde_json::json!({
+            "prompt_tokens": u.prompt_tokens,
+            "completion_tokens": u.completion_tokens,
+            "total_tokens": u.total_tokens,
+        })),
+    })
 }
 
 /// 生成虚拟模型的 OpenAI models 列表

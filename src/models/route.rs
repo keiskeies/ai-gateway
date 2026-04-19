@@ -43,11 +43,12 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Route links a proxy (virtual model) to its backend models.
+/// Each proxy has exactly one route. The virtual_model name comes from the proxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Route {
     pub id: String,
     pub proxy_id: String,
-    pub virtual_model: String,
     pub backends: Vec<Backend>,
     pub lb_strategy: LBStrategy,
     pub retry_policy: RetryPolicy,
@@ -63,12 +64,12 @@ pub struct Backend {
     pub weight: u32,
     pub priority: u32,
     pub max_concurrent: Option<u32>,
+    pub capabilities: Vec<String>,
     pub status: BackendStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRouteRequest {
-    pub virtual_model: String,
     #[serde(default = "default_lb_strategy")]
     pub lb_strategy: LBStrategy,
     #[serde(default)]
@@ -79,7 +80,6 @@ pub struct CreateRouteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateRouteRequest {
-    pub virtual_model: Option<String>,
     pub lb_strategy: Option<LBStrategy>,
     pub retry_policy: Option<RetryPolicy>,
     pub fallback: Option<String>,
@@ -94,6 +94,8 @@ pub struct CreateBackendRequest {
     #[serde(default)]
     pub priority: u32,
     pub max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +103,7 @@ pub struct UpdateBackendRequest {
     pub weight: Option<u32>,
     pub priority: Option<u32>,
     pub max_concurrent: Option<u32>,
+    pub capabilities: Option<Vec<String>>,
     pub status: Option<BackendStatus>,
 }
 

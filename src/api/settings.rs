@@ -17,6 +17,7 @@ pub struct ConfigResponse {
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     pub request_timeout_secs: u64,
+    pub test_connection_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,6 +29,7 @@ pub struct UpdateConfigRequest {
     pub max_retries: Option<u32>,
     pub retry_backoff_ms: Option<u64>,
     pub request_timeout_secs: Option<u64>,
+    pub test_connection_timeout_secs: Option<u64>,
 }
 
 impl From<&AppConfig> for ConfigResponse {
@@ -40,6 +42,7 @@ impl From<&AppConfig> for ConfigResponse {
             max_retries: cfg.defaults.max_retries,
             retry_backoff_ms: cfg.defaults.retry_backoff_ms,
             request_timeout_secs: cfg.defaults.request_timeout_secs,
+            test_connection_timeout_secs: cfg.defaults.test_connection_timeout_secs,
         }
     }
 }
@@ -86,6 +89,10 @@ pub async fn update_config(
         }
         if let Some(timeout) = body.request_timeout_secs {
             cfg.defaults.request_timeout_secs = timeout;
+            need_save = true;
+        }
+        if let Some(timeout) = body.test_connection_timeout_secs {
+            cfg.defaults.test_connection_timeout_secs = timeout;
             need_save = true;
         }
 

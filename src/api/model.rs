@@ -3,9 +3,12 @@ use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::models::model::*;
 
-pub async fn test_connection(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
+pub async fn test_connection(db: web::Data<DbPool>, config: web::Data<crate::api::settings::SharedAppConfig>, path: web::Path<String>) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
+    
+    // Get configured test timeout
+    let timeout_secs = config.read().defaults.test_connection_timeout_secs;
     
     // Get model and its platform info
     let (model, platform) = web::block(move || -> AppResult<(crate::models::model::Model, crate::models::platform::Platform)> {
@@ -26,7 +29,7 @@ pub async fn test_connection(db: web::Data<DbPool>, path: web::Path<String>) -> 
         crate::models::platform::PlatformType::Anthropic => {
             // Anthropic: POST /v1/messages with minimal payload
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             
@@ -49,7 +52,7 @@ pub async fn test_connection(db: web::Data<DbPool>, path: web::Path<String>) -> 
         _ => {
             // OpenAI compatible: GET /v1/models or minimal chat completion
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             
@@ -104,7 +107,7 @@ pub async fn test_connection(db: web::Data<DbPool>, path: web::Path<String>) -> 
         }
         Err(e) => {
             let msg = if e.is_timeout() {
-                "Connection timed out (10s)".to_string()
+                format!("Connection timed out ({}s)", timeout_secs)
             } else if e.is_connect() {
                 format!("Cannot connect to server: {}", e)
             } else {

@@ -6,7 +6,7 @@ import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
 import { platformPresets, getPresetName } from '../presets'
 
-const { Text } = Typography
+const { Text, Title } = Typography
 
 export default function Platforms() {
   const [platforms, setPlatforms] = useState<any[]>([])
@@ -89,6 +89,7 @@ export default function Platforms() {
       title: t(locale, 'name'),
       dataIndex: 'name',
       key: 'name',
+      width: 140,
       render: (v: string) => {
         const preset = platformPresets.find(p => p.name === v)
         return <Text strong>{preset ? getPresetName(preset, locale) : v}</Text>
@@ -98,6 +99,7 @@ export default function Platforms() {
       title: t(locale, 'type'),
       dataIndex: 'type',
       key: 'type',
+      width: 120,
       render: (v: string) => <Tag style={{ borderRadius: 4 }}>{v}</Tag>,
     },
     { title: t(locale, 'baseUrl'), dataIndex: 'base_url', key: 'base_url', ellipsis: true },
@@ -105,18 +107,20 @@ export default function Platforms() {
       title: t(locale, 'status'),
       dataIndex: 'status',
       key: 'status',
+      width: 90,
       render: (v: string) => <Tag color={v === 'Active' ? 'success' : 'default'} style={{ borderRadius: 4 }}>{v === 'Active' ? t(locale, 'active') : v}</Tag>,
     },
     {
       title: 'API Key',
       dataIndex: 'api_key',
       key: 'api_key',
+      width: 120,
       render: (v: string) => v ? <Text code style={{ fontSize: 12 }}>{v.slice(0, 8)}...</Text> : <Text type="secondary">-</Text>,
     },
     {
       title: t(locale, 'action'),
       key: 'action',
-      width: 100,
+      width: 90,
       render: (_: any, record: any) => (
         <Space>
           <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEdit(record)} />
@@ -130,8 +134,8 @@ export default function Platforms() {
 
   return (
     <div>
-      <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text type="secondary">{t(locale, 'platformDesc')}</Text>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Title level={5} style={{ margin: 0 }}>{t(locale, 'platforms')}</Title>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t(locale, 'addPlatform')}</Button>
       </div>
 
@@ -139,6 +143,7 @@ export default function Platforms() {
         <Table columns={columns} dataSource={platforms} rowKey="id" loading={loading} pagination={{ pageSize: 20, showSizeChanger: false }} />
       </Card>
 
+      {/* Create/Edit Platform Modal */}
       <Modal
         title={editItem ? t(locale, 'editPlatform') : t(locale, 'addPlatform')}
         open={modalOpen}

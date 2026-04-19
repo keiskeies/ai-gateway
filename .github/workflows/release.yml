@@ -74,7 +74,17 @@ jobs:
           releaseBody: |
             See the assets below to download the installer for your platform.
 
-            ## What's New
+            ## What's New in v1.2.0
+
+            - 🎯 **Remote model fetching**: Automatically fetch available models from platform APIs when configuring backends — select from dropdown, no manual input needed
+            - 🧠 **Smart capability detection**: Model capabilities (chat/code/vision/function calling) auto-filled from presets, with manual override support
+            - 🔄 **reasoning_content support**: Compatible with chain-of-thought content from NVIDIA NIM and similar platforms, auto-forwarded in responses
+            - 🗑️ **Simplified UI**: Removed standalone Models page — backend model configuration now integrated directly into Virtual Models
+            - 🏷️ **Platform name in backends**: Backend model tags now show platform name prefix (e.g., "OpenAI·gpt-4o") for clearer identification
+            - 🔧 **DB migration V5**: Backend model_id now stores actual model string instead of UUID foreign key
+            - ❌ **Removed auto-sync**: Removed the problematic auto-sync/manual-sync feature that could incorrectly delete backends — remote model fetching in Virtual Models replaces this entirely
+
+            ## Existing Features
             - Dual-protocol native support: OpenAI & Anthropic Messages API
             - Google Gemini platform preset
             - Settings page with configurable admin port

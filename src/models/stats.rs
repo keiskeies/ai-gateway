@@ -24,6 +24,8 @@ pub struct OverviewStats {
     pub active_platforms: i64,
     pub total_platforms: i64,
     pub total_models: i64,
+    pub total_token_input: i64,
+    pub total_token_output: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +36,8 @@ pub struct ProxyStats {
     pub success_rate: f64,
     pub avg_latency_ms: f64,
     pub requests_today: i64,
+    pub total_token_input: i64,
+    pub total_token_output: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,4 +49,15 @@ pub struct BackendStats {
     pub success_rate: f64,
     pub avg_latency_ms: f64,
     pub active_connections: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformStats {
+    pub platform_id: String,
+    pub platform_name: String,
+    pub total_requests: i64,
+    pub success_rate: f64,
+    pub avg_latency_ms: f64,
+    pub total_token_input: i64,
+    pub total_token_output: i64,
 }
