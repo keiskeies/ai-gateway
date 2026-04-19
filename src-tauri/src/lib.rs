@@ -22,6 +22,21 @@ pub fn run() {
                 )?;
             }
 
+            // Determine the correct app directory by resolving the config.toml resource.
+            // Tauri's resolve() API handles platform-specific resource path mapping:
+            // - macOS: ../config.toml -> Contents/Resources/_up_/config.toml
+            // - Windows: ../config.toml -> installed dir structure
+            // - Linux: appropriate data directory
+            use tauri::path::BaseDirectory;
+            let config_resource = app.path().resolve("../config.toml", BaseDirectory::Resource)
+                .expect("Failed to resolve config.toml resource path");
+            // The app directory is where config.toml lives
+            let app_dir = config_resource.parent()
+                .expect("config.toml resource has no parent directory")
+                .to_path_buf();
+            tracing::info!("Tauri resolved app_dir: {:?}", app_dir);
+            ai_gateway::config::set_app_dir(app_dir);
+
             // Setup system tray
             setup_tray(app)?;
 

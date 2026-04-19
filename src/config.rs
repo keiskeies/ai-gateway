@@ -1,4 +1,35 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Global app directory override (set by Tauri at startup)
+static APP_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the app directory override (call once at startup before any config loading)
+pub fn set_app_dir(path: PathBuf) {
+    let _ = APP_DIR_OVERRIDE.set(path);
+}
+
+/// Try to find the actual app directory by searching for config.toml
+/// starting from the given candidate directory and checking parent directories.
+fn find_app_dir_from_candidate(candidate: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = candidate.to_path_buf();
+    // Check up to 3 levels of parent directories
+    for _ in 0..3 {
+        if dir.join("config.toml").exists() {
+            return Some(dir);
+        }
+        // Also check _up_ subdirectory (macOS Tauri bundle convention for ../ paths)
+        if dir.join("_up_").join("config.toml").exists() {
+            return Some(dir.join("_up_"));
+        }
+        if let Some(parent) = dir.parent() {
+            dir = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+    None
+}
 
 /// 全局配置
 #[derive(Debug, Clone)]
@@ -92,12 +123,22 @@ pub fn resolve_app_path(relative_path: &str) -> PathBuf {
 
 /// Get the base directory for the application (where config.toml and data/ reside)
 pub fn get_app_dir() -> PathBuf {
-    // Try current exe directory first
+    // If an override was set (e.g., by Tauri via resource_dir), use it
+    if let Some(dir) = APP_DIR_OVERRIDE.get() {
+        return dir.clone();
+    }
+
+    // Try current exe directory and search upward for config.toml
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            // Direct: exe_dir/config.toml
+            // First try direct: exe_dir/config.toml
             if exe_dir.join("config.toml").exists() {
                 return exe_dir.to_path_buf();
+            }
+
+            // Search upward from exe_dir (handles Windows install paths)
+            if let Some(found) = find_app_dir_from_candidate(exe_dir) {
+                return found;
             }
 
             // macOS .app bundle: exe is in Contents/MacOS/
@@ -105,23 +146,34 @@ pub fn get_app_dir() -> PathBuf {
                 if let Some(contents_dir) = exe_dir.parent() {
                     let resources_dir = contents_dir.join("Resources");
 
-                    // Tauri bundles resources with _up_ prefix for "../" paths
-                    // e.g., "../config.toml" -> "Resources/_up_/config.toml"
+                    // Try Resources/_up_/ first (Tauri's ../ encoding)
                     let up_dir = resources_dir.join("_up_");
                     if up_dir.join("config.toml").exists() {
                         return up_dir;
                     }
 
-                    // Also check Resources/config.toml directly
+                    // Try Resources/ directly
                     if resources_dir.join("config.toml").exists() {
                         return resources_dir;
+                    }
+
+                    // Search upward from Resources
+                    if let Some(found) = find_app_dir_from_candidate(&resources_dir) {
+                        return found;
                     }
                 }
             }
         }
     }
 
-    // Fallback to current directory
+    // Fallback: try current working directory and search upward
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(found) = find_app_dir_from_candidate(&cwd) {
+            return found;
+        }
+    }
+
+    // Last resort: return current directory
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
