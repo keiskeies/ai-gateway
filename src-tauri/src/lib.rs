@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
 
 use ai_gateway::api::settings::SharedAppConfig;
-use ai_gateway::api::sync::{SharedSyncState, SyncState, start_scheduler};
 
 /// Port the backend will listen on (determined at runtime)
 static BACKEND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -237,10 +236,6 @@ fn start_backend_server() {
 
         let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
         let selector = Arc::new(ai_gateway::lb::BackendSelector::new());
-
-        // Initialize auto-sync scheduler
-        let sync_state: SharedSyncState = Arc::new(SyncState::new(db_pool.clone(), shared_config.clone()));
-        start_scheduler(sync_state.clone());
 
         let proxy_state = Arc::new(ai_gateway::proxy::handler::ProxyState {
             db: db_pool.clone(),
