@@ -23,6 +23,30 @@
 
 ---
 
+## 📸 应用截图
+
+<p align="center">
+  <img src="doc/ai-gateway1.jpg" width="80%" alt="AI Gateway 主界面" />
+</p>
+<p align="center"><em>主界面 — 虚拟大模型管理</em></p>
+
+<p align="center">
+  <img src="doc/a-gateway-1.jpg" width="80%" alt="AI Gateway 平台管理" />
+</p>
+<p align="center"><em>平台管理 — 添加与配置 AI 平台</em></p>
+
+<p align="center">
+  <img src="doc/ai-gateway21.jpg" width="80%" alt="AI Gateway 虚拟模型配置" />
+</p>
+<p align="center"><em>虚拟模型 — 后端配置与负载均衡策略</em></p>
+
+<p align="center">
+  <img src="doc/ai-gateway3.jpg" width="80%" alt="AI Gateway 设置与统计" />
+</p>
+<p align="center"><em>设置页面 — 端口配置与数据统计</em></p>
+
+---
+
 ## 🔥 为什么选择 AI Gateway？
 
 ### 💡 多 Key 负载均衡，突破 AI 平台限流
