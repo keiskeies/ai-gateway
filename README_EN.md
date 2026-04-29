@@ -31,19 +31,24 @@
 <p align="center"><em>Main Interface — Virtual Model Management</em></p>
 
 <p align="center">
-  <img src="doc/a-gateway-1.jpg" width="80%" alt="AI Gateway Platform Management" />
+  <img src="doc/ai-gateway2.jpg" width="80%" alt="AI Gateway Platform Management" />
 </p>
 <p align="center"><em>Platform Management — Add & Configure AI Platforms</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway21.jpg" width="80%" alt="AI Gateway Virtual Model Configuration" />
+  <img src="doc/a-gateway-1.jpg" width="80%" alt="AI Gateway Virtual Model Configuration" />
 </p>
 <p align="center"><em>Virtual Models — Backend Configuration & Load Balancing Strategies</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway3.jpg" width="80%" alt="AI Gateway Settings & Statistics" />
+  <img src="doc/ai-gateway21.jpg" width="80%" alt="AI Gateway Statistics Overview" />
 </p>
-<p align="center"><em>Settings Page — Port Configuration & Data Statistics</em></p>
+<p align="center"><em>Statistics Overview — Token Usage & Request Stats</em></p>
+
+<p align="center">
+  <img src="doc/ai-gateway3.jpg" width="80%" alt="AI Gateway Settings Page" />
+</p>
+<p align="center"><em>Settings Page — Port Configuration & Theme Switching</em></p>
 
 ---
 
