@@ -1,5 +1,12 @@
 <p align="center">
-  <img src="logo.png" width="120" alt="AI Gateway Logo" />
+  <img src="logo.png" width="100" alt="AI Gateway Logo" />
+</p>
+
+<h1 align="center">🚀 AI Gateway</h1>
+
+<p align="center">
+  <strong>一个网关，聚合所有 AI 平台</strong><br/>
+  多 Key 负载均衡 · 自动故障切换 · OpenAI & Anthropic 双协议 · 零代码改造
 </p>
 
 <p align="center">
@@ -7,28 +14,44 @@
   <img src="https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-green" alt="Platform" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License" />
-</p>
-
-<h1 align="center">🚀 AI Gateway</h1>
-
-<p align="center">
-  <strong>跨平台 AI 接口聚合与智能流量负载均衡工具</strong><br/>
-  统一接入 OpenAI · Anthropic · Google Gemini · DeepSeek · Qwen · 月之暗面 · 智谱AI · 豆包 · Ollama · NVIDIA NIM · Azure · 更多...<br/><br/>
-  <strong>双协议原生支持：</strong>同时兼容 OpenAI 与 Anthropic Messages API 格式，一个网关覆盖全部生态
+  <a href="https://github.com/keiskeies/ai-gateway/stargazers"><img src="https://img.shields.io/github/stars/keiskeies/ai-gateway?style=social" alt="Stars" /></a>
 </p>
 
 <p align="center">
   <a href="README.md">中文</a> | <a href="README_EN.md">English</a>
 </p>
 
+<p align="center">
+  <a href="#-快速开始"><strong>30 秒上手 →</strong></a>
+</p>
+
 ---
 
-## 📸 应用截图
+> 🌟 **如果这个项目对你有帮助，请给个 Star 支持一下！你的 Star 是我持续迭代的动力。**
+
+---
+
+## 😩 你是不是也遇到过这些问题？
+
+- 🔴 API 调着调着就 **429 限流**了，请求直接报错
+- 🔴 免费平台额度不够用，**3 RPM 根本不够塞牙缝**
+- 🔴 DeepSeek 便宜但不稳定，OpenAI 稳定但太贵，**没法灵活切换**
+- 🔴 多个 AI 平台 API 格式不同，**代码里一堆 if-else 切换**
+- 🔴 想用 Claude 又想用 GPT，**SDK 和 Base URL 管不过来**
+
+**AI Gateway 就是为了解决这些痛点而生的。**
+
+---
+
+## 📸 效果展示
 
 <p align="center">
   <img src="doc/ai-gateway1.jpg" width="80%" alt="AI Gateway 主界面" />
 </p>
 <p align="center"><em>主界面 — 虚拟大模型管理</em></p>
+
+<details>
+<summary>📱 点击查看更多截图</summary>
 
 <p align="center">
   <img src="doc/ai-gateway2.jpg" width="80%" alt="AI Gateway 平台管理" />
@@ -50,13 +73,15 @@
 </p>
 <p align="center"><em>设置页面 — 端口配置与主题切换</em></p>
 
+</details>
+
 ---
 
-## 🔥 为什么选择 AI Gateway？
+## ⚡ 核心能力
 
-### 💡 多 Key 负载均衡，突破 AI 平台限流
+### 🎯 多 Key 负载均衡 — 限流瓶颈？不存在的
 
-很多 AI 平台提供免费额度，但做了严格的请求频率限制（如每分钟 3 次、10 次等）。AI Gateway 的核心能力就是帮你**用多个 API Key 通过负载均衡将请求分发到不同 Key 上**，变相将频率限制翻 N 倍：
+多个 API Key 轮询/加权/分流，**N 个 Key = N 倍吞吐量**：
 
 ```
 你的应用（高频请求）
@@ -69,149 +94,184 @@
                             总吞吐量：4 × 3 = 12 RPM 🚀
 ```
 
-**操作方式超级简单**：
-1. 在「平台管理」中，同一个 AI 平台添加多次，每次填入不同的 API Key
-2. 在「虚拟大模型」中，把这些同一平台不同 Key 的模型都加为后端
-3. 选择负载均衡策略，一键启动 — 请求自动分发到各 Key
+> 💡 **白嫖党福音**：SiliconFlow、Groq 等平台免费额度 × 多账号 = 免费大模型无限用
 
-> 不只是免费平台！即使付费平台，多 Key 负载均衡也能显著提升并发吞吐量、避免单 Key 限流导致的请求失败。
+### 🔀 5 种负载均衡策略
 
-### 🔀 5 种智能负载均衡策略
+| 策略 | 一句话 | 最适合 |
+|------|--------|--------|
+| **轮询** | 一个接一个，雨露均沾 | 多 Key 突破限流 |
+| **加权随机** | 权重大的多干活 | 后端性能不一 |
+| **最少连接** | 谁闲谁接活 | 流式输出场景 |
+| **优先级** | 便宜的先上，贵的兜底 | 省钱！DeepSeek → GPT 兜底 |
+| **延迟优先** | 谁快选谁 | 在线服务对延迟敏感 |
 
-| 策略 | 说明 | 适用场景 |
-|------|------|----------|
-| **轮询 (Round Robin)** | 依次将请求分配到各后端，循环往复 | 多 Key 限流突破：均匀分摊请求到各 Key |
-| **加权随机 (Weighted Random)** | 按权重随机分配，高权重后端获得更多请求 | 后端性能差异大，按配额分配 |
-| **最少连接 (Least Connections)** | 优先选择当前活跃连接数最少的后端 | 长连接/流式场景，避免单点过载 |
-| **优先级 (Priority)** | 主备模式，高优先级后端优先，故障自动切换 | 成本优化：便宜 Key 优先，贵 Key 兜底 |
-| **延迟优先 (Latency Based)** | 实时追踪各后端响应延迟，优先选择最快后端 | 对延迟敏感的在线服务 |
-
-### 🌐 双协议原生支持
-
-AI Gateway 不仅仅是 OpenAI 兼容代理 — **原生支持 Anthropic Messages API 协议**，无需任何协议转换中间件：
+### 🌐 OpenAI & Anthropic 双协议 — 一个入口全搞定
 
 ```
-你的应用代码
-    │
-    ├── 使用 OpenAI SDK ──────→ POST /v1/chat/completions ──┐
-    │                                                       │
-    └── 使用 Anthropic SDK ──→ POST /v1/messages ───────────┤
-                                                            │
-                                                      AI Gateway
-                                                            │
-                                          ┌─────────────────┼─────────────────┐
-                                          ↓                 ↓                 ↓
-                                      DeepSeek            Qwen            OpenAI
-                                     (权重 3)           (权重 2)          (权重 1)
+OpenAI SDK ──→ /v1/chat/completions ──┐
+                                       ├──→ AI Gateway ──→ DeepSeek / Qwen / GPT / Claude ...
+Anthropic SDK ──→ /v1/messages ───────┘
 ```
 
-### 🛡️ 高可用 & 智能重试
+**零代码改造**，把 `base_url` 换成 `http://localhost:1994/v1` 就完事了。
 
-- **自动故障切换**：某个后端宕机，流量自动切换到健康后端
-- **智能重试**：429 限流、5xx 服务错误、超时等自动重试，支持指数退避
-- **零代码改造**：客户端只需将 API Base URL 指向 AI Gateway，无需任何修改
+### 🛡️ 高可用 · 不怕单点故障
+
+- 后端挂了？**自动切换**到健康的后端
+- 被限流了？429 / 5xx / 超时 **自动重试** + 指数退避
+- 完全透明：你的应用感知不到后端切换
+
+---
+
+## 🆚 和其他方案的区别
+
+| | AI Gateway | Nginx 反代 | One API | LiteLLM |
+|---|---|---|---|---|
+| **开箱即用** | ✅ 桌面 App + 服务器 | ❌ 需要写配置 | ✅ | ✅ |
+| **可视化管理** | ✅ Web UI | ❌ | ✅ | ❌ |
+| **负载均衡** | ✅ 5 种策略 | ✅ 有限 | ⚠️ 简单 | ✅ |
+| **OpenAI 协议** | ✅ | ✅ | ✅ | ✅ |
+| **Anthropic 协议** | ✅ 原生支持 | ❌ 需额外配置 | ✅ 转换 | ✅ 转换 |
+| **自动故障切换** | ✅ | ⚠️ 需配置 | ⚠️ | ⚠️ |
+| **远程模型获取** | ✅ 自动拉取 | ❌ | ❌ | ❌ |
+| **本地部署** | ✅ 单二进制零依赖 | ✅ | ✅ Docker | ✅ pip |
+| **桌面应用** | ✅ macOS/Win/Linux | ❌ | ❌ | ❌ |
+| **语言** | Rust（高性能低内存） | C | Go | Python |
 
 ---
 
 ## ✨ 更多特性
 
-- **一键添加平台**：内置 15+ 主流 AI 平台预设（含 Google Gemini），点击即用
-- **远程模型获取**：配置后端模型时自动从平台 API 拉取可用模型，下拉选择无需手动输入
-- **智能能力识别**：模型能力根据预设自动填充（聊天/代码/视觉/函数调用等），支持手动修改
-- **reasoning_content 支持**：兼容 NVIDIA 等平台返回的思维链内容，自动转发
-- **日/夜间模式**：支持浅色、深色、跟随系统三种模式
-- **中英双语**：完整国际化支持，一键切换语言
-- **端口可配置**：管理端口可在界面内修改，默认 1994
-- **跨平台桌面应用**：macOS / Windows / Linux 原生支持（基于 Tauri）
-- **也可独立部署**：单二进制文件，零依赖运行，适合服务器部署
+- 🏪 **15+ 平台预设**：OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / 月之暗面 / 豆包 / Ollama / NVIDIA NIM / Azure / 云硅 / Groq / 零一万物 / 百川 ··· 一键添加
+- 🔍 **远程模型获取**：选择平台后自动拉取可用模型列表，下拉选择无需手动输入
+- 🧠 **智能能力识别**：聊天/代码/视觉/函数调用等能力自动填充
+- 🔗 **reasoning_content 支持**：兼容 NVIDIA NIM 等平台思维链输出
+- 🌙 **浅色 / 深色 / 跟随系统** 三种主题
+- 🌍 **中英双语** UI
+- ⚙️ 端口可在界面内修改，默认 1994
+
+---
+
+## 🚀 快速开始
+
+### 方式一：下载桌面应用（推荐）
+
+前往 [Releases](https://github.com/keiskeies/ai-gateway/releases) 下载对应平台安装包，双击即用。
+
+### 方式二：从源码构建
+
+```bash
+git clone https://github.com/keiskeies/ai-gateway.git
+cd ai-gateway
+
+# 独立服务器模式
+cargo run
+# 访问 http://localhost:1994
+
+# 或 Tauri 桌面应用模式
+cargo install tauri-cli
+cargo tauri dev
+```
+
+### 三步上手
+
+```
+1️⃣ 添加平台 → 选预设 + 填 API Key → 保存
+2️⃣ 创建虚拟模型 → 选策略 + 添加后端 → 启动
+3️⃣ 改 base_url → 指向 http://localhost:1994/v1 → 完事
+```
+
+---
+
+## 📖 调用示例
+
+改一行代码就能接入，**无需其他任何修改**：
+
+```python
+# OpenAI SDK — 只改 base_url
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:1994/v1",  # ← 就改这一行
+    api_key="your-token"
+)
+response = client.chat.completions.create(
+    model="your-virtual-model",  # ← 填你创建的虚拟模型名
+    messages=[{"role": "user", "content": "hello"}]
+)
+
+# Anthropic SDK — 同样只改 base_url
+import anthropic
+client = anthropic.Anthropic(
+    base_url="http://localhost:1994",  # ← 就改这一行
+    api_key="your-token"
+)
+response = client.messages.create(
+    model="your-virtual-model",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "hello"}]
+)
+```
+
+<details>
+<summary>🔧 curl 示例</summary>
+
+```bash
+# OpenAI 兼容格式
+curl http://localhost:1994/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}]}'
+
+# Anthropic 兼容格式
+curl http://localhost:1994/v1/messages \
+  -H "x-api-key: YOUR_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
+
+# 模型列表
+curl http://localhost:1994/v1/models \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+</details>
+
+---
+
+## 🎯 谁在用？典型场景
+
+| 场景 | 怎么用 | 收益 |
+|------|--------|------|
+| **白嫖党** | 多个免费 Key 轮询 | 免费额度 × N 倍 |
+| **省钱党** | DeepSeek 优先 + GPT 兜底 | 成本降 80%+ |
+| **稳定性党** | 多后端 + 自动故障切换 | 可用性 99.9% |
+| **多平台党** | OpenAI + Claude + Qwen 统一入口 | 一行代码切换 |
+| **团队党** | 统一网关 + API Key 管理 | 安全 + 可控 |
 
 ---
 
 ## 🏗️ 架构
 
 ```
-┌──────────────────────────────────────────────┐
-│                AI Gateway                     │
-│                                              │
-│  ┌─────────┐  ┌─────────┐  ┌──────────────┐ │
-│  │ OpenAI  │  │Anthropic│  │  Admin Web   │ │
-│  │ 兼容端点 │  │ 兼容端点 │  │  管理界面    │ │
-│  └────┬────┘  └────┬────┘  └──────────────┘ │
-│       │            │                         │
-│  ┌────▼────────────▼────┐                    │
-│  │   路由 & 负载均衡引擎  │                    │
-│  └────┬───┬───┬────┬────┘                    │
-│       │   │   │    │                         │
-│  ┌────▼┐ ┌▼──┐┌▼───┐┌▼────┐                │
-│  │Deep │ │Qwen││GLM ││GPT │  ← 多后端       │
-│  │Seek │ │    ││    ││-4o │                  │
-│  └─────┘ └───┘└────┘└─────┘                │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                    AI Gateway                     │
+│                                                  │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
+│  │  OpenAI  │  │ Anthropic │  │  Admin Web   │  │
+│  │  兼容端点 │  │  兼容端点  │  │  管理界面    │  │
+│  └─────┬────┘  └─────┬─────┘  └──────────────┘  │
+│        │              │                           │
+│  ┌─────▼──────────────▼─────┐                     │
+│  │    路由 & 负载均衡引擎    │                     │
+│  └──┬────┬────┬────┬────┬──┘                     │
+│     │    │    │    │    │                         │
+│  ┌──▼─┐┌─▼──┐┌▼───┐┌▼──┐┌▼────┐                │
+│  │Deep││Qwen││GLM ││GPT││Claude│  ← N 个后端    │
+│  │Seek││    ││    ││-4o││     │                   │
+│  └────┘└────┘└────┘└───┘└─────┘                │
+└──────────────────────────────────────────────────┘
 ```
-
----
-
-## 🚀 快速开始
-
-### 方式一：独立服务器模式
-
-```bash
-# 克隆仓库
-git clone https://github.com/keiskeies/ai-gateway.git
-cd ai-gateway
-
-# 编译运行
-cargo run
-
-# 访问管理界面
-open http://localhost:1994
-```
-
-### 方式二：Tauri 桌面应用模式
-
-```bash
-# 安装 Tauri CLI
-cargo install tauri-cli
-
-# 开发模式
-cargo tauri dev
-
-# 构建桌面应用
-cargo tauri build
-```
-
-### 方式三：前端开发模式
-
-```bash
-# 终端 1：启动后端
-cargo run
-
-# 终端 2：启动前端开发服务器
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 🎯 典型使用场景
-
-### 场景一：多 Key 突破免费平台限流
-
-> SiliconFlow、Groq 等平台提供免费额度但限流严重（3~30 RPM），注册多个账号获取多个 Key，通过 AI Gateway 负载均衡将请求分发到多个 Key，总吞吐量翻 N 倍。
-
-1. 在「平台管理」中，添加多个同平台的配置（如 3 个 SiliconFlow），每个填不同 API Key
-2. 创建虚拟大模型，选择「轮询」策略
-3. 添加后端时选择各平台，下拉选择模型（自动拉取），一键完成
-4. 启动接口 — 3 个 Key 轮流使用，限流阈值提升 3 倍
-
-### 场景二：成本优化 — 便宜优先，贵模型兜底
-
-> DeepSeek 极其便宜，但偶尔不稳定；OpenAI 稳定但贵。用「优先级」策略，优先走 DeepSeek，故障时自动切到 OpenAI。
-
-### 场景三：混合平台统一入口
-
-> 你的应用同时需要 OpenAI 的 GPT-4o 和 Anthropic 的 Claude。AI Gateway 同时支持两种协议，一个网关覆盖全部。
 
 ---
 
@@ -243,64 +303,6 @@ request_timeout_secs = 120
 
 ---
 
-## 📖 使用指南
-
-### 1️⃣ 添加平台
-
-进入「平台管理」→ 点击「添加平台」→ 选择预设平台或自定义 → 填写 API Key → 保存
-
-> 💡 同一个平台可以添加多次（每个填不同的 API Key），用于多 Key 负载均衡。
-
-### 2️⃣ 创建虚拟大模型
-
-进入「虚拟大模型」→ 点击「新建虚拟模型」→ 设置模型名称 → 选择负载均衡策略 → 添加后端模型
-
-> 💡 添加后端模型时，选择平台后系统会自动从该平台拉取可用模型列表，直接下拉选择即可，无需手动输入模型 ID。模型能力会根据预设自动填充，也支持手动修改。
-
-### 3️⃣ 调用 API
-
-```bash
-# OpenAI 兼容格式（支持所有 OpenAI SDK）
-curl http://localhost:1994/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}]}'
-
-# Anthropic 兼容格式（支持所有 Anthropic SDK）
-curl http://localhost:1994/v1/messages \
-  -H "x-api-key: YOUR_TOKEN" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
-
-# 模型列表
-curl http://localhost:1994/v1/models \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-**Python 示例：**
-
-```python
-# OpenAI SDK
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:1994/v1", api_key="YOUR_TOKEN")
-response = client.chat.completions.create(
-    model="your-virtual-model",
-    messages=[{"role": "user", "content": "hello"}]
-)
-
-# Anthropic SDK
-import anthropic
-client = anthropic.Anthropic(base_url="http://localhost:1994", api_key="YOUR_TOKEN")
-response = client.messages.create(
-    model="your-virtual-model",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "hello"}]
-)
-```
-
----
-
 ## 🛠️ 技术栈
 
 | 层 | 技术 |
@@ -312,14 +314,36 @@ response = client.messages.create(
 
 ---
 
+## 🗺️ Roadmap
+
+- [ ] 📊 更丰富的统计面板（按天/周/月的用量趋势图）
+- [ ] 🔑 API Key 细粒度权限控制（按模型/按额度限流）
+- [ ] 🌐 多语言网关（翻译 / TTS / Embedding 统一端点）
+- [ ] 🔔 后端健康检查 & 异常告警通知
+- [ ] 🐳 Docker 一键部署
+- [ ] ☁️ 云端配置同步
+
+> 有想要的功能？欢迎 [提 Issue](https://github.com/keiskeies/ai-gateway/issues)！
+
+---
+
+## 🤝 参与贡献
+
+欢迎各种形式的贡献！
+
+1. Fork 本仓库
+2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
+3. 提交更改 (`git commit -m 'Add some amazing feature'`)
+4. 推送到分支 (`git push origin feature/amazing-feature`)
+5. 发起 Pull Request
+
+---
+
 ## 📂 项目结构
 
 ```
 ai-gateway/
 ├── src/                  # Rust 后端
-│   ├── lib.rs            # 库入口
-│   ├── main.rs           # 独立服务器入口
-│   ├── config.rs         # 配置管理
 │   ├── api/              # REST API
 │   ├── db/               # 数据库层 (r2d2 连接池)
 │   ├── proxy/            # 代理处理器
@@ -330,16 +354,31 @@ ai-gateway/
 │   └── src/
 │       ├── i18n.ts       # 国际化
 │       ├── presets.ts    # 平台/模型预设
-│       ├── ThemeContext.tsx # 主题管理
 │       └── pages/        # 页面组件
 ├── src-tauri/            # Tauri 桌面应用
-├── static/               # 构建产物（前端）
+├── doc/                  # 截图 & 文档
 ├── config.toml           # 配置文件
 └── data/                 # SQLite 数据库
 ```
 
 ---
 
+## ⭐ Star History
+
+<p align="center">
+  <a href="https://star-history.com/#keiskeies/ai-gateway&Date">
+    <img src="https://api.star-history.com/svg?repos=keiskeies/ai-gateway&type=Date" alt="Star History Chart" width="600" />
+  </a>
+</p>
+
+---
+
 ## 📜 License
 
-MIT License
+[MIT License](LICENSE)
+
+---
+
+<p align="center">
+  觉得有用？给个 <a href="https://github.com/keiskeies/ai-gateway">⭐ Star</a> 支持一下呗！
+</p>

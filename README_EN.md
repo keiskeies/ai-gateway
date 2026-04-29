@@ -1,5 +1,12 @@
 <p align="center">
-  <img src="logo.png" width="120" alt="AI Gateway Logo" />
+  <img src="logo.png" width="100" alt="AI Gateway Logo" />
+</p>
+
+<h1 align="center">🚀 AI Gateway</h1>
+
+<p align="center">
+  <strong>One Gateway to Aggregate All AI Platforms</strong><br/>
+  Multi-Key Load Balancing · Auto Failover · OpenAI & Anthropic Dual Protocol · Zero Code Changes
 </p>
 
 <p align="center">
@@ -7,19 +14,32 @@
   <img src="https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Windows%20%7C%20Linux-green" alt="Platform" />
   <img src="https://img.shields.io/badge/License-MIT-yellow" alt="License" />
-</p>
-
-<h1 align="center">🚀 AI Gateway</h1>
-
-<p align="center">
-  <strong>Cross-platform AI API Aggregation & Intelligent Load Balancer</strong><br/>
-  Unified access to OpenAI · Anthropic · Google Gemini · DeepSeek · Qwen · Moonshot · Zhipu AI · Doubao · Ollama · NVIDIA NIM · Azure · More...<br/><br/>
-  <strong>Dual-Protocol Native Support:</strong> Compatible with both OpenAI and Anthropic Messages API formats — one gateway for the entire ecosystem
+  <a href="https://github.com/keiskeies/ai-gateway/stargazers"><img src="https://img.shields.io/github/stars/keiskeies/ai-gateway?style=social" alt="Stars" /></a>
 </p>
 
 <p align="center">
   <a href="README.md">中文</a> | <a href="README_EN.md">English</a>
 </p>
+
+<p align="center">
+  <a href="#-quick-start"><strong>Get Started in 30 Seconds →</strong></a>
+</p>
+
+---
+
+> 🌟 **If this project helps you, please give it a Star! Your support drives continuous improvement.**
+
+---
+
+## 😩 Sound Familiar?
+
+- 🔴 **429 rate limits** hitting you mid-conversation
+- 🔴 Free tier **3 RPM is nowhere near enough**
+- 🔴 DeepSeek is cheap but flaky, OpenAI is stable but pricey — **no easy way to switch**
+- 🔴 Multiple AI platforms with different API formats = **messy if-else in your code**
+- 🔴 Want to use both Claude and GPT, but **managing multiple SDKs and base URLs is a pain**
+
+**AI Gateway was built to solve all of these.**
 
 ---
 
@@ -29,6 +49,9 @@
   <img src="doc/ai-gateway1.jpg" width="80%" alt="AI Gateway Main Interface" />
 </p>
 <p align="center"><em>Main Interface — Virtual Model Management</em></p>
+
+<details>
+<summary>📱 Click to see more screenshots</summary>
 
 <p align="center">
   <img src="doc/ai-gateway2.jpg" width="80%" alt="AI Gateway Platform Management" />
@@ -50,13 +73,15 @@
 </p>
 <p align="center"><em>Settings Page — Port Configuration & Theme Switching</em></p>
 
+</details>
+
 ---
 
-## 🔥 Why AI Gateway?
+## ⚡ Core Capabilities
 
-### 💡 Multi-Key Load Balancing — Break Through AI Platform Rate Limits
+### 🎯 Multi-Key Load Balancing — Rate Limits? What Rate Limits?
 
-Many AI platforms offer free tiers but impose strict rate limits (e.g., 3 or 10 requests per minute). AI Gateway's core capability is **distributing requests across multiple API Keys via load balancing**, effectively multiplying your rate limit by N:
+Distribute requests across multiple API Keys — **N keys = N× throughput**:
 
 ```
 Your App (high-frequency requests)
@@ -69,150 +94,185 @@ Your App (high-frequency requests)
                                    Total throughput: 4 × 3 = 12 RPM 🚀
 ```
 
-**Super simple setup**:
-1. In "Platform Management", add the same AI platform multiple times with different API Keys
-2. In "Virtual Models", add models from these same-platform-different-key configurations as backends
-3. Select a load balancing strategy and start — requests are automatically distributed across keys
+> 💡 **Free tier hack**: Multiple free accounts on SiliconFlow, Groq, etc. × load balancing = unlimited free AI
 
-> Not just for free tiers! Even with paid platforms, multi-key load balancing significantly boosts concurrent throughput and prevents single-key rate-limit failures.
+### 🔀 5 Load Balancing Strategies
 
-### 🔀 5 Intelligent Load Balancing Strategies
+| Strategy | TL;DR | Best For |
+|----------|--------|----------|
+| **Round Robin** | Take turns, fair and square | Multi-key rate limit bypass |
+| **Weighted Random** | Higher weight = more work | Uneven backend performance |
+| **Least Connections** | Give it to whoever's idle | Streaming output scenarios |
+| **Priority** | Cheap first, expensive as fallback | Save money! DeepSeek → GPT fallback |
+| **Latency Based** | Pick the fastest | Latency-sensitive online services |
 
-| Strategy | Description | Best For |
-|----------|-------------|----------|
-| **Round Robin** | Distributes requests to backends in sequential order | Multi-key rate limit bypass: evenly spread requests across keys |
-| **Weighted Random** | Randomly assigns based on weights; higher-weight backends get more traffic | Backends with varying performance; quota-based allocation |
-| **Least Connections** | Prioritizes backends with the fewest active connections | Long-lived/streaming connections; avoid single-point overload |
-| **Priority** | Active-standby mode; higher-priority backends first, auto-failover on error | Cost optimization: cheap keys first, expensive keys as fallback |
-| **Latency Based** | Tracks real-time response latency per backend; selects the fastest | Latency-sensitive online services |
-
-### 🌐 Dual-Protocol Native Support
-
-AI Gateway is more than just an OpenAI-compatible proxy — **it natively supports the Anthropic Messages API protocol** without any protocol conversion middleware:
+### 🌐 OpenAI & Anthropic Dual Protocol — One Entry Point for Everything
 
 ```
-Your Application Code
-    │
-    ├── Using OpenAI SDK ─────→ POST /v1/chat/completions ──┐
-    │                                                        │
-    └── Using Anthropic SDK ──→ POST /v1/messages ──────────┤
-                                                             │
-                                                       AI Gateway
-                                                             │
-                                          ┌──────────────────┼──────────────────┐
-                                          ↓                  ↓                  ↓
-                                      DeepSeek            Qwen             OpenAI
-                                     (weight 3)        (weight 2)        (weight 1)
+OpenAI SDK ──→ /v1/chat/completions ──┐
+                                       ├──→ AI Gateway ──→ DeepSeek / Qwen / GPT / Claude ...
+Anthropic SDK ──→ /v1/messages ───────┘
 ```
 
-### 🛡️ High Availability & Smart Retries
+**Zero code changes** — just swap `base_url` to `http://localhost:1994/v1` and you're done.
 
-- **Automatic failover**: If a backend goes down, traffic is automatically routed to healthy backends
-- **Smart retries**: Auto-retry on 429 rate limits, 5xx server errors, and timeouts with exponential backoff
-- **Zero code changes**: Simply point your API Base URL to AI Gateway — no client modifications needed
+### 🛡️ High Availability — No Single Point of Failure
+
+- Backend down? **Auto-failover** to healthy backends
+- Rate limited? 429 / 5xx / timeout **auto-retry** with exponential backoff
+- Fully transparent: your app never notices backend switches
+
+---
+
+## 🆚 Comparison with Alternatives
+
+| | AI Gateway | Nginx Reverse Proxy | One API | LiteLLM |
+|---|---|---|---|---|
+| **Ready to use** | ✅ Desktop App + Server | ❌ Manual config | ✅ | ✅ |
+| **Visual management** | ✅ Web UI | ❌ | ✅ | ❌ |
+| **Load balancing** | ✅ 5 strategies | ✅ Limited | ⚠️ Basic | ✅ |
+| **OpenAI protocol** | ✅ | ✅ | ✅ | ✅ |
+| **Anthropic protocol** | ✅ Native support | ❌ Extra config | ✅ Conversion | ✅ Conversion |
+| **Auto failover** | ✅ | ⚠️ Manual config | ⚠️ | ⚠️ |
+| **Remote model fetching** | ✅ Auto-fetch | ❌ | ❌ | ❌ |
+| **Local deployment** | ✅ Single binary, zero deps | ✅ | ✅ Docker | ✅ pip |
+| **Desktop app** | ✅ macOS/Win/Linux | ❌ | ❌ | ❌ |
+| **Language** | Rust (high perf, low memory) | C | Go | Python |
 
 ---
 
 ## ✨ More Features
 
-- **One-click platform setup**: 15+ built-in AI platform presets (including Google Gemini)
-- **Remote model fetching**: Automatically fetch available models from platform APIs when configuring backends — select from dropdown, no manual input
-- **Smart capability detection**: Model capabilities (chat/code/vision/function calling) auto-filled from presets, with manual override support
-- **reasoning_content support**: Compatible with chain-of-thought content from NVIDIA NIM and similar platforms, auto-forwarded in responses
-- **Dark/Light mode**: Supports light, dark, and follow-system themes
-- **Bilingual UI**: Full i18n support — switch between Chinese and English with one click
-- **Configurable port**: Admin port can be changed from the UI; default is 1994
-- **Cross-platform desktop app**: Native support for macOS / Windows / Linux (built on Tauri)
-- **Standalone server**: Single binary, zero dependencies — ideal for server deployment
+- 🏪 **15+ platform presets**: OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / Moonshot / Doubao / Ollama / NVIDIA NIM / Azure / SiliconFlow / Groq / Yi / Baichuan ··· one-click add
+- 🔍 **Remote model fetching**: Auto-fetch available models from platform APIs — pick from dropdown, no manual input
+- 🧠 **Smart capability detection**: Chat/code/vision/function-calling capabilities auto-filled from presets
+- 🔗 **reasoning_content support**: Compatible with chain-of-thought output from NVIDIA NIM etc.
+- 🌙 **Light / Dark / System** theme modes
+- 🌍 **Chinese & English** bilingual UI
+- ⚙️ Configurable port from the UI, default 1994
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Download Desktop App (Recommended)
+
+Head to [Releases](https://github.com/keiskeies/ai-gateway/releases) and download the installer for your platform.
+
+### Option 2: Build from Source
+
+```bash
+git clone https://github.com/keiskeies/ai-gateway.git
+cd ai-gateway
+
+# Standalone server mode
+cargo run
+# Visit http://localhost:1994
+
+# Or Tauri desktop app mode
+cargo install tauri-cli
+cargo tauri dev
+```
+
+### Three Steps to Get Going
+
+```
+1️⃣ Add Platform → Pick preset + Enter API Key → Save
+2️⃣ Create Virtual Model → Pick strategy + Add backends → Start
+3️⃣ Change base_url → Point to http://localhost:1994/v1 → Done
+```
+
+---
+
+## 📖 API Usage
+
+Change one line of code to integrate — **nothing else needed**:
+
+```python
+# OpenAI SDK — just change base_url
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:1994/v1",  # ← Change only this line
+    api_key="your-token"
+)
+response = client.chat.completions.create(
+    model="your-virtual-model",  # ← Your virtual model name
+    messages=[{"role": "user", "content": "hello"}]
+)
+
+# Anthropic SDK — same, just change base_url
+import anthropic
+client = anthropic.Anthropic(
+    base_url="http://localhost:1994",  # ← Change only this line
+    api_key="your-token"
+)
+response = client.messages.create(
+    model="your-virtual-model",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "hello"}]
+)
+```
+
+<details>
+<summary>🔧 curl Examples</summary>
+
+```bash
+# OpenAI-compatible format
+curl http://localhost:1994/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}]}'
+
+# Anthropic-compatible format
+curl http://localhost:1994/v1/messages \
+  -H "x-api-key: YOUR_TOKEN" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
+
+# List models
+curl http://localhost:1994/v1/models \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+</details>
+
+---
+
+## 🎯 Who Uses This? Typical Scenarios
+
+| Scenario | How | Benefit |
+|----------|-----|---------|
+| **Free-tier maximizer** | Round-robin across free keys | Free quota × N |
+| **Cost saver** | DeepSeek first + GPT fallback | 80%+ cost reduction |
+| **Reliability seeker** | Multi-backend + auto-failover | 99.9% availability |
+| **Multi-platform user** | Unified OpenAI + Claude entry | One line to switch |
+| **Team manager** | Shared gateway + API key management | Secure & controllable |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌──────────────────────────────────────────────┐
-│                AI Gateway                     │
-│                                              │
-│  ┌─────────┐  ┌─────────┐  ┌──────────────┐ │
-│  │ OpenAI  │  │Anthropic│  │  Admin Web   │ │
-│  │Endpoint │  │Endpoint │  │  Dashboard   │ │
-│  └────┬────┘  └────┬────┘  └──────────────┘ │
-│       │            │                         │
-│  ┌────▼────────────▼────┐                    │
-│  │  Routing & Load       │                    │
-│  │  Balancing Engine     │                    │
-│  └────┬───┬───┬────┬────┘                    │
-│       │   │   │    │                         │
-│  ┌────▼┐ ┌▼──┐┌▼───┐┌▼────┐                │
-│  │Deep │ │Qwen││GLM ││GPT │  ← Multiple     │
-│  │Seek │ │    ││    ││-4o │    backends      │
-│  └─────┘ └───┘└────┘└─────┘                │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│                    AI Gateway                     │
+│                                                  │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────┐  │
+│  │  OpenAI  │  │ Anthropic │  │  Admin Web   │  │
+│  │ Endpoint │  │ Endpoint  │  │  Dashboard   │  │
+│  └─────┬────┘  └─────┬─────┘  └──────────────┘  │
+│        │              │                           │
+│  ┌─────▼──────────────▼─────┐                     │
+│  │   Routing & Load Balance │                     │
+│  │        Engine            │                     │
+│  └──┬────┬────┬────┬────┬──┘                     │
+│     │    │    │    │    │                         │
+│  ┌──▼─┐┌─▼──┐┌▼───┐┌▼──┐┌▼────┐                │
+│  │Deep││Qwen││GLM ││GPT││Claude│  ← N backends  │
+│  │Seek││    ││    ││-4o││     │                   │
+│  └────┘└────┘└────┘└───┘└─────┘                │
+└──────────────────────────────────────────────────┘
 ```
-
----
-
-## 🚀 Quick Start
-
-### Option 1: Standalone Server Mode
-
-```bash
-# Clone the repository
-git clone https://github.com/keiskeies/ai-gateway.git
-cd ai-gateway
-
-# Build and run
-cargo run
-
-# Open the admin dashboard
-open http://localhost:1994
-```
-
-### Option 2: Tauri Desktop App Mode
-
-```bash
-# Install Tauri CLI
-cargo install tauri-cli
-
-# Development mode
-cargo tauri dev
-
-# Build desktop app
-cargo tauri build
-```
-
-### Option 3: Frontend Development Mode
-
-```bash
-# Terminal 1: Start the backend
-cargo run
-
-# Terminal 2: Start the frontend dev server
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 🎯 Typical Use Cases
-
-### Use Case 1: Multi-Key Free Tier Rate Limit Bypass
-
-> Platforms like SiliconFlow and Groq offer free credits but impose severe rate limits (3–30 RPM). Register multiple accounts to get multiple keys, then use AI Gateway's load balancing to distribute requests — multiplying your total throughput by N.
-
-1. In "Platform Management", add multiple configurations for the same platform (e.g., 3 SiliconFlow entries), each with a different API Key
-2. Create a virtual model and select the "Round Robin" strategy
-3. When adding backends, select each platform and pick models from the dropdown (auto-fetched) — done in one click
-4. Start the endpoint — 3 keys are used in rotation, rate limit threshold increased 3×.
-
-### Use Case 2: Cost Optimization — Cheap First, Expensive Fallback
-
-> DeepSeek is extremely affordable but occasionally unstable; OpenAI is reliable but costly. Use the "Priority" strategy to route traffic to DeepSeek first, with automatic failover to OpenAI on errors.
-
-### Use Case 3: Unified Entry for Multi-Platform
-
-> Your application needs both OpenAI's GPT-4o and Anthropic's Claude. AI Gateway supports both protocols simultaneously — one gateway covers everything.
 
 ---
 
@@ -240,65 +300,7 @@ retry_backoff_ms = 500
 request_timeout_secs = 120
 ```
 
-> 💡 The admin port can also be changed directly from the "Settings" page in the desktop app — no need to manually edit the config file.
-
----
-
-## 📖 Usage Guide
-
-### 1️⃣ Add a Platform
-
-Go to "Platform Management" → Click "Add Platform" → Select a preset or create custom → Enter your API Key → Save
-
-> 💡 You can add the same platform multiple times (each with a different API Key) for multi-key load balancing.
-
-### 2️⃣ Create a Virtual Model
-
-Go to "Virtual Models" → Click "New Virtual Model" → Set model name → Select load balancing strategy → Add backend models
-
-> 💡 When adding backend models, the system automatically fetches available models from the selected platform. Just pick from the dropdown — no need to type model IDs manually. Model capabilities are auto-filled from presets and can be manually adjusted.
-
-### 3️⃣ Call the API
-
-```bash
-# OpenAI-compatible format (supports all OpenAI SDKs)
-curl http://localhost:1994/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}]}'
-
-# Anthropic-compatible format (supports all Anthropic SDKs)
-curl http://localhost:1994/v1/messages \
-  -H "x-api-key: YOUR_TOKEN" \
-  -H "anthropic-version: 2023-06-01" \
-  -H "Content-Type: application/json" \
-  -d '{"model":"your-virtual-model","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
-
-# List models
-curl http://localhost:1994/v1/models \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-**Python Examples:**
-
-```python
-# OpenAI SDK
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:1994/v1", api_key="YOUR_TOKEN")
-response = client.chat.completions.create(
-    model="your-virtual-model",
-    messages=[{"role": "user", "content": "hello"}]
-)
-
-# Anthropic SDK
-import anthropic
-client = anthropic.Anthropic(base_url="http://localhost:1994", api_key="YOUR_TOKEN")
-response = client.messages.create(
-    model="your-virtual-model",
-    max_tokens=1024,
-    messages=[{"role": "user", "content": "hello"}]
-)
-```
+> 💡 The admin port can also be changed from the "Settings" page in the desktop app — no manual config editing needed.
 
 ---
 
@@ -313,14 +315,36 @@ response = client.messages.create(
 
 ---
 
+## 🗺️ Roadmap
+
+- [ ] 📊 Richer statistics dashboard (daily/weekly/monthly usage trends)
+- [ ] 🔑 Fine-grained API key permissions (per-model / per-quota rate limiting)
+- [ ] 🌐 Multi-modal gateway (translation / TTS / embedding unified endpoints)
+- [ ] 🔔 Backend health checks & anomaly alerting
+- [ ] 🐳 Docker one-click deployment
+- [ ] ☁️ Cloud config sync
+
+> Have a feature request? [Open an Issue](https://github.com/keiskeies/ai-gateway/issues)!
+
+---
+
+## 🤝 Contributing
+
+Contributions of all kinds are welcome!
+
+1. Fork this repo
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add some amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
 ## 📂 Project Structure
 
 ```
 ai-gateway/
 ├── src/                  # Rust backend
-│   ├── lib.rs            # Library entry
-│   ├── main.rs           # Standalone server entry
-│   ├── config.rs         # Configuration management
 │   ├── api/              # REST API
 │   ├── db/               # Database layer (r2d2 connection pool)
 │   ├── proxy/            # Proxy handlers
@@ -331,16 +355,31 @@ ai-gateway/
 │   └── src/
 │       ├── i18n.ts       # Internationalization
 │       ├── presets.ts    # Platform/model presets
-│       ├── ThemeContext.tsx # Theme management
 │       └── pages/        # Page components
 ├── src-tauri/            # Tauri desktop app
-├── static/               # Build output (frontend)
+├── doc/                  # Screenshots & docs
 ├── config.toml           # Configuration file
 └── data/                 # SQLite database
 ```
 
 ---
 
+## ⭐ Star History
+
+<p align="center">
+  <a href="https://star-history.com/#keiskeies/ai-gateway&Date">
+    <img src="https://api.star-history.com/svg?repos=keiskeies/ai-gateway&type=Date" alt="Star History Chart" width="600" />
+  </a>
+</p>
+
+---
+
 ## 📜 License
 
-MIT License
+[MIT License](LICENSE)
+
+---
+
+<p align="center">
+  Found this useful? Give it a <a href="https://github.com/keiskeies/ai-gateway">⭐ Star</a>!
+</p>
