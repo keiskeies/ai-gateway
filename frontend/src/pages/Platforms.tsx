@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react'
-import { Button, Table, Modal, Form, Input, Select, Tag, Space, message, Popconfirm, Card, Typography } from 'antd'
+import { Button, Table, Modal, Form, Input, Select, Tag, Space, message, Popconfirm, Typography, Card } from 'antd'
 import { PlusOutlined, DeleteOutlined, EditOutlined, KeyOutlined } from '@ant-design/icons'
 import { listPlatforms, createPlatform, updatePlatform, deletePlatform } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
 import { platformPresets, getPresetName } from '../presets'
+import PageLayout from '../components/PageLayout'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 
 export default function Platforms() {
   const [platforms, setPlatforms] = useState<any[]>([])
@@ -100,7 +101,7 @@ export default function Platforms() {
       dataIndex: 'type',
       key: 'type',
       width: 120,
-      render: (v: string) => <Tag style={{ borderRadius: 4 }}>{v}</Tag>,
+      render: (v: string) => <Tag>{v}</Tag>,
     },
     { title: t(locale, 'baseUrl'), dataIndex: 'base_url', key: 'base_url', ellipsis: true },
     {
@@ -108,7 +109,7 @@ export default function Platforms() {
       dataIndex: 'status',
       key: 'status',
       width: 90,
-      render: (v: string) => <Tag color={v === 'Active' ? 'success' : 'default'} style={{ borderRadius: 4 }}>{v === 'Active' ? t(locale, 'active') : v}</Tag>,
+      render: (v: string) => <Tag color={v === 'Active' ? 'success' : 'default'}>{v === 'Active' ? t(locale, 'active') : v}</Tag>,
     },
     {
       title: 'API Key',
@@ -133,17 +134,14 @@ export default function Platforms() {
   ]
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={5} style={{ margin: 0 }}>{t(locale, 'platforms')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t(locale, 'addPlatform')}</Button>
-      </div>
-
-      <Card styles={{ body: { padding: 0 } }}>
+    <PageLayout
+      title={t(locale, 'platforms')}
+      extra={<Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>{t(locale, 'addPlatform')}</Button>}
+    >
+      <Card bordered className="table-card">
         <Table columns={columns} dataSource={platforms} rowKey="id" loading={loading} pagination={{ pageSize: 20, showSizeChanger: false }} />
       </Card>
 
-      {/* Create/Edit Platform Modal */}
       <Modal
         title={editItem ? t(locale, 'editPlatform') : t(locale, 'addPlatform')}
         open={modalOpen}
@@ -156,7 +154,7 @@ export default function Platforms() {
             <Text type="secondary" style={{ fontSize: 12 }}>{t(locale, 'quickPreset')}</Text>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
               {platformPresets.map((p) => (
-                <Tag key={p.name} color="processing" style={{ cursor: 'pointer', borderRadius: 4 }} onClick={() => applyPreset(p)}>
+                <Tag key={p.name} color="processing" style={{ cursor: 'pointer' }} onClick={() => applyPreset(p)}>
                   {getPresetName(p, locale)}
                 </Tag>
               ))}
@@ -181,6 +179,6 @@ export default function Platforms() {
           </Form.Item>
         </Form>
       </Modal>
-    </div>
+    </PageLayout>
   )
 }

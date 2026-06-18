@@ -1,16 +1,15 @@
 import { useEffect, useState } from 'react'
 import {
   Button, Table, Modal, Form, Input, Tag, Space,
-  message, Card, Popconfirm, Typography,
+  message, Popconfirm, Typography, Card,
 } from 'antd'
-import {
-  PlusOutlined, DeleteOutlined, CopyOutlined,
-} from '@ant-design/icons'
+import { PlusOutlined, DeleteOutlined, CopyOutlined } from '@ant-design/icons'
 import { listApiKeys, createApiKey, deleteApiKey } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
+import PageLayout from '../components/PageLayout'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 
 function generateAgToken(): string {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -27,7 +26,6 @@ export default function ApiKeys() {
   const [createOpen, setCreateOpen] = useState(false)
   const [form] = Form.useForm()
   const { locale } = useAppContext()
-  // Show generated key after creation
   const [createdKey, setCreatedKey] = useState<string>('')
 
   useEffect(() => { loadAll() }, [])
@@ -95,13 +93,15 @@ export default function ApiKeys() {
   ]
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-        <Title level={5} style={{ margin: 0 }}>{t(locale, 'apiKeys')}</Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setCreateOpen(true); setCreatedKey('') }}>{t(locale, 'newApiKey')}</Button>
-      </div>
-
-      <Card styles={{ body: { padding: 0 } }}>
+    <PageLayout
+      title={t(locale, 'apiKeys')}
+      extra={
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setCreateOpen(true); setCreatedKey('') }}>
+          {t(locale, 'newApiKey')}
+        </Button>
+      }
+    >
+      <Card bordered className="table-card">
         <Table columns={columns} dataSource={keys} rowKey="id" loading={loading} pagination={{ pageSize: 20, showSizeChanger: false }} />
       </Card>
 
@@ -143,6 +143,6 @@ export default function ApiKeys() {
           </Form>
         )}
       </Modal>
-    </div>
+    </PageLayout>
   )
 }

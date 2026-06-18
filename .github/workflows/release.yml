@@ -74,15 +74,12 @@ jobs:
           releaseBody: |
             See the assets below to download the installer for your platform.
 
-            ## What's New in v1.2.0
+            ## What's New in v1.2.1
 
-            - 🎯 **Remote model fetching**: Automatically fetch available models from platform APIs when configuring backends — select from dropdown, no manual input needed
-            - 🧠 **Smart capability detection**: Model capabilities (chat/code/vision/function calling) auto-filled from presets, with manual override support
-            - 🔄 **reasoning_content support**: Compatible with chain-of-thought content from NVIDIA NIM and similar platforms, auto-forwarded in responses
-            - 🗑️ **Simplified UI**: Removed standalone Models page — backend model configuration now integrated directly into Virtual Models
-            - 🏷️ **Platform name in backends**: Backend model tags now show platform name prefix (e.g., "OpenAI·gpt-4o") for clearer identification
-            - 🔧 **DB migration V5**: Backend model_id now stores actual model string instead of UUID foreign key
-            - ❌ **Removed auto-sync**: Removed the problematic auto-sync/manual-sync feature that could incorrectly delete backends — remote model fetching in Virtual Models replaces this entirely
+            - 🎨 **UI redesign**: Complete frontend redesign with modern design system, consistent dark/light themes, and polished card components
+            - 🏗️ **Layout improvements**: Aligned header with content, responsive navigation with labels, proper spacing and min-width constraints
+            - 🌗 **Theme consistency**: Fixed background color flashing, unified border colors, proper dark mode support across all components
+            - 📱 **Responsive design**: Better mobile support with collapsible navigation and adaptive layouts
 
             ## Existing Features
             - Dual-protocol native support: OpenAI & Anthropic Messages API

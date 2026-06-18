@@ -28,7 +28,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return (localStorage.getItem('theme') as ThemeMode) || 'dark'
   })
   const [locale, setLocaleState] = useState<Locale>(() => {
-    return (localStorage.getItem('locale') as Locale) || 'zh'
+    const stored = localStorage.getItem('locale')
+    return (stored === 'zh' || stored === 'en') ? stored : 'zh'
   })
   const [systemDark, setSystemDark] = useState(getSystemDark)
 
@@ -44,6 +45,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (themeMode === 'light') return false
     return systemDark
   }, [themeMode, systemDark])
+
+  useEffect(() => {
+    const expected = isDark ? 'dark-mode' : 'light-mode'
+    const bg = isDark ? '#0a0a0a' : '#f1f5f9'
+    document.documentElement.className = expected
+    document.documentElement.style.background = bg
+    document.body.style.background = bg
+  }, [isDark])
 
   const setThemeMode = (m: ThemeMode) => {
     setThemeModeState(m)
