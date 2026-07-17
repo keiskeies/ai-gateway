@@ -1,21 +1,22 @@
 pub mod strategy;
 
 use crate::models::route::{Backend, BackendStatus, LBStrategy};
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::collections::HashMap;
-use once_cell::sync;
 
-/// 后端选择器，维护每个路由的后端状态
+/// 后端选择器，使用 DashMap 实现无锁并发访问
 pub struct BackendSelector {
-    counters: sync::Lazy<std::sync::Mutex<HashMap<String, usize>>>,
-    connections: sync::Lazy<std::sync::Mutex<HashMap<String, usize>>>,
+    /// round-robin 计数器：route_id → counter
+    counters: DashMap<String, AtomicUsize>,
+    /// 活跃连接数：(route_id:backend_id) → count
+    connections: DashMap<String, AtomicUsize>,
 }
 
 impl BackendSelector {
     pub fn new() -> Self {
         Self {
-            counters: sync::Lazy::new(Default::default),
-            connections: sync::Lazy::new(Default::default),
+            counters: DashMap::new(),
+            connections: DashMap::new(),
         }
     }
 
@@ -33,10 +34,9 @@ impl BackendSelector {
     }
 
     fn round_robin_inner<'a>(&self, route_id: &str, backends: &[&'a Backend]) -> Option<&'a Backend> {
-        let mut counters = self.counters.lock().unwrap();
-        let counter = counters.entry(route_id.to_string()).or_insert(0);
-        let idx = *counter % backends.len();
-        *counter += 1;
+        let counter = self.counters.entry(route_id.to_string())
+            .or_insert_with(|| AtomicUsize::new(0));
+        let idx = counter.fetch_add(1, Ordering::Relaxed) % backends.len();
         Some(backends[idx])
     }
 
@@ -52,24 +52,23 @@ impl BackendSelector {
     }
 
     fn least_connections_inner<'a>(&self, route_id: &str, backends: &[&'a Backend]) -> Option<&'a Backend> {
-        let conns = self.connections.lock().unwrap();
         backends.iter().min_by_key(|b| {
             let key = format!("{}:{}", route_id, b.id);
-            *conns.get(&key).unwrap_or(&0)
+            self.connections.get(&key).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
         }).copied()
     }
 
     pub fn inc_connection(&self, route_id: &str, backend_id: &str) {
         let key = format!("{}:{}", route_id, backend_id);
-        let mut conns = self.connections.lock().unwrap();
-        *conns.entry(key).or_insert(0) += 1;
+        self.connections.entry(key)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn dec_connection(&self, route_id: &str, backend_id: &str) {
         let key = format!("{}:{}", route_id, backend_id);
-        let mut conns = self.connections.lock().unwrap();
-        if let Some(count) = conns.get_mut(&key) {
-            if *count > 0 { *count -= 1; }
+        if let Some(counter) = self.connections.get(&key) {
+            counter.fetch_sub(1, Ordering::Relaxed);
         }
     }
 }

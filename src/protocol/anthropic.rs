@@ -22,6 +22,9 @@ pub struct AnthropicRequest {
     pub tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// 保留未知字段，确保端到端透传
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +144,12 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
         }
     }
 
+    // 从 extra 中移除已由结构体字段处理的 key，避免重复
+    let mut extra = req.extra;
+    for key in &["model", "messages", "system", "max_tokens", "temperature", "top_p", "stream", "stop_sequences", "tools", "tool_choice"] {
+        extra.remove(*key);
+    }
+
     Ok(UnifiedRequest {
         model: req.model, messages, system: req.system,
         max_tokens: Some(req.max_tokens), temperature: req.temperature, top_p: req.top_p,
@@ -149,7 +158,8 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
             id: format!("tool_{}", t.name), tool_type: "function".to_string(),
             function: UnifiedFunction { name: t.name, description: t.description, parameters: Some(t.input_schema) },
         }).collect()),
-        tool_choice: None,
+        tool_choice: req.tool_choice.and_then(|v| serde_json::from_value(v).ok()),
+        extra,
     })
 }
 
@@ -203,6 +213,15 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
             name: t.function.name.clone(), description: t.function.description.clone(),
             input_schema: t.function.parameters.clone().unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
         }).collect::<Vec<_>>()).unwrap());
+    }
+    if let Some(tc) = &unified.tool_choice {
+        req.insert("tool_choice".into(), serde_json::to_value(tc).unwrap());
+    }
+    // 合并 extra 中的未知字段（已知字段优先，不覆盖）
+    for (k, v) in &unified.extra {
+        if !req.contains_key(k) {
+            req.insert(k.clone(), v.clone());
+        }
     }
     serde_json::Value::Object(req)
 }

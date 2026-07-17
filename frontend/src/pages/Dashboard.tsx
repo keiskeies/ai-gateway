@@ -34,22 +34,24 @@ interface OverviewStats {
   total_requests: number
   success_rate: number
   avg_latency_ms: number
+  active_proxies: number
+  total_proxies: number
   active_platforms: number
   total_platforms: number
-  total_tokens: number
-  input_tokens: number
-  output_tokens: number
-  total_proxies: number
+  total_models: number
+  total_token_input: number
+  total_token_output: number
 }
 
 interface ProxyWithStats {
   id: string
   name: string
   stats?: {
-    request_count: number
+    total_requests: number
     success_rate: number
     avg_latency_ms: number
-    total_tokens: number
+    total_token_input: number
+    total_token_output: number
   }
 }
 
@@ -62,7 +64,8 @@ interface PlatformWithStats {
     total_requests: number
     success_rate: number
     avg_latency_ms: number
-    total_tokens: number
+    total_token_input: number
+    total_token_output: number
   }
 }
 
@@ -138,8 +141,9 @@ function SuccessRing({ rate }: { rate: number }) {
 export default function Dashboard() {
   const [stats, setStats] = useState<OverviewStats>({
     total_requests: 0, success_rate: 0, avg_latency_ms: 0,
-    active_platforms: 0, total_platforms: 0, total_tokens: 0,
-    input_tokens: 0, output_tokens: 0, total_proxies: 0,
+    active_proxies: 0, total_proxies: 0,
+    active_platforms: 0, total_platforms: 0, total_models: 0,
+    total_token_input: 0, total_token_output: 0,
   })
   const [proxies, setProxies] = useState<ProxyWithStats[]>([])
   const [platforms, setPlatforms] = useState<PlatformWithStats[]>([])
@@ -201,7 +205,7 @@ export default function Dashboard() {
     return 'red'
   }
 
-  const totalTokens = (stats.input_tokens || 0) + (stats.output_tokens || 0)
+  const totalTokens = (stats.total_token_input || 0) + (stats.total_token_output || 0)
 
   return (
     <Stack gap="lg">
@@ -270,7 +274,7 @@ export default function Dashboard() {
           <StatCard
             icon={<IconArrowDown size={20} />}
             label={t(locale, 'inputTokens')}
-            value={formatTokenCount(stats.input_tokens || 0)}
+            value={formatTokenCount(stats.total_token_input || 0)}
             color="#2563eb"
           />
         </Grid.Col>
@@ -278,7 +282,7 @@ export default function Dashboard() {
           <StatCard
             icon={<IconArrowUp size={20} />}
             label={t(locale, 'outputTokens')}
-            value={formatTokenCount(stats.output_tokens || 0)}
+            value={formatTokenCount(stats.total_token_output || 0)}
             color="#16a34a"
           />
         </Grid.Col>
@@ -327,14 +331,14 @@ export default function Dashboard() {
                     </Badge>
                   </Group>
 
-                  {proxy.stats && proxy.stats.request_count > 0 ? (
+                  {proxy.stats && proxy.stats.total_requests > 0 ? (
                     <Group justify="space-between" wrap="nowrap">
                       <Stack gap={2}>
                         <Text size="xs" c="dimmed">
                           {t(locale, 'proxyRequests')}
                         </Text>
                         <Text size="sm" fw={600}>
-                          {formatNumber(proxy.stats.request_count)}
+                          {formatNumber(proxy.stats.total_requests)}
                         </Text>
                       </Stack>
                       <Stack gap={2} align="center">
@@ -382,70 +386,72 @@ export default function Dashboard() {
             </Stack>
           </Center>
         ) : (
-          <Stack gap="sm">
+          <Grid>
             {platforms.map((platform) => (
-              <Card key={platform.id} shadow="xs" padding="md" radius="sm" withBorder>
-                <Group justify="space-between" mb={4}>
-                  <Group gap="sm">
-                    <Text fw={600} size="sm">
-                      {getPlatformDisplayName(platform.name)}
-                    </Text>
-                    <Badge variant="outline" size="sm" color="gray">
-                      {platform.platform_type}
-                    </Badge>
+              <Grid.Col key={platform.id} span={{ base: 12, sm: 6, md: 3 }}>
+                <Card shadow="xs" padding="md" radius="sm" withBorder>
+                  <Group justify="space-between" mb={4}>
+                    <Group gap="sm" style={{ flex: 1, minWidth: 0 }}>
+                      <Text fw={600} size="sm" truncate>
+                        {getPlatformDisplayName(platform.name)}
+                      </Text>
+                      <Badge variant="outline" size="sm" color="gray" style={{ flexShrink: 0 }}>
+                        {platform.platform_type}
+                      </Badge>
+                    </Group>
+                    {platform.stats && platform.stats.total_requests > 0 && (
+                      <SuccessRing rate={platform.stats.success_rate} />
+                    )}
                   </Group>
-                  {platform.stats && platform.stats.total_requests > 0 && (
-                    <SuccessRing rate={platform.stats.success_rate} />
-                  )}
-                </Group>
 
-                <Text size="xs" c="dimmed" truncate>
-                  {platform.base_url}
-                </Text>
-
-                {platform.stats && platform.stats.total_requests > 0 ? (
-                  <Group gap="lg" mt="sm">
-                    <Stack gap={0}>
-                      <Text size="xs" c="dimmed">
-                        {t(locale, 'proxyRequests')}
-                      </Text>
-                      <Text size="sm" fw={600}>
-                        {formatNumber(platform.stats.total_requests)}
-                      </Text>
-                    </Stack>
-                    <Stack gap={0}>
-                      <Text size="xs" c="dimmed">
-                        {t(locale, 'successRate')}
-                      </Text>
-                      <Text size="sm" fw={600} c={successRateColor(platform.stats.success_rate)}>
-                        {platform.stats.success_rate.toFixed(1)}%
-                      </Text>
-                    </Stack>
-                    <Stack gap={0}>
-                      <Text size="xs" c="dimmed">
-                        {t(locale, 'avgLatency')}
-                      </Text>
-                      <Text size="sm" fw={600}>
-                        {Math.round(platform.stats.avg_latency_ms)}ms
-                      </Text>
-                    </Stack>
-                    <Stack gap={0}>
-                      <Text size="xs" c="dimmed">
-                        {t(locale, 'proxyTokens')}
-                      </Text>
-                      <Text size="sm" fw={600}>
-                        {formatTokenCount(platform.stats.total_tokens)}
-                      </Text>
-                    </Stack>
-                  </Group>
-                ) : (
-                  <Text size="xs" c="dimmed" mt={4}>
-                    {t(locale, 'noRequests')}
+                  <Text size="xs" c="dimmed" truncate>
+                    {platform.base_url}
                   </Text>
-                )}
-              </Card>
+
+                  {platform.stats && platform.stats.total_requests > 0 ? (
+                    <Group gap="xs" mt="sm">
+                      <Stack gap={0}>
+                        <Text size="xs" c="dimmed">
+                          {t(locale, 'proxyRequests')}
+                        </Text>
+                        <Text size="sm" fw={600}>
+                          {formatNumber(platform.stats.total_requests)}
+                        </Text>
+                      </Stack>
+                      <Stack gap={0}>
+                        <Text size="xs" c="dimmed">
+                          {t(locale, 'successRate')}
+                        </Text>
+                        <Text size="sm" fw={600} c={successRateColor(platform.stats.success_rate)}>
+                          {platform.stats.success_rate.toFixed(1)}%
+                        </Text>
+                      </Stack>
+                      <Stack gap={0}>
+                        <Text size="xs" c="dimmed">
+                          {t(locale, 'avgLatency')}
+                        </Text>
+                        <Text size="sm" fw={600}>
+                          {Math.round(platform.stats.avg_latency_ms)}ms
+                        </Text>
+                      </Stack>
+                      <Stack gap={0}>
+                        <Text size="xs" c="dimmed">
+                          {t(locale, 'proxyTokens')}
+                        </Text>
+                        <Text size="sm" fw={600}>
+                          {formatTokenCount((platform.stats.total_token_input || 0) + (platform.stats.total_token_output || 0))}
+                        </Text>
+                      </Stack>
+                    </Group>
+                  ) : (
+                    <Text size="xs" c="dimmed" mt={4}>
+                      {t(locale, 'noRequests')}
+                    </Text>
+                  )}
+                </Card>
+              </Grid.Col>
             ))}
-          </Stack>
+          </Grid>
         )}
       </Card>
     </Stack>

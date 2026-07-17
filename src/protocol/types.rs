@@ -13,6 +13,9 @@ pub struct UnifiedRequest {
     pub stop: Option<Vec<String>>,
     pub tools: Option<Vec<UnifiedTool>>,
     pub tool_choice: Option<ToolChoice>,
+    /// 保留原始请求中的未知字段，确保端到端透传不丢失
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

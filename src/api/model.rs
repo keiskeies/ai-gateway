@@ -1,4 +1,5 @@
 use actix_web::{web, HttpResponse};
+use crate::config::SystemProxy;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::models::model::*;
@@ -28,11 +29,11 @@ pub async fn test_connection(db: web::Data<DbPool>, config: web::Data<crate::api
     let result = match platform_type {
         crate::models::platform::PlatformType::Anthropic => {
             // Anthropic: POST /v1/messages with minimal payload
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            
+            let client = SystemProxy::detect().apply_to_builder(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+            ).build().map_err(|e| AppError::Internal(e.to_string()))?;
+
             let url = format!("{}/v1/messages", base_url);
             let mut req = client.post(&url)
                 .header("anthropic-version", "2023-06-01")
@@ -42,20 +43,20 @@ pub async fn test_connection(db: web::Data<DbPool>, config: web::Data<crate::api
                     "max_tokens": 1,
                     "messages": [{"role": "user", "content": "hi"}]
                 }));
-            
+
             if !api_key.is_empty() {
                 req = req.header("x-api-key", &api_key);
             }
-            
+
             req.send().await
         }
         _ => {
             // OpenAI compatible: GET /v1/models or minimal chat completion
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .map_err(|e| AppError::Internal(e.to_string()))?;
-            
+            let client = SystemProxy::detect().apply_to_builder(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(timeout_secs))
+            ).build().map_err(|e| AppError::Internal(e.to_string()))?;
+
             let url = format!("{}/chat/completions", base_url);
             let mut req = client.post(&url)
                 .header("content-type", "application/json")

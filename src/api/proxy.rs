@@ -1,9 +1,11 @@
 use actix_web::{web, HttpResponse};
+use crate::cache::RouteCache;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::models::proxy::*;
 use crate::models::model::Capability;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// Compute capabilities for a proxy as intersection of all backend model capabilities
 fn compute_caps_from_backends(
@@ -84,27 +86,43 @@ pub async fn get(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<Ht
     })))
 }
 
-pub async fn create(db: web::Data<DbPool>, body: web::Json<CreateProxyRequest>) -> AppResult<HttpResponse> {
+pub async fn create(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    body: web::Json<CreateProxyRequest>,
+) -> AppResult<HttpResponse> {
     let req = body.into_inner();
     let db = db.into_inner();
     let proxy = web::block(move || crate::db::proxy::create(&db, &req))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Created().json(proxy))
 }
 
-pub async fn update(db: web::Data<DbPool>, path: web::Path<String>, body: web::Json<UpdateProxyRequest>) -> AppResult<HttpResponse> {
+pub async fn update(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    path: web::Path<String>,
+    body: web::Json<UpdateProxyRequest>,
+) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let req = body.into_inner();
     let db = db.into_inner();
     let proxy = web::block(move || crate::db::proxy::update(&db, &id, &req))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Ok().json(proxy))
 }
 
-pub async fn delete(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
+pub async fn delete(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    path: web::Path<String>,
+) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
     web::block(move || crate::db::proxy::delete(&db, &id))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::NoContent().finish())
 }

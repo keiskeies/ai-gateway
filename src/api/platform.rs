@@ -1,7 +1,10 @@
 use actix_web::{web, HttpResponse};
+use crate::cache::RouteCache;
+use crate::config::SystemProxy;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::models::platform::*;
+use std::sync::Arc;
 
 pub async fn list(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
     let db = db.into_inner();
@@ -22,28 +25,44 @@ pub async fn get(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<Ht
     Ok(HttpResponse::Ok().json(platform))
 }
 
-pub async fn create(db: web::Data<DbPool>, body: web::Json<CreatePlatformRequest>) -> AppResult<HttpResponse> {
+pub async fn create(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    body: web::Json<CreatePlatformRequest>,
+) -> AppResult<HttpResponse> {
     let req = body.into_inner();
     let db = db.into_inner();
     let platform = web::block(move || crate::db::platform::create(&db, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Created().json(platform))
 }
 
-pub async fn update(db: web::Data<DbPool>, path: web::Path<String>, body: web::Json<UpdatePlatformRequest>) -> AppResult<HttpResponse> {
+pub async fn update(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    path: web::Path<String>,
+    body: web::Json<UpdatePlatformRequest>,
+) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let req = body.into_inner();
     let db = db.into_inner();
     let platform = web::block(move || crate::db::platform::update(&db, &id, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Ok().json(platform))
 }
 
-pub async fn delete(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
+pub async fn delete(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    path: web::Path<String>,
+) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
     web::block(move || crate::db::platform::delete(&db, &id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -64,10 +83,10 @@ pub async fn fetch_remote_models(
     let api_key = platform.api_key.clone();
     let platform_type = platform.platform_type.clone();
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout_secs))
-        .build()
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let client = SystemProxy::detect().apply_to_builder(
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+    ).build().map_err(|e| AppError::Internal(e.to_string()))?;
 
     let result = match platform_type {
         PlatformType::Anthropic => {
