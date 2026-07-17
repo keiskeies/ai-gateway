@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AI Gateway",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "identifier": "com.aigateway.desktop",
   "build": {
     "frontendDist": "../static",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "cd ../frontend && npm run dev -- --port 1420",
-    "beforeBuildCommand": "cd ../frontend && npm run build"
+    "beforeBuildCommand": ""
   },
   "app": {
     "windows": [

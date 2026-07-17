@@ -45,7 +45,7 @@ export default function App() {
             <Group gap={6} onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>
               <img src="./logo.png" alt="" style={{ height: 28 }} />
               <Text fw={700} size="lg">AI Gateway</Text>
-              <Text size="xs" c="dimmed">v1.2.3</Text>
+              <Text size="xs" c="dimmed">v1.2.4</Text>
             </Group>
           </Group>
           <Group gap={4}>

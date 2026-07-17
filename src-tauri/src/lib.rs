@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
 
 use ai_gateway::api::settings::SharedAppConfig;
+use ai_gateway::cache::{RouteCache, StatsWriter};
 
 /// Port the backend will listen on (determined at runtime)
 static BACKEND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
@@ -108,10 +109,14 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = app.handle().clone();
     let quit = app.handle().clone();
 
+    // 启动时构建一次菜单，避免在事件回调中动态 set_menu 导致菜单闪烁消失
+    let menu = build_tray_menu_items(app.handle());
+
     TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("AI Gateway")
-        .on_tray_icon_event(move |tray, event| {
+        .menu(&menu)
+        .on_tray_icon_event(move |_tray, event| {
             match event {
                 TrayIconEvent::Click {
                     button: MouseButton::Left,
@@ -127,17 +132,6 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                             tracing::warn!("Failed to focus window: {}", e);
                         });
                     }
-                }
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    // Right click: show context menu
-                    let items = build_tray_menu_items(&show);
-                    tray.set_menu(Some(items)).unwrap_or_else(|e| {
-                        tracing::warn!("Failed to set tray menu: {}", e);
-                    });
                 }
                 _ => {}
             }
@@ -244,19 +238,28 @@ fn start_backend_server() {
         let db_pool = ai_gateway::db::init_pool(&db_path)
             .expect("Failed to initialize database");
 
-        let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(app_config.defaults.request_timeout_secs))
-            .build()
-            .expect("Failed to create HTTP client");
+        // 自动检测系统代理
+        let system_proxy = ai_gateway::config::SystemProxy::detect();
+        let http_client = system_proxy.apply_to_builder(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(app_config.defaults.request_timeout_secs))
+        ).build().expect("Failed to create HTTP client");
 
         let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
         let selector = Arc::new(ai_gateway::lb::BackendSelector::new());
+
+        // 初始化内存缓存和异步统计写入器
+        let cache = RouteCache::new(db_pool.clone());
+        let stats_writer = StatsWriter::start(db_pool.clone());
+        let api_cache = Arc::new(cache.clone());
 
         let proxy_state = Arc::new(ai_gateway::proxy::handler::ProxyState {
             db: db_pool.clone(),
             config: app_config.clone(),
             selector,
             http_client,
+            cache,
+            stats_writer,
         });
 
         let static_dir = app_config.static_dir();
@@ -268,9 +271,8 @@ fn start_backend_server() {
 
         // Store the port so the main thread can find it
         BACKEND_PORT.store(admin_port, Ordering::Relaxed);
-        BACKEND_READY.store(true, Ordering::Relaxed);
 
-        HttpServer::new(move || {
+        let server = HttpServer::new(move || {
             let cors = Cors::permissive();
 
             App::new()
@@ -279,6 +281,7 @@ fn start_backend_server() {
                 .app_data(web::Data::new(db_pool.clone()))
                 .app_data(web::Data::new(proxy_state.clone()))
                 .app_data(web::Data::new(shared_config.clone()))
+                .app_data(web::Data::new(api_cache.clone()))
                 .configure(ai_gateway::api::configure)
                 // Global virtual model proxy routes — all on admin port, model name in request body
                 .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
@@ -289,9 +292,11 @@ fn start_backend_server() {
                 .service(actix_files::Files::new("/", &static_dir).index_file("index.html"))
         })
         .bind(format!("{}:{}", host, admin_port))
-        .expect("Failed to bind server")
-        .run()
-        .await
-        .expect("Server error");
+        .expect("Failed to bind server");
+
+        // bind 成功后才标记就绪，避免主线程在服务未就绪时导航
+        BACKEND_READY.store(true, Ordering::Relaxed);
+
+        server.run().await.expect("Server error");
     });
 }
