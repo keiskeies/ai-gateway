@@ -72,23 +72,56 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: 'AI Gateway ${{ github.ref_name }}'
           releaseBody: |
-            See the assets below to download the installer for your platform.
+            下方 Assets 选择对应平台的安装包下载即可。
 
-            ## What's New in v1.2.4
+            ---
 
-            - 🎨 **UI redesign**: Complete frontend redesign with modern design system, consistent dark/light themes, and polished card components
-            - 🏗️ **Layout improvements**: Aligned header with content, responsive navigation with labels, proper spacing and min-width constraints
-            - 🌗 **Theme consistency**: Fixed background color flashing, unified border colors, proper dark mode support across all components
-            - 📱 **Responsive design**: Better mobile support with collapsible navigation and adaptive layouts
+            ## 🆕 v1.2.4 更新内容
 
-            ## Existing Features
-            - Dual-protocol native support: OpenAI & Anthropic Messages API
-            - Google Gemini platform preset
-            - Settings page with configurable admin port
-            - 15+ built-in platform presets
-            - 5 load balancing strategies
-            - Dark/Light/System theme
-            - Chinese/English i18n
-          releaseDraft: true
+            - 🎨 **全新 UI 设计**：基于 Mantine 设计系统重构前端，统一的明暗主题、精致的卡片组件与间距
+            - 🏗️ **布局优化**：头部与内容对齐，响应式导航带标签，合理的间距与最小宽度约束
+            - 🌗 **主题一致性**：修复背景色闪烁，统一边框配色，全组件完善深色模式
+            - 📱 **响应式设计**：更好的移动端支持，可折叠导航与自适应布局
+            - ✏️ **模型名称支持手动输入**：虚拟大模型配置后端时，可从平台拉取的模型列表中选择，也可直接手动输入任意模型名称，灵活适配自定义与私有部署模型
+            - 🪟 **编辑统一弹窗**：虚拟大模型编辑使用与新建完全一致的弹窗表单，可直接修改名称、负载均衡策略及全部后端模型
+
+            ---
+
+            ## 🚀 软件功能介绍
+
+            AI Gateway 是一个跨平台（macOS / Windows / Linux）的 **AI 接口聚合与负载均衡网关**，桌面 App + 独立服务器双形态，一个入口聚合所有 AI 平台。
+
+            ### 核心能力
+            - **多 Key 负载均衡**：多个 API Key 轮询/加权/分流，N 个 Key = N 倍吞吐量，突破单 Key 限流瓶颈
+            - **5 种负载均衡策略**：轮询、加权随机、最少连接、优先级（主备兜底）、延迟优先
+            - **OpenAI & Anthropic 双协议原生支持**：零代码改造，仅改 `base_url` 即可接入
+            - **高可用自动故障切换**：后端异常 / 429 限流 / 5xx / 超时 自动重试 + 指数退避 + 切换健康后端，对应用完全透明
+
+            ### 平台与模型
+            - **15+ 平台预设**：OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / 月之暗面 / 豆包 / Ollama / NVIDIA NIM / Azure / SiliconFlow / Groq / 零一万物 / 百川，一键添加
+            - **远程模型获取**：选择平台后自动拉取可用模型列表，下拉选择；也支持手动输入任意模型名称
+            - **智能能力识别**：聊天/代码/视觉/函数调用等能力自动填充，支持手动覆盖
+            - **reasoning_content 支持**：兼容 NVIDIA NIM 等平台思维链输出，自动透传
+
+            ### 管理与易用
+            - **可视化管理**：Web UI 管理平台、虚拟模型、API Key、统计概览
+            - **虚拟大模型**：将多个后端 AI 模型负载均衡为统一入口，客户端按虚拟模型名请求
+            - **API Key 管理**：全局通用，可选关联虚拟模型
+            - **统计概览**：Token 用量与请求统计
+            - **使用方式代码示例**：内置 cURL / Python / Node.js 调用示例，一键复制
+            - **设置页**：端口、监听地址、日志级别、重试、超时、默认负载均衡策略均可界面配置
+            - **浅色 / 深色 / 跟随系统** 三种主题
+            - **中英双语** UI
+
+            ### 技术栈
+            - 后端：Rust · Actix-Web · SQLite (r2d2 连接池) · Reqwest
+            - 前端：React · TypeScript · Mantine · Vite
+            - 桌面端：Tauri 2.0，单二进制零依赖
+
+            ### 快速上手
+            1. 添加平台 → 选预设 + 填 API Key → 保存
+            2. 创建虚拟模型 → 选策略 + 添加后端 → 启动
+            3. 改 `base_url` → 指向 `http://localhost:1994/v1` → 完事
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
