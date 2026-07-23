@@ -1,31 +1,26 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import {
   Card,
-  Grid,
+  SimpleGrid,
   Text,
   Badge,
   Group,
   Stack,
-  RingProgress,
   ThemeIcon,
-  Loader,
   ActionIcon,
   Tooltip,
   Center,
+  SegmentedControl,
+  LoadingOverlay,
 } from '@mantine/core'
+import { AreaChart } from '@mantine/charts'
 import {
-  IconBolt,
-  IconCheck,
-  IconClock,
   IconServer,
-  IconCoin,
-  IconArrowDown,
-  IconArrowUp,
   IconApi,
   IconRefresh,
-  IconCircleCheck,
+  IconChartBar,
 } from '@tabler/icons-react'
-import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats } from '../api'
+import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale } from '../i18n'
 import { getPresetName, platformPresets } from '../presets'
@@ -80,61 +75,215 @@ function formatTokenCount(n: number | undefined): string {
   return v.toString()
 }
 
-function StatCard({
-  icon,
-  label,
-  value,
-  suffix,
-  color,
-}: {
-  icon: React.ReactNode
-  label: string
-  value: string
-  suffix?: string
-  color?: string
-}) {
+const successRateColor = (rate: number) => {
+  if (rate > 90) return '#52c41a'
+  if (rate > 70) return '#fa8c16'
+  return '#f5222d'
+}
+
+const dashStyles: Record<string, React.CSSProperties> = {
+  itemCard: {
+    background: 'var(--mantine-color-body)',
+    border: '1px solid var(--mantine-color-default-border)',
+    borderRadius: 'var(--mantine-radius-sm)',
+    padding: '8px 10px',
+    transition: 'all 0.2s ease',
+    cursor: 'default',
+  },
+  itemCardHover: {
+    borderColor: 'var(--mantine-primary-color-filled)',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+    transform: 'translateY(-1px)',
+  },
+  sectionTitle: {
+    fontWeight: 600 as const,
+    fontSize: '13px',
+  },
+  sectionCount: {
+    fontSize: '11px',
+    color: 'var(--mantine-color-dimmed)',
+    background: 'var(--mantine-color-gray-1)',
+    padding: '1px 8px',
+    borderRadius: '10px',
+  },
+}
+
+function ItemCard({ children }: { children: React.ReactNode }) {
+  const [hovered, setHovered] = useState(false)
   return (
-    <Card shadow="sm" padding="lg" radius="md" withBorder>
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={4}>
-          <Text size="sm" c="dimmed">
-            {label}
-          </Text>
-          <Group gap={4} align="baseline">
-            <Text fw={700} size="xl" style={{ color }}>
-              {value}
-            </Text>
-            {suffix && (
-              <Text size="sm" c="dimmed">
-                {suffix}
-              </Text>
-            )}
-          </Group>
-        </Stack>
-        <ThemeIcon variant="light" size="lg" radius="md" color="gray">
-          {icon}
-        </ThemeIcon>
-      </Group>
-    </Card>
+    <div
+      style={{
+        ...dashStyles.itemCard,
+        ...(hovered ? dashStyles.itemCardHover : {}),
+      }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {children}
+    </div>
   )
 }
 
-function SuccessRing({ rate }: { rate: number }) {
-  const color = rate > 90 ? 'green' : rate > 70 ? 'yellow' : 'red'
+// ---- 模型请求统计图表 ----
+interface ModelTimeSeriesPoint {
+  period: string
+  model_id: string
+  requests: number
+  token_input: number
+  token_output: number
+}
+
+interface ModelTimeSeriesStats {
+  granularity: string
+  periods: string[]
+  data: ModelTimeSeriesPoint[]
+}
+
+type Metric = 'requests' | 'token_input' | 'token_output'
+type Granularity = 'day' | 'month' | 'year'
+
+const MODEL_CHART_COLORS = [
+  'blue.6', 'violet.6', 'teal.6', 'orange.6', 'pink.6',
+  'indigo.6', 'cyan.6', 'lime.6', 'red.6', 'grape.6',
+  'yellow.6', 'green.6',
+]
+
+function ModelStatsSection({ locale }: { locale: Locale }) {
+  const [granularity, setGranularity] = useState<Granularity>('day')
+  const [metric, setMetric] = useState<Metric>('requests')
+  const [data, setData] = useState<ModelTimeSeriesStats | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [refreshNonce, setRefreshNonce] = useState(0)
+
+  const loadData = useCallback(async (g: Granularity) => {
+    setLoading(true)
+    try {
+      const result = await getModelTimeSeries(g)
+      setData(result)
+    } catch {
+      setData(null)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadData(granularity)
+  }, [granularity, loadData, refreshNonce])
+
+  // 将扁平数据透视为图表所需格式：每个周期一行，每个模型一列。
+  // 注意：模型名可能包含 "." 或 "/"（如 "Qwen/Qwen3.5-122B-A10B"），
+  // recharts 会把 dataKey 中的 "." 当作对象路径解析导致取不到值，
+  // 因此用安全索引 "m{index}" 作为 dataKey，用 label 显示真实模型名。
+  const { chartData, series } = useMemo(() => {
+    if (!data) return { chartData: [], series: [] as { name: string; label: string; color: string }[] }
+    const modelSet = new Set<string>()
+    data.data.forEach((p) => modelSet.add(p.model_id))
+    const models = Array.from(modelSet)
+
+    const lookup: Record<string, Record<string, ModelTimeSeriesPoint>> = {}
+    data.data.forEach((p) => {
+      if (!lookup[p.period]) lookup[p.period] = {}
+      lookup[p.period][p.model_id] = p
+    })
+
+    const chartData = data.periods.map((period) => {
+      const row: Record<string, any> = { period }
+      models.forEach((m, i) => {
+        const point = lookup[period]?.[m]
+        row[`m${i}`] = point ? point[metric] : 0
+      })
+      return row
+    })
+
+    const series = models.map((m, i) => ({
+      name: `m${i}`,
+      label: m,
+      color: MODEL_CHART_COLORS[i % MODEL_CHART_COLORS.length],
+    }))
+
+    return { chartData, series }
+  }, [data, metric])
+
+  const valueFormatter = (value: number) => {
+    if (metric === 'requests') return value.toLocaleString()
+    return formatTokenCount(value)
+  }
+
+  const hasData = series.length > 0
+
   return (
-    <RingProgress
-      size={44}
-      thickness={4}
-      roundCaps
-      sections={[{ value: Math.min(rate, 100), color }]}
-      label={
-        <Center>
-          <Text size="xs" fw={600}>
-            {rate.toFixed(0)}
-          </Text>
-        </Center>
-      }
-    />
+    <div>
+      <Group justify="space-between" mb="xs" align="center">
+        <Group gap="xs">
+          <ThemeIcon variant="light" size={28} radius="sm" color="blue">
+            <IconChartBar size={16} />
+          </ThemeIcon>
+          <Text style={dashStyles.sectionTitle}>{t(locale, 'modelStats')}</Text>
+        </Group>
+        <Group gap="xs">
+          <SegmentedControl
+            size="xs"
+            value={metric}
+            onChange={(v) => setMetric(v as Metric)}
+            data={[
+              { label: t(locale, 'metricRequests'), value: 'requests' },
+              { label: t(locale, 'inputTokens'), value: 'token_input' },
+              { label: t(locale, 'outputTokens'), value: 'token_output' },
+            ]}
+          />
+          <SegmentedControl
+            size="xs"
+            value={granularity}
+            onChange={(v) => setGranularity(v as Granularity)}
+            data={[
+              { label: t(locale, 'granularityDay'), value: 'day' },
+              { label: t(locale, 'granularityMonth'), value: 'month' },
+              { label: t(locale, 'granularityYear'), value: 'year' },
+            ]}
+          />
+          <Tooltip label={t(locale, 'refresh')}>
+            <ActionIcon variant="subtle" size="sm" loading={loading} onClick={() => setRefreshNonce((n) => n + 1)}>
+              <IconRefresh size={14} />
+            </ActionIcon>
+          </Tooltip>
+        </Group>
+      </Group>
+
+      <Card
+        padding="sm"
+        style={{ position: 'relative', minHeight: 320, ...dashStyles.itemCard }}
+      >
+        <LoadingOverlay visible={loading} />
+        {hasData ? (
+          <AreaChart
+            h={300}
+            data={chartData}
+            dataKey="period"
+            series={series}
+            type="stacked"
+            curveType="monotone"
+            withLegend
+            withDots={false}
+            strokeWidth={1.5}
+            fillOpacity={0.35}
+            valueFormatter={valueFormatter}
+            yAxisProps={{ width: 60 }}
+            xAxisProps={granularity === 'day' ? { interval: 3, angle: -30, textAnchor: 'end', height: 50 } : undefined}
+            tooltipProps={{ animationDuration: 100 }}
+          />
+        ) : (
+          <Center h={300}>
+            <Stack align="center" gap="xs">
+              <ThemeIcon variant="light" size={36} radius="xl" color="gray">
+                <IconChartBar size={18} />
+              </ThemeIcon>
+              <Text size="xs" c="dimmed">{t(locale, 'noChartData')}</Text>
+            </Stack>
+          </Center>
+        )}
+      </Card>
+    </div>
   )
 }
 
@@ -199,16 +348,10 @@ export default function Dashboard() {
     return preset ? getPresetName(preset, locale) : name
   }
 
-  const successRateColor = (rate: number) => {
-    if (rate > 90) return 'green'
-    if (rate > 70) return 'yellow'
-    return 'red'
-  }
-
   const totalTokens = (stats.total_token_input || 0) + (stats.total_token_output || 0)
 
   return (
-    <Stack gap="lg">
+    <Stack gap="sm">
       {/* Header */}
       <Group justify="space-between">
         <Text fw={700} size="lg">
@@ -221,239 +364,141 @@ export default function Dashboard() {
         </Tooltip>
       </Group>
 
-      {/* Stats Cards Row 1 */}
-      <Grid>
-        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
-          <StatCard
-            icon={<IconBolt size={20} />}
-            label={t(locale, 'totalRequests')}
-            value={formatNumber(stats.total_requests || 0)}
-            color="#2563eb"
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
-          <StatCard
-            icon={<IconCircleCheck size={20} />}
-            label={t(locale, 'successRate')}
-            value={(stats.success_rate || 0).toFixed(1)}
-            suffix="%"
-            color={(stats.success_rate || 0) > 90 ? '#16a34a' : '#dc2626'}
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
-          <StatCard
-            icon={<IconClock size={20} />}
-            label={t(locale, 'avgLatency')}
-            value={formatNumber(Math.round(stats.avg_latency_ms || 0))}
-            suffix="ms"
-            color="#d97706"
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xs: 6, sm: 3 }}>
-          <StatCard
-            icon={<IconServer size={20} />}
-            label={t(locale, 'activePlatforms')}
-            value={String(stats.active_platforms || 0)}
-            suffix={`/ ${stats.total_platforms || 0}`}
-            color="#7c3aed"
-          />
-        </Grid.Col>
-      </Grid>
-
-      {/* Stats Cards Row 2 - Tokens */}
-      <Grid>
-        <Grid.Col span={{ base: 12, xs: 4 }}>
-          <StatCard
-            icon={<IconCoin size={20} />}
-            label={t(locale, 'totalTokens')}
-            value={formatTokenCount(totalTokens)}
-            color="#0891b2"
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xs: 4 }}>
-          <StatCard
-            icon={<IconArrowDown size={20} />}
-            label={t(locale, 'inputTokens')}
-            value={formatTokenCount(stats.total_token_input || 0)}
-            color="#2563eb"
-          />
-        </Grid.Col>
-        <Grid.Col span={{ base: 12, xs: 4 }}>
-          <StatCard
-            icon={<IconArrowUp size={20} />}
-            label={t(locale, 'outputTokens')}
-            value={formatTokenCount(stats.total_token_output || 0)}
-            color="#16a34a"
-          />
-        </Grid.Col>
-      </Grid>
+      {/* Stats Row - 7 compact cards */}
+      <SimpleGrid cols={7} spacing="xs">
+        {[
+          { label: t(locale, 'totalRequests'), value: formatNumber(stats.total_requests || 0), color: '#1677ff' },
+          { label: t(locale, 'successRate'), value: `${(stats.success_rate || 0).toFixed(1)}%`, color: successRateColor(stats.success_rate || 0) },
+          { label: t(locale, 'avgLatency'), value: `${Math.round(stats.avg_latency_ms || 0)}ms`, color: '#fa8c16' },
+          { label: t(locale, 'activePlatforms'), value: `${stats.active_platforms || 0}/${stats.total_platforms || 0}`, color: '#722ed1' },
+          { label: t(locale, 'totalTokens'), value: formatTokenCount(totalTokens), color: '#13c2c2' },
+          { label: t(locale, 'inputTokens'), value: formatTokenCount(stats.total_token_input || 0), color: '#1677ff' },
+          { label: t(locale, 'outputTokens'), value: formatTokenCount(stats.total_token_output || 0), color: '#52c41a' },
+        ].map((item, i) => (
+          <ItemCard key={i}>
+            <Text size="xs" c="dimmed" ta="center">{item.label}</Text>
+            <Text fw={700} size="md" ta="center" style={{ color: item.color }}>{item.value}</Text>
+          </ItemCard>
+        ))}
+      </SimpleGrid>
 
       {/* Proxy Status Section */}
-      <Card shadow="sm" padding="lg" radius="md" withBorder>
-        <Group justify="space-between" mb="md">
-          <Text fw={600}>{t(locale, 'proxyStatus')}</Text>
-          <Text size="sm" c="dimmed">
+      <div>
+        <Group justify="space-between" mb="xs">
+          <Text style={dashStyles.sectionTitle}>{t(locale, 'proxyStatus')}</Text>
+          <Text style={dashStyles.sectionCount}>
             {stats.total_proxies || 0} {t(locale, 'total')}
           </Text>
         </Group>
 
         {proxies.length === 0 ? (
-          <Center py="xl">
+          <Center py="md">
             <Stack align="center" gap="xs">
-              <ThemeIcon variant="light" size={48} radius="xl" color="gray">
-                <IconApi size={24} />
+              <ThemeIcon variant="light" size={36} radius="xl" color="gray">
+                <IconApi size={18} />
               </ThemeIcon>
-              <Text size="sm" c="dimmed">
+              <Text size="xs" c="dimmed">
                 {t(locale, 'noProxies')}
               </Text>
             </Stack>
           </Center>
         ) : (
-          <Grid>
+          <SimpleGrid cols={5} spacing="xs">
             {proxies.map((proxy) => (
-              <Grid.Col key={proxy.id} span={{ base: 12, sm: 6, md: 4 }}>
-                <Card shadow="xs" padding="md" radius="sm" withBorder>
-                  <Group justify="space-between" mb="sm">
-                    <Badge variant="light" color="violet" size="sm" style={{ fontFamily: 'monospace' }}>
-                      {proxy.name}
-                    </Badge>
-                    <Badge
-                      variant="light"
-                      color="green"
-                      size="sm"
-                      leftSection={
-                        <ThemeIcon size={14} variant="transparent" color="green" style={{ minWidth: 14 }}>
-                          <IconCheck size={10} />
-                        </ThemeIcon>
-                      }
-                    >
-                      Ready
-                    </Badge>
-                  </Group>
+              <ItemCard key={proxy.id}>
+                <Group justify="space-between" mb={4}>
+                  <Badge variant="light" color="violet" size="xs" style={{ fontFamily: 'monospace' }}>
+                    {proxy.name}
+                  </Badge>
+                </Group>
 
-                  {proxy.stats && proxy.stats.total_requests > 0 ? (
-                    <Group justify="space-between" wrap="nowrap">
-                      <Stack gap={2}>
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'proxyRequests')}
-                        </Text>
-                        <Text size="sm" fw={600}>
-                          {formatNumber(proxy.stats.total_requests)}
-                        </Text>
-                      </Stack>
-                      <Stack gap={2} align="center">
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'successRate')}
-                        </Text>
-                        <SuccessRing rate={proxy.stats.success_rate} />
-                      </Stack>
-                      <Stack gap={2} align="flex-end">
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'avgLatency')}
-                        </Text>
-                        <Text size="sm" fw={600}>
-                          {Math.round(proxy.stats.avg_latency_ms)}ms
-                        </Text>
-                      </Stack>
-                    </Group>
-                  ) : (
-                    <Text size="xs" c="dimmed" mt={4}>
-                      {t(locale, 'noRequests')}
-                    </Text>
-                  )}
-                </Card>
-              </Grid.Col>
+                {proxy.stats && proxy.stats.total_requests > 0 ? (
+                  <Group gap="xs" wrap="nowrap">
+                    <Stack gap={0}>
+                      <Text size="xs" c="dimmed">{t(locale, 'proxyRequests')}</Text>
+                      <Text size="xs" fw={600}>{formatNumber(proxy.stats.total_requests)}</Text>
+                    </Stack>
+                    <Stack gap={0}>
+                      <Text size="xs" c="dimmed">{t(locale, 'successRate')}</Text>
+                      <Text size="xs" fw={600} c={successRateColor(proxy.stats.success_rate)}>
+                        {proxy.stats.success_rate.toFixed(1)}%
+                      </Text>
+                    </Stack>
+                    <Stack gap={0} align="flex-end">
+                      <Text size="xs" c="dimmed">{t(locale, 'avgLatency')}</Text>
+                      <Text size="xs" fw={600}>{Math.round(proxy.stats.avg_latency_ms)}ms</Text>
+                    </Stack>
+                  </Group>
+                ) : (
+                  <Text size="xs" c="dimmed">{t(locale, 'noRequests')}</Text>
+                )}
+              </ItemCard>
             ))}
-          </Grid>
+          </SimpleGrid>
         )}
-      </Card>
+      </div>
 
       {/* Platform List Section */}
-      <Card shadow="sm" padding="lg" radius="md" withBorder>
-        <Text fw={600} mb="md">
-          {t(locale, 'platformList')}
-        </Text>
+      <div>
+        <Group justify="space-between" mb="xs">
+          <Text style={dashStyles.sectionTitle}>{t(locale, 'platformList')}</Text>
+          <Text style={dashStyles.sectionCount}>
+            {stats.total_platforms || 0} {t(locale, 'total')}
+          </Text>
+        </Group>
 
         {platforms.length === 0 ? (
-          <Center py="xl">
+          <Center py="md">
             <Stack align="center" gap="xs">
-              <ThemeIcon variant="light" size={48} radius="xl" color="gray">
-                <IconServer size={24} />
+              <ThemeIcon variant="light" size={36} radius="xl" color="gray">
+                <IconServer size={18} />
               </ThemeIcon>
-              <Text size="sm" c="dimmed">
+              <Text size="xs" c="dimmed">
                 {t(locale, 'noPlatforms')}
               </Text>
             </Stack>
           </Center>
         ) : (
-          <Grid>
+          <SimpleGrid cols={5} spacing="xs">
             {platforms.map((platform) => (
-              <Grid.Col key={platform.id} span={{ base: 12, sm: 6, md: 3 }}>
-                <Card shadow="xs" padding="md" radius="sm" withBorder>
-                  <Group justify="space-between" mb={4}>
-                    <Group gap="sm" style={{ flex: 1, minWidth: 0 }}>
-                      <Text fw={600} size="sm" truncate>
-                        {getPlatformDisplayName(platform.name)}
-                      </Text>
-                      <Badge variant="outline" size="sm" color="gray" style={{ flexShrink: 0 }}>
-                        {platform.platform_type}
-                      </Badge>
-                    </Group>
-                    {platform.stats && platform.stats.total_requests > 0 && (
-                      <SuccessRing rate={platform.stats.success_rate} />
-                    )}
-                  </Group>
-
-                  <Text size="xs" c="dimmed" truncate>
-                    {platform.base_url}
+              <ItemCard key={platform.id}>
+                <Group justify="space-between" mb={4}>
+                  <Text fw={600} size="xs" truncate style={{ maxWidth: 100 }}>
+                    {getPlatformDisplayName(platform.name)}
                   </Text>
+                  <Badge variant="outline" size="xs" color="gray">
+                    {platform.platform_type}
+                  </Badge>
+                </Group>
 
-                  {platform.stats && platform.stats.total_requests > 0 ? (
-                    <Group gap="xs" mt="sm">
-                      <Stack gap={0}>
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'proxyRequests')}
-                        </Text>
-                        <Text size="sm" fw={600}>
-                          {formatNumber(platform.stats.total_requests)}
-                        </Text>
-                      </Stack>
-                      <Stack gap={0}>
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'successRate')}
-                        </Text>
-                        <Text size="sm" fw={600} c={successRateColor(platform.stats.success_rate)}>
-                          {platform.stats.success_rate.toFixed(1)}%
-                        </Text>
-                      </Stack>
-                      <Stack gap={0}>
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'avgLatency')}
-                        </Text>
-                        <Text size="sm" fw={600}>
-                          {Math.round(platform.stats.avg_latency_ms)}ms
-                        </Text>
-                      </Stack>
-                      <Stack gap={0}>
-                        <Text size="xs" c="dimmed">
-                          {t(locale, 'proxyTokens')}
-                        </Text>
-                        <Text size="sm" fw={600}>
-                          {formatTokenCount((platform.stats.total_token_input || 0) + (platform.stats.total_token_output || 0))}
-                        </Text>
-                      </Stack>
-                    </Group>
-                  ) : (
-                    <Text size="xs" c="dimmed" mt={4}>
-                      {t(locale, 'noRequests')}
-                    </Text>
-                  )}
-                </Card>
-              </Grid.Col>
+                {platform.stats && platform.stats.total_requests > 0 ? (
+                  <Group gap="xs" wrap="nowrap">
+                    <Stack gap={0}>
+                      <Text size="xs" c="dimmed">{t(locale, 'proxyRequests')}</Text>
+                      <Text size="xs" fw={600}>{formatNumber(platform.stats.total_requests)}</Text>
+                    </Stack>
+                    <Stack gap={0}>
+                      <Text size="xs" c="dimmed">{t(locale, 'successRate')}</Text>
+                      <Text size="xs" fw={600} c={successRateColor(platform.stats.success_rate)}>
+                        {platform.stats.success_rate.toFixed(1)}%
+                      </Text>
+                    </Stack>
+                    <Stack gap={0} align="flex-end">
+                      <Text size="xs" c="dimmed">{t(locale, 'avgLatency')}</Text>
+                      <Text size="xs" fw={600}>{Math.round(platform.stats.avg_latency_ms)}ms</Text>
+                    </Stack>
+                  </Group>
+                ) : (
+                  <Text size="xs" c="dimmed">{t(locale, 'noRequests')}</Text>
+                )}
+              </ItemCard>
             ))}
-          </Grid>
+          </SimpleGrid>
         )}
-      </Card>
+      </div>
+
+      {/* Model Request Stats Chart */}
+      <ModelStatsSection locale={locale} />
     </Stack>
   )
 }

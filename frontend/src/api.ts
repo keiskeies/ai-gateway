@@ -108,6 +108,8 @@ export const deleteApiKey = (id: string) => api.delete(`/api-keys/${id}`)
 export const getOverview = () => api.get('/stats/overview').then(r => r.data)
 export const getProxyStats = (proxyId: string) => api.get(`/stats/proxy/${proxyId}`).then(r => r.data)
 export const getPlatformStats = (platformId: string) => api.get(`/stats/platform/${platformId}`).then(r => r.data)
+export const getModelTimeSeries = (granularity: 'day' | 'month' | 'year', limit?: number) =>
+  api.get('/stats/model-timeseries', { params: { granularity, limit } }).then(r => r.data)
 
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)

@@ -47,9 +47,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/api-keys", web::post().to(api_key::create))
                 .route("/api-keys/{id}", web::delete().to(api_key::delete))
                 // 统计
-                .route("/stats/overview", web::get().to(stats::overview))
-                .route("/stats/proxy/{proxy_id}", web::get().to(stats::proxy_stats))
-                .route("/stats/platform/{platform_id}", web::get().to(stats::platform_stats))
+        .route("/stats/overview", web::get().to(stats::overview))
+        .route("/stats/proxy/{proxy_id}", web::get().to(stats::proxy_stats))
+        .route("/stats/platform/{platform_id}", web::get().to(stats::platform_stats))
+        .route("/stats/model-timeseries", web::get().to(stats::model_timeseries))
                 // 设置
                 .route("/settings", web::get().to(settings::get_config))
                 .route("/settings", web::put().to(settings::update_config))

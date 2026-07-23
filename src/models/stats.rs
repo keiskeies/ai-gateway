@@ -61,3 +61,23 @@ pub struct PlatformStats {
     pub total_token_input: i64,
     pub total_token_output: i64,
 }
+
+/// 模型时间序列统计单点数据
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTimeSeriesPoint {
+    pub period: String,
+    pub model_id: String,
+    pub requests: i64,
+    pub token_input: i64,
+    pub token_output: i64,
+}
+
+/// 模型时间序列统计聚合结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelTimeSeriesStats {
+    pub granularity: String,
+    /// 连续的时间周期列表（用于前端补零对齐 X 轴）
+    pub periods: Vec<String>,
+    /// 扁平数据点列表
+    pub data: Vec<ModelTimeSeriesPoint>,
+}

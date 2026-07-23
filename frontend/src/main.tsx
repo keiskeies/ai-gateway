@@ -7,6 +7,7 @@ import App from './App'
 import { initConfig } from './api'
 import '@mantine/core/styles.css'
 import '@mantine/notifications/styles.css'
+import '@mantine/charts/styles.css'
 import './main.css'
 
 initConfig()

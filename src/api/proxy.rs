@@ -108,8 +108,12 @@ pub async fn update(
     let id = path.into_inner();
     let req = body.into_inner();
     let db = db.into_inner();
-    let proxy = web::block(move || crate::db::proxy::update(&db, &id, &req))
-        .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    let proxy = web::block(move || {
+        // 先删除该 proxy 的所有请求统计
+        crate::db::stats::delete_by_proxy(&db, &id)?;
+        crate::db::proxy::update(&db, &id, &req)
+    })
+    .await.map_err(|e| AppError::Internal(e.to_string()))??;
     cache.refresh();
     Ok(HttpResponse::Ok().json(proxy))
 }

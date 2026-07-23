@@ -1,12 +1,100 @@
 use crate::error::AppResult;
 use crate::models::stats::*;
 use crate::db::DbPool;
+use std::collections::{BTreeSet, HashSet};
+
+/// 模型时间序列统计：按日/月/年粒度聚合各模型的请求数与 Token 用量。
+/// 查询所有有数据的周期，仅按 limit 截取最近 N 个周期，避免老数据被时间下限过滤掉。
+pub fn model_timeseries(
+    pool: &DbPool,
+    granularity: &str,
+    limit: usize,
+) -> AppResult<ModelTimeSeriesStats> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+
+    let fmt = match granularity {
+        "day" => "%Y-%m-%d",
+        "month" => "%Y-%m",
+        "year" => "%Y",
+        _ => {
+            return Err(crate::error::AppError::Internal(
+                "invalid granularity, expected day/month/year".into(),
+            ))
+        }
+    };
+
+    // 不设时间下限，查询所有有数据的周期；后续在内存中截取最近 limit 个
+    let sql = r#"
+        SELECT
+            STRFTIME(?1, rs.created_at) AS period,
+            COALESCE(b.model_id, 'unknown') AS model_id,
+            COUNT(*)                     AS requests,
+            COALESCE(SUM(rs.token_input), 0)  AS token_input,
+            COALESCE(SUM(rs.token_output), 0) AS token_output
+        FROM request_stats rs
+        LEFT JOIN backends b ON rs.backend_id = b.id
+        WHERE STRFTIME(?2, rs.created_at) IS NOT NULL
+        GROUP BY period, model_id
+        ORDER BY period, model_id
+    "#;
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params![fmt, fmt],
+        |r| {
+            Ok(ModelTimeSeriesPoint {
+                period: r.get::<_, String>(0)?,
+                model_id: r.get::<_, String>(1)?,
+                requests: r.get::<_, i64>(2)?,
+                token_input: r.get::<_, i64>(3)?,
+                token_output: r.get::<_, i64>(4)?,
+            })
+        },
+    )?;
+
+    let mut all_data = Vec::new();
+    for row in rows {
+        all_data.push(row?);
+    }
+
+    // 收集所有出现过的周期并排序，取最近 limit 个
+    let all_periods: BTreeSet<String> = all_data.iter().map(|p| p.period.clone()).collect();
+    let periods: Vec<String> = all_periods
+        .iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .cloned()
+        .collect();
+    let period_set: HashSet<&str> = periods.iter().map(|s| s.as_str()).collect();
+
+    // 只保留选中周期内的数据
+    let data: Vec<ModelTimeSeriesPoint> = all_data
+        .into_iter()
+        .filter(|p| period_set.contains(p.period.as_str()))
+        .collect();
+
+    Ok(ModelTimeSeriesStats {
+        granularity: granularity.to_string(),
+        periods,
+        data,
+    })
+}
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
         rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
             stat.latency_ms, stat.token_input, stat.token_output, stat.error_type, stat.created_at])?;
+    Ok(())
+}
+
+/// 删除指定 proxy 的所有请求统计
+pub fn delete_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<()> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    conn.execute("DELETE FROM request_stats WHERE proxy_id = ?1", rusqlite::params![proxy_id])?;
     Ok(())
 }
 

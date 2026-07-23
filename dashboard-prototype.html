@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard 原型图 v6</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #1a1a1a; padding: 12px 16px; height: 100vh; overflow: hidden; }
+
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .header h1 { font-size: 16px; font-weight: 700; }
+        .refresh-btn { background: #fff; border: 2px solid #bfbfbf; cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 12px; }
+
+        /* ===== 统计小卡片 ===== */
+        .stats-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 10px; }
+        .stat-card { background: #fff; border: 2px solid #bfbfbf; border-radius: 6px; padding: 8px 10px; text-align: center; }
+        .stat-card:hover { border-color: #1677ff; }
+        .stat-label { font-size: 10px; color: #8c8c8c; margin-bottom: 2px; }
+        .stat-value { font-size: 16px; font-weight: 700; }
+        .stat-value.blue { color: #1677ff; }
+        .stat-value.green { color: #52c41a; }
+        .stat-value.orange { color: #fa8c16; }
+        .stat-value.purple { color: #722ed1; }
+        .stat-value.cyan { color: #13c2c2; }
+        .stat-suffix { font-size: 10px; color: #8c8c8c; font-weight: 400; }
+
+        /* ===== 区域 ===== */
+        .section { background: #fff; border: 2px solid #bfbfbf; border-radius: 6px; margin-bottom: 10px; overflow: hidden; }
+        .section-header { padding: 8px 14px; border-bottom: 2px solid #d9d9d9; display: flex; justify-content: space-between; align-items: center; background: #fafafa; }
+        .section-title { font-size: 13px; font-weight: 600; }
+        .section-count { font-size: 11px; color: #8c8c8c; background: #f0f0f0; padding: 1px 6px; border-radius: 8px; }
+        .section-body { padding: 8px; }
+
+        /* ===== 网格 ===== */
+        .proxy-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+        .platform-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+
+        /* ===== 项卡片 ===== */
+        .item-card { background: #fafafa; border: 2px solid #bfbfbf; border-radius: 4px; padding: 6px 8px; }
+        .item-card:hover { border-color: #1677ff; }
+        .item-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        .item-card-name { font-size: 11px; font-weight: 600; color: #262626; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80px; }
+        .item-card-badge { font-size: 9px; padding: 0 4px; border-radius: 3px; }
+        .badge-green { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
+        .badge-blue { background: #e6f4ff; color: #1677ff; border: 1px solid #91caff; }
+        .item-card-stats { display: flex; gap: 8px; font-size: 10px; color: #8c8c8c; }
+        .item-card-stats span { display: flex; align-items: center; gap: 2px; }
+        .item-card-stats .v { font-weight: 600; color: #262626; }
+        .item-card-stats .ok { color: #52c41a; }
+        .item-card-stats .warn { color: #fa8c16; }
+        .item-card-stats .err { color: #f5222d; }
+
+        /* ===== 响应式 ===== */
+        @media (max-width: 1200px) {
+            .stats-row { grid-template-columns: repeat(4, 1fr); }
+            .proxy-grid { grid-template-columns: repeat(2, 1fr); }
+            .platform-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h1>概览</h1>
+        <button class="refresh-btn">🔄 刷新</button>
+    </div>
+
+    <!-- 统计小卡片 7个 -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">总请求数</div>
+            <div class="stat-value blue">12,847</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">成功率</div>
+            <div class="stat-value green">98.5%</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">平均延迟</div>
+            <div class="stat-value orange">234<span class="stat-suffix">ms</span></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">活跃平台</div>
+            <div class="stat-value purple">18<span class="stat-suffix">/20</span></div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">总Token</div>
+            <div class="stat-value cyan">8.5M</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">输入</div>
+            <div class="stat-value blue">5.2M</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">输出</div>
+            <div class="stat-value green">3.3M</div>
+        </div>
+    </div>
+
+    <!-- 虚拟大模型 4列 -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-title">虚拟大模型状态</span>
+            <span class="section-count">8 个</span>
+        </div>
+        <div class="section-body">
+            <div class="proxy-grid">
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">gpt-4o</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">2,456</span></span><span>成功率 <span class="v ok">99.2%</span></span><span>延迟 <span class="v">189ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">claude-3.5</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">1,892</span></span><span>成功率 <span class="v ok">98.7%</span></span><span>延迟 <span class="v">256ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">deepseek-v3</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">3,241</span></span><span>成功率 <span class="v ok">97.8%</span></span><span>延迟 <span class="v">312ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">qwen-max</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">1,567</span></span><span>成功率 <span class="v warn">85.4%</span></span><span>延迟 <span class="v">423ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">gemini-pro</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">987</span></span><span>成功率 <span class="v ok">96.3%</span></span><span>延迟 <span class="v">278ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">llama-3.1</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">1,234</span></span><span>成功率 <span class="v ok">99.1%</span></span><span>延迟 <span class="v">156ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">mistral-large</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">876</span></span><span>成功率 <span class="v ok">94.5%</span></span><span>延迟 <span class="v">345ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">yi-large</span><span class="item-card-badge badge-green">●Ready</span></div><div class="item-card-stats"><span>请求 <span class="v">594</span></span><span>成功率 <span class="v err">72.1%</span></span><span>延迟 <span class="v">567ms</span></span></div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 接入平台 5列 -->
+    <div class="section">
+        <div class="section-header">
+            <span class="section-title">已接入平台</span>
+            <span class="section-count">20 个</span>
+        </div>
+        <div class="section-body">
+            <div class="platform-grid">
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">OpenAI</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">4,523</span></span><span>成功率 <span class="v ok">99.1%</span></span><span>延迟 <span class="v">198ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Anthropic</span><span class="item-card-badge badge-blue">anthropic</span></div><div class="item-card-stats"><span>请求 <span class="v">3,214</span></span><span>成功率 <span class="v ok">98.5%</span></span><span>延迟 <span class="v">267ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">DeepSeek</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">2,876</span></span><span>成功率 <span class="v ok">97.3%</span></span><span>延迟 <span class="v">334ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">阿里云</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">1,987</span></span><span>成功率 <span class="v ok">96.8%</span></span><span>延迟 <span class="v">289ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Google AI</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">1,456</span></span><span>成功率 <span class="v ok">95.2%</span></span><span>延迟 <span class="v">312ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Ollama</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">1,234</span></span><span>成功率 <span class="v ok">99.8%</span></span><span>延迟 <span class="v">45ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">智谱AI</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">987</span></span><span>成功率 <span class="v warn">88.4%</span></span><span>延迟 <span class="v">456ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">百川</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">756</span></span><span>成功率 <span class="v ok">94.1%</span></span><span>延迟 <span class="v">378ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Moonshot</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">654</span></span><span>成功率 <span class="v ok">92.7%</span></span><span>延迟 <span class="v">289ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">零一万物</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">543</span></span><span>成功率 <span class="v ok">91.5%</span></span><span>延迟 <span class="v">345ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">MiniMax</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">432</span></span><span>成功率 <span class="v ok">93.8%</span></span><span>延迟 <span class="v">267ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">讯飞星火</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">321</span></span><span>成功率 <span class="v err">78.9%</span></span><span>延迟 <span class="v">534ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">百度文心</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">287</span></span><span>成功率 <span class="v ok">95.6%</span></span><span>延迟 <span class="v">312ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">腾讯混元</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">198</span></span><span>成功率 <span class="v ok">97.2%</span></span><span>延迟 <span class="v">289ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">CogView</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">156</span></span><span>成功率 <span class="v ok">94.3%</span></span><span>延迟 <span class="v">1.2s</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">AWS Bedrock</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">123</span></span><span>成功率 <span class="v ok">96.8%</span></span><span>延迟 <span class="v">345ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Azure OpenAI</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">98</span></span><span>成功率 <span class="v ok">98.9%</span></span><span>延迟 <span class="v">234ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Groq</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">67</span></span><span>成功率 <span class="v ok">99.5%</span></span><span>延迟 <span class="v">89ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Together AI</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">45</span></span><span>成功率 <span class="v ok">97.8%</span></span><span>延迟 <span class="v">267ms</span></span></div></div>
+                <div class="item-card"><div class="item-card-header"><span class="item-card-name">Fireworks</span><span class="item-card-badge badge-blue">openai</span></div><div class="item-card-stats"><span>请求 <span class="v">34</span></span><span>成功率 <span class="v ok">96.1%</span></span><span>延迟 <span class="v">198ms</span></span></div></div>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
