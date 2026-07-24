@@ -13,7 +13,16 @@ import {
   SegmentedControl,
   LoadingOverlay,
 } from '@mantine/core'
-import { AreaChart } from '@mantine/charts'
+import {
+  AreaChart as ReAreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RTooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts'
 import {
   IconServer,
   IconApi,
@@ -143,9 +152,9 @@ type Metric = 'requests' | 'token_input' | 'token_output'
 type Granularity = 'day' | 'month' | 'year'
 
 const MODEL_CHART_COLORS = [
-  'blue.6', 'violet.6', 'teal.6', 'orange.6', 'pink.6',
-  'indigo.6', 'cyan.6', 'lime.6', 'red.6', 'grape.6',
-  'yellow.6', 'green.6',
+  '#228be6', '#7048e8', '#0ca678', '#fd7e14', '#f06595',
+  '#4c6ef5', '#1098ad', '#82c91e', '#fa5252', '#cc5de8',
+  '#fab005', '#37b24d',
 ]
 
 function ModelStatsSection({ locale }: { locale: Locale }) {
@@ -256,22 +265,31 @@ function ModelStatsSection({ locale }: { locale: Locale }) {
       >
         <LoadingOverlay visible={loading} />
         {hasData ? (
-          <AreaChart
-            h={300}
-            data={chartData}
-            dataKey="period"
-            series={series}
-            type="stacked"
-            curveType="monotone"
-            withLegend
-            withDots={false}
-            strokeWidth={1.5}
-            fillOpacity={0.35}
-            valueFormatter={valueFormatter}
-            yAxisProps={{ width: 60 }}
-            xAxisProps={granularity === 'day' ? { interval: 3, angle: -30, textAnchor: 'end', height: 50 } : undefined}
-            tooltipProps={{ animationDuration: 100 }}
-          />
+          <div style={{ width: '100%', height: 300 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <ReAreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="period" interval={granularity === 'day' ? 2 : 0} angle={granularity === 'day' ? -30 : 0} textAnchor={granularity === 'day' ? 'end' : 'middle'} height={granularity === 'day' ? 60 : 30} tick={{ fontSize: 11 }} />
+                <YAxis width={60} tick={{ fontSize: 11 }} tickFormatter={valueFormatter} />
+                <RTooltip formatter={valueFormatter} />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                {series.map((s) => (
+                  <Area
+                    key={s.name}
+                    type="monotone"
+                    dataKey={s.name}
+                    name={s.label}
+                    stackId="1"
+                    stroke={s.color}
+                    fill={s.color}
+                    fillOpacity={0.35}
+                    strokeWidth={1.5}
+                    isAnimationActive={false}
+                  />
+                ))}
+              </ReAreaChart>
+            </ResponsiveContainer>
+          </div>
         ) : (
           <Center h={300}>
             <Stack align="center" gap="xs">
