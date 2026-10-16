@@ -25,6 +25,8 @@ pub struct ResolvedRoute {
     pub lb_strategy: LBStrategy,
     pub retry_policy: RetryPolicy,
     pub fallback: Option<String>,
+    /// 客户端未传 max_tokens 时填充的默认值（None = 不干预）
+    pub default_max_tokens: Option<u32>,
 }
 
 /// 缓存条目：proxy name → ResolvedRoute
@@ -108,6 +110,7 @@ impl RouteCache {
                         lb_strategy: route.lb_strategy,
                         retry_policy: route.retry_policy,
                         fallback: route.fallback,
+                        default_max_tokens: route.default_max_tokens,
                     },
                 },
             ));
@@ -165,6 +168,7 @@ impl RouteCache {
 }
 
 /// 后台统计写入器：通过 channel 接收统计数据，批量异步写入 DB
+#[derive(Clone)]
 pub struct StatsWriter {
     tx: mpsc::UnboundedSender<RequestStat>,
 }

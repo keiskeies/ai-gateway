@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use super::content;
 use super::types::*;
 
 // ========== Anthropic 格式定义 ==========
@@ -7,8 +8,9 @@ use super::types::*;
 pub struct AnthropicRequest {
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
+    /// system 可以是字符串，也可以是内容块数组（Claude Code 发送的是数组形态）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<serde_json::Value>,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -82,63 +84,71 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
     for msg in req.messages {
         match msg.role.as_str() {
             "user" => {
-                // 可能包含 tool_result
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
                 if let Some(arr) = msg.content.as_array() {
                     for block in arr {
-                        if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
-                            match block_type {
-                                "tool_result" => {
-                                    let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                    let content = block.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                                    messages.push(UnifiedMessage {
-                                        role: Role::Tool,
-                                        content: Some(content),
-                                        reasoning_content: None,
-                                        tool_calls: None,
-                                        tool_call_id: Some(tool_use_id),
-                                        name: None,
-                                    });
-                                }
-                                "text" => {
-                                    let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                    messages.push(UnifiedMessage { role: Role::User, content: Some(text), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None });
-                                }
-                                _ => {}
+                        match block.get("type").and_then(|t| t.as_str()) {
+                            Some("tool_result") => {
+                                let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                // tool_result 的 content 可以是字符串或内容块数组（含 text/image）
+                                let text = block.get("content").map(content::extract_text).unwrap_or_default();
+                                messages.push(UnifiedMessage {
+                                    role: Role::Tool,
+                                    content: Some(serde_json::Value::String(text)),
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                    tool_call_id: Some(tool_use_id),
+                                    name: None,
+                                });
                             }
+                            Some("text") | Some("image") => blocks.push(block.clone()),
+                            _ => {}
                         }
                     }
                 } else if let Some(text) = msg.content.as_str() {
-                    messages.push(UnifiedMessage { role: Role::User, content: Some(text.to_string()), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None });
+                    blocks.push(serde_json::json!({"type": "text", "text": text}));
+                }
+                if !blocks.is_empty() {
+                    messages.push(UnifiedMessage {
+                        role: Role::User,
+                        content: Some(content::anthropic_blocks_to_openai(&blocks)),
+                        reasoning_content: None,
+                        tool_calls: None, tool_call_id: None, name: None,
+                    });
                 }
             }
             "assistant" => {
-                let mut content_text = None;
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                let mut reasoning_text = String::new();
                 let mut tool_calls = None;
                 if let Some(arr) = msg.content.as_array() {
                     let mut tcs = Vec::new();
                     for block in arr {
-                        if let Some(block_type) = block.get("type").and_then(|t| t.as_str()) {
-                            match block_type {
-                                "text" => { content_text = block.get("text").and_then(|t| t.as_str()).map(String::from); }
-                                "tool_use" => {
-                                    tcs.push(UnifiedToolCall {
-                                        id: block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                        call_type: "function".to_string(),
-                                        function: UnifiedFunctionCall {
-                                            name: block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                            arguments: serde_json::to_string(&block.get("input").cloned().unwrap_or(serde_json::Value::Null)).unwrap_or_default(),
-                                        },
-                                    });
-                                }
-                                _ => {}
+                        match block.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => blocks.push(block.clone()),
+                            Some("thinking") => {
+                                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) { reasoning_text.push_str(t); }
                             }
+                            Some("tool_use") => {
+                                tcs.push(UnifiedToolCall {
+                                    id: block.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                    call_type: "function".to_string(),
+                                    function: UnifiedFunctionCall {
+                                        name: block.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                        arguments: serde_json::to_string(&block.get("input").cloned().unwrap_or(serde_json::Value::Null)).unwrap_or_default(),
+                                    },
+                                });
+                            }
+                            _ => {}
                         }
                     }
                     if !tcs.is_empty() { tool_calls = Some(tcs); }
                 } else if let Some(text) = msg.content.as_str() {
-                    content_text = Some(text.to_string());
+                    blocks.push(serde_json::json!({"type": "text", "text": text}));
                 }
-                messages.push(UnifiedMessage { role: Role::Assistant, content: content_text, reasoning_content: None, tool_calls, tool_call_id: None, name: None });
+                let msg_content = if blocks.is_empty() { None } else { Some(content::anthropic_blocks_to_openai(&blocks)) };
+                let reasoning_content = if reasoning_text.is_empty() { None } else { Some(reasoning_text) };
+                messages.push(UnifiedMessage { role: Role::Assistant, content: msg_content, reasoning_content, tool_calls, tool_call_id: None, name: None });
             }
             _ => {}
         }
@@ -151,7 +161,9 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
     }
 
     Ok(UnifiedRequest {
-        model: req.model, messages, system: req.system,
+        // 数组形态的 system 统一拼接为纯文本（与 tool_result 的处理一致）
+        model: req.model, messages,
+        system: req.system.as_ref().map(content::extract_text).filter(|s| !s.is_empty()),
         max_tokens: Some(req.max_tokens), temperature: req.temperature, top_p: req.top_p,
         stream: req.stream, stop: req.stop_sequences,
         tools: req.tools.map(|tools| tools.into_iter().map(|t| UnifiedTool {
@@ -164,19 +176,21 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
 }
 
 /// 统一格式 → Anthropic 请求
-pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::Value {
+pub fn to_request(unified: &UnifiedRequest, target_model: &str, default_max_tokens: Option<u32>, unknown: crate::models::route::UnknownParams) -> serde_json::Value {
     let mut anthropic_messages = Vec::new();
 
+    let empty = serde_json::Value::Null;
     for msg in &unified.messages {
         match msg.role {
             Role::User => {
-                anthropic_messages.push(AnthropicMessage { role: "user".to_string(), content: serde_json::Value::String(msg.content.clone().unwrap_or_default()) });
+                let content = msg.content.as_ref().unwrap_or(&empty);
+                let mut blocks = content::openai_content_to_anthropic_blocks(content);
+                if blocks.is_empty() { blocks.push(serde_json::json!({"type": "text", "text": ""})); }
+                anthropic_messages.push(AnthropicMessage { role: "user".to_string(), content: serde_json::Value::Array(blocks) });
             }
             Role::Assistant => {
-                let mut blocks: Vec<serde_json::Value> = Vec::new();
-                if let Some(text) = &msg.content {
-                    blocks.push(serde_json::json!({"type": "text", "text": text}));
-                }
+                let content = msg.content.as_ref().unwrap_or(&empty);
+                let mut blocks = content::openai_content_to_anthropic_blocks(content);
                 if let Some(tcs) = &msg.tool_calls {
                     for tc in tcs {
                         let input: serde_json::Value = serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
@@ -188,10 +202,19 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
             }
             Role::Tool => {
                 // Anthropic: tool_result 作为 user message 的 content block
+                let content = msg.content.as_ref().unwrap_or(&empty);
+                let mut blocks = content::openai_content_to_anthropic_blocks(content);
+                let result_content = match blocks.len() {
+                    0 => serde_json::Value::String(String::new()),
+                    1 if blocks[0].get("type").and_then(|t| t.as_str()) == Some("text") => {
+                        blocks.remove(0).get("text").cloned().unwrap_or(serde_json::Value::String(String::new()))
+                    }
+                    _ => serde_json::Value::Array(blocks),
+                };
                 let tool_result = serde_json::json!({
                     "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id.as_ref().unwrap_or(&String::new()),
-                    "content": msg.content.as_ref().unwrap_or(&String::new())
+                    "tool_use_id": msg.tool_call_id.clone().unwrap_or_default(),
+                    "content": result_content
                 });
                 anthropic_messages.push(AnthropicMessage { role: "user".to_string(), content: serde_json::Value::Array(vec![tool_result]) });
             }
@@ -202,28 +225,65 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
     let mut req = serde_json::Map::new();
     req.insert("model".into(), serde_json::Value::String(target_model.to_string()));
     req.insert("messages".into(), serde_json::to_value(&anthropic_messages).unwrap());
-    req.insert("max_tokens".into(), serde_json::to_value(unified.max_tokens.unwrap_or(4096)).unwrap());
+    // Anthropic 必填 max_tokens：客户端未传时依次用路由默认值、4096 兜底
+    req.insert("max_tokens".into(), serde_json::to_value(unified.max_tokens.or(default_max_tokens).unwrap_or(4096)).unwrap());
     if let Some(v) = &unified.system { req.insert("system".into(), serde_json::Value::String(v.clone())); }
     if let Some(v) = unified.temperature { req.insert("temperature".into(), serde_json::to_value(v).unwrap()); }
     if let Some(v) = unified.top_p { req.insert("top_p".into(), serde_json::to_value(v).unwrap()); }
     if let Some(v) = unified.stream { req.insert("stream".into(), serde_json::to_value(v).unwrap()); }
     if let Some(v) = &unified.stop { req.insert("stop_sequences".into(), serde_json::to_value(v).unwrap()); }
-    if let Some(tools) = &unified.tools {
-        req.insert("tools".into(), serde_json::to_value(tools.iter().map(|t| AnthropicTool {
-            name: t.function.name.clone(), description: t.function.description.clone(),
-            input_schema: t.function.parameters.clone().unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
-        }).collect::<Vec<_>>()).unwrap());
+    // OpenAI 的 tool_choice=none：Anthropic 无对应值，直接不携带工具
+    let tool_choice_none = matches!(
+        &unified.tool_choice,
+        Some(crate::protocol::types::ToolChoice::None(s)) if s == "none"
+    ) || matches!(
+        &unified.tool_choice,
+        Some(crate::protocol::types::ToolChoice::Object { r#type, .. }) if r#type == "none"
+    );
+    if !tool_choice_none {
+        if let Some(tools) = &unified.tools {
+            req.insert("tools".into(), serde_json::to_value(tools.iter().map(|t| AnthropicTool {
+                name: t.function.name.clone(), description: t.function.description.clone(),
+                input_schema: t.function.parameters.clone().unwrap_or(serde_json::json!({"type": "object", "properties": {}})),
+            }).collect::<Vec<_>>()).unwrap());
+        }
+        // OpenAI tool_choice 格式 → Anthropic 格式（"auto"/{"type":"function"} 原样透传会被 Anthropic 400 拒绝）
+        if let Some(tc) = unified.tool_choice.as_ref().and_then(convert_tool_choice) {
+            req.insert("tool_choice".into(), tc);
+        }
     }
-    if let Some(tc) = &unified.tool_choice {
-        req.insert("tool_choice".into(), serde_json::to_value(tc).unwrap());
-    }
-    // 合并 extra 中的未知字段（已知字段优先，不覆盖）
-    for (k, v) in &unified.extra {
-        if !req.contains_key(k) {
-            req.insert(k.clone(), v.clone());
+    // 合并 extra 中的未知字段（已知字段优先，不覆盖）；Drop 策略下丢弃——
+    // Anthropic 严格校验未知字段，OpenAI 特有参数（response_format/seed/logprobs 等）必须剥离
+    if unknown != crate::models::route::UnknownParams::Drop {
+        for (k, v) in &unified.extra {
+            if !req.contains_key(k) {
+                req.insert(k.clone(), v.clone());
+            }
         }
     }
     serde_json::Value::Object(req)
+}
+
+/// OpenAI tool_choice → Anthropic tool_choice：
+/// - "auto" → {"type":"auto"}
+/// - "required" → {"type":"any"}
+/// - "none" → None（调用方应同时不携带 tools）
+/// - {"type":"function","function":{name}} → {"type":"tool","name":...}
+fn convert_tool_choice(tc: &crate::protocol::types::ToolChoice) -> Option<serde_json::Value> {
+    use crate::protocol::types::ToolChoice;
+    match tc {
+        ToolChoice::None(s) => match s.as_str() {
+            "required" => Some(serde_json::json!({"type": "any"})),
+            "none" => None,
+            _ => Some(serde_json::json!({"type": "auto"})),
+        },
+        ToolChoice::Object { r#type, function } => match r#type.as_str() {
+            "function" => function.as_ref().map(|f| serde_json::json!({"type": "tool", "name": f.name})),
+            "required" => Some(serde_json::json!({"type": "any"})),
+            "none" => None,
+            _ => Some(serde_json::json!({"type": "auto"})),
+        },
+    }
 }
 
 /// Anthropic 响应 → 统一格式
@@ -231,13 +291,18 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
     let resp: AnthropicResponse = serde_json::from_value(raw)
         .map_err(|e| format!("Invalid Anthropic response: {}", e))?;
 
-    let mut content = None;
+    let mut content: Option<serde_json::Value> = None;
     let mut tool_calls = None;
     let mut tc_list = Vec::new();
 
     for block in &resp.content {
         match block {
-            AnthropicContentBlock::Text { text } => { content = Some(text.clone()); }
+            AnthropicContentBlock::Text { text } => {
+                match content.as_mut() {
+                    Some(serde_json::Value::String(s)) => s.push_str(text),
+                    _ => content = Some(serde_json::Value::String(text.clone())),
+                }
+            }
             AnthropicContentBlock::ToolUse { id, name, input } => {
                 tc_list.push(UnifiedToolCall {
                     id: id.clone(), call_type: "function".to_string(),
@@ -273,8 +338,8 @@ pub fn to_response(unified: &UnifiedResponse) -> serde_json::Value {
     let msg = choice.and_then(|c| c.message.as_ref());
 
     let mut content_blocks: Vec<serde_json::Value> = Vec::new();
-    if let Some(text) = msg.and_then(|m| m.content.as_ref()) {
-        content_blocks.push(serde_json::json!({"type": "text", "text": text}));
+    if let Some(content) = msg.and_then(|m| m.content.as_ref()) {
+        content_blocks.extend(content::openai_content_to_anthropic_blocks(content));
     }
     if let Some(tcs) = msg.and_then(|m| m.tool_calls.as_ref()) {
         for tc in tcs {

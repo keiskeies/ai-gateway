@@ -32,13 +32,13 @@ async fn main() -> std::io::Result<()> {
     // 自动检测系统代理
     let system_proxy = SystemProxy::detect();
     let http_client = system_proxy.apply_to_builder(
+        // 不设 Client 级 timeout：流式长生成远超 request_timeout，
+        // 各请求点（转发/测活/拉模型）均单独设置 per-request timeout
         reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(app_config.defaults.request_timeout_secs))
     ).build().expect("Failed to create HTTP client");
 
     let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
     let selector = Arc::new(BackendSelector::new());
-
     // 初始化内存缓存（启动时从 DB 加载，后续由管理操作触发刷新）
     let cache = RouteCache::new(db_pool.clone());
 
@@ -67,10 +67,14 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .wrap(middleware::Logger::default())
+            // 静态资源缓存策略：index.html 必须回源校验，/assets/* 强缓存
+            .wrap(middleware::from_fn(ai_gateway::web_cache::cache_headers))
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(proxy_state.clone()))
             .app_data(web::Data::new(shared_config.clone()))
             .app_data(web::Data::new(api_cache.clone()))
+            // JSON body 上限 64MB：actix 默认仅 2MB，长上下文 / base64 图片请求过网关会被 413 拦截
+            .app_data(web::JsonConfig::default().limit(64 * 1024 * 1024))
             .configure(ai_gateway::api::configure)
             .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))
             .route("/v1/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))

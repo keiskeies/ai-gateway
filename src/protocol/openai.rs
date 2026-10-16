@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use super::content;
 use super::types::*;
 
 // ========== OpenAI 格式定义 ==========
@@ -92,6 +93,8 @@ pub struct OpenAIChoice {
 pub struct OpenAIUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    /// 部分 OpenAI 兼容上游（如 Ollama、部分第三方网关）的 usage 不带 total_tokens，缺失时按 0 处理
+    #[serde(default)]
     pub total_tokens: u32,
 }
 
@@ -102,6 +105,9 @@ pub struct OpenAIStreamChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<OpenAIStreamChoice>,
+    /// 部分上游（OpenAI、OpenRouter 等）会在流式最后一个 chunk 中携带 usage
+    #[serde(default)]
+    pub usage: Option<OpenAIUsage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,25 +144,24 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
     for msg in req.messages {
         match msg.role.as_str() {
             "system" => {
-                system = Some(msg.content.as_ref()
-                    .and_then(|c| c.as_str()).unwrap_or("").to_string());
-                // 也添加到 messages 中保留
+                system = msg.content.as_ref().map(content::extract_text);
+                // 也添加到 messages 中保留（content 原样保留，含多模态数组）
                 messages.push(UnifiedMessage {
                     role: Role::System,
-                    content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                    content: msg.content.clone(),
                     reasoning_content: None,
                     tool_calls: None, tool_call_id: None, name: None,
                 });
             }
             "user" => messages.push(UnifiedMessage {
                 role: Role::User,
-                content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                content: msg.content.clone(),
                 reasoning_content: None,
                 tool_calls: None, tool_call_id: None, name: None,
             }),
             "assistant" => messages.push(UnifiedMessage {
                 role: Role::Assistant,
-                content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                content: msg.content.clone(),
                 reasoning_content: msg.reasoning_content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
                 tool_calls: msg.tool_calls.map(|tcs| tcs.into_iter().map(|tc| UnifiedToolCall {
                     id: tc.id, call_type: tc.call_type,
@@ -166,7 +171,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
             }),
             "tool" => messages.push(UnifiedMessage {
                 role: Role::Tool,
-                content: msg.content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                content: msg.content.clone(),
                 reasoning_content: None,
                 tool_calls: None, tool_call_id: msg.tool_call_id, name: msg.name,
             }),
@@ -198,7 +203,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
 }
 
 /// 统一格式 → OpenAI 请求
-pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::Value {
+pub fn to_request(unified: &UnifiedRequest, target_model: &str, unknown: crate::models::route::UnknownParams) -> serde_json::Value {
     let messages: Vec<OpenAIMessage> = unified.messages.iter().map(|m| {
         let role = match m.role {
             Role::System => "system",
@@ -208,7 +213,7 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
         };
         OpenAIMessage {
             role: role.to_string(),
-            content: m.content.as_ref().map(|c| serde_json::Value::String(c.clone())),
+            content: forward_content(m),
             reasoning_content: None,
             tool_calls: m.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| OpenAIToolCall {
                 id: tc.id.clone(), call_type: tc.call_type.clone(),
@@ -236,13 +241,35 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str) -> serde_json::V
     if let Some(tc) = &unified.tool_choice {
         req.insert("tool_choice".into(), serde_json::to_value(tc).unwrap());
     }
-    // 合并 extra 中的未知字段（已知字段优先，不覆盖）
-    for (k, v) in &unified.extra {
-        if !req.contains_key(k) {
-            req.insert(k.clone(), v.clone());
+    // 合并 extra 中的未知字段（已知字段优先，不覆盖）；Drop 策略下丢弃（跨协议白名单模式）
+    if unknown != crate::models::route::UnknownParams::Drop {
+        for (k, v) in &unified.extra {
+            if !req.contains_key(k) {
+                req.insert(k.clone(), v.clone());
+            }
         }
     }
     serde_json::Value::Object(req)
+}
+
+/// 转发给上游时的 content 取值。
+///
+/// 原样透传（字符串或 OpenAI 多模态数组）；当 content 缺失/为 null 时补一个最小占位，
+/// 因为部分上游（如 agnes）要求 user/system/tool 消息必须带 `content` 字段且不能是空串：
+/// 缺字段报 `missing field content`，空串报 `message content cannot be empty`，单个空格则放行。
+/// 唯一例外：assistant 消息带 tool_calls 时保持省略 content（OpenAI 标准写法）。
+fn forward_content(m: &UnifiedMessage) -> Option<serde_json::Value> {
+    match &m.content {
+        Some(v) if !v.is_null() => Some(v.clone()),
+        _ => {
+            let has_tool_calls = m.tool_calls.as_ref().map(|tcs| !tcs.is_empty()).unwrap_or(false);
+            if m.role == Role::Assistant && has_tool_calls {
+                None
+            } else {
+                Some(serde_json::Value::String(" ".to_string()))
+            }
+        }
+    }
 }
 
 /// OpenAI 响应 → 统一格式
@@ -276,23 +303,17 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
 }
 
 /// Extract content from OpenAI message content field.
-/// Handles both string and null values, preserving empty strings.
-/// Falls back to reasoning_content if content is absent (e.g. NVIDIA reasoning models).
-fn extract_message_content(content: &Option<serde_json::Value>, reasoning_content: &Option<serde_json::Value>) -> Option<String> {
-    let primary = match content {
-        None => None,
-        Some(serde_json::Value::Null) => Some(String::new()),
-        Some(v) => v.as_str().map(|s| s.to_string()),
-    };
-    if primary.is_some() {
-        return primary;
+/// Keeps strings and content arrays as-is, normalizes null to an empty string,
+/// and falls back to reasoning_content if content is absent (e.g. NVIDIA reasoning models).
+fn extract_message_content(content: &Option<serde_json::Value>, reasoning_content: &Option<serde_json::Value>) -> Option<serde_json::Value> {
+    fn normalize(value: &Option<serde_json::Value>) -> Option<serde_json::Value> {
+        match value {
+            None => None,
+            Some(serde_json::Value::Null) => Some(serde_json::Value::String(String::new())),
+            Some(v) => Some(v.clone()),
+        }
     }
-    // Fallback to reasoning_content
-    match reasoning_content {
-        None => None,
-        Some(serde_json::Value::Null) => Some(String::new()),
-        Some(v) => v.as_str().map(|s| s.to_string()),
-    }
+    normalize(content).or_else(|| normalize(reasoning_content))
 }
 
 /// 统一格式 → OpenAI 响应
@@ -301,7 +322,7 @@ pub fn to_response(unified: &UnifiedResponse) -> serde_json::Value {
         let msg = c.message.as_ref();
         let role = msg.map(|m| match m.role { Role::Assistant => "assistant", Role::User => "user", Role::System => "system", Role::Tool => "tool" }).unwrap_or("assistant");
         let content_val = match msg.and_then(|m| m.content.as_ref()) {
-            Some(s) => serde_json::Value::String(s.clone()),
+            Some(v) => v.clone(),
             None => serde_json::Value::Null,
         };
         let mut message_obj = serde_json::Map::new();

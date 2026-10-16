@@ -51,6 +51,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/stats/proxy/{proxy_id}", web::get().to(stats::proxy_stats))
         .route("/stats/platform/{platform_id}", web::get().to(stats::platform_stats))
         .route("/stats/model-timeseries", web::get().to(stats::model_timeseries))
+        .route("/stats/backend/{backend_id}", web::get().to(stats::backend_stats))
+        .route("/stats/errors", web::get().to(stats::error_stats))
+        .route("/stats/heatmap", web::get().to(stats::activity_heatmap))
+        .route("/stats/latency", web::get().to(stats::latency_percentiles))
+        .route("/stats/model-summaries", web::get().to(stats::model_summaries))
+        .route("/stats/requests", web::get().to(stats::request_logs))
+        .route("/stats/cleanup", web::post().to(stats::cleanup_stats))
                 // 设置
                 .route("/settings", web::get().to(settings::get_config))
                 .route("/settings", web::put().to(settings::update_config))

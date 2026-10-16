@@ -64,6 +64,8 @@ pub struct DefaultsConfig {
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     pub request_timeout_secs: u64,
+    /// 流式请求的超时上限：长生成/推理模型常超过 request_timeout，单独放宽
+    pub stream_timeout_secs: u64,
     pub test_connection_timeout_secs: u64,
 }
 
@@ -326,6 +328,7 @@ impl Default for AppConfig {
                 max_retries: 2,
                 retry_backoff_ms: 500,
                 request_timeout_secs: 120,
+                stream_timeout_secs: 1800,
                 test_connection_timeout_secs: 10,
             },
         }
@@ -385,6 +388,9 @@ impl AppConfig {
                         if let Some(v) = def.get("request_timeout_secs").and_then(|v| v.as_integer()) {
                             config.defaults.request_timeout_secs = v as u64;
                         }
+                        if let Some(v) = def.get("stream_timeout_secs").and_then(|v| v.as_integer()) {
+                            config.defaults.stream_timeout_secs = v as u64;
+                        }
                         if let Some(v) = def.get("test_connection_timeout_secs").and_then(|v| v.as_integer()) {
                             config.defaults.test_connection_timeout_secs = v as u64;
                         }
@@ -442,6 +448,7 @@ lb_strategy = "{}"
 max_retries = {}
 retry_backoff_ms = {}
 request_timeout_secs = {}
+stream_timeout_secs = {}
 test_connection_timeout_secs = {}
 "#,
             self.server.host,
@@ -454,6 +461,7 @@ test_connection_timeout_secs = {}
             self.defaults.max_retries,
             self.defaults.retry_backoff_ms,
             self.defaults.request_timeout_secs,
+            self.defaults.stream_timeout_secs,
             self.defaults.test_connection_timeout_secs,
         ))
     }

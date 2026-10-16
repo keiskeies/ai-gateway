@@ -40,6 +40,18 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V5 (backends.model_id now stores model ID string directly)");
     }
 
+    if current_version < 6 {
+        conn.execute_batch(SCHEMA_V6_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 6)", [])?;
+        tracing::info!("Database migrated to V6 (backend param_overrides/unknown_params, route default_max_tokens)");
+    }
+
+    if current_version < 7 {
+        conn.execute_batch(SCHEMA_V7_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 7)", [])?;
+        tracing::info!("Database migrated to V7 (request_stats ttft_ms / stream flags)");
+    }
+
     Ok(())
 }
 
@@ -220,4 +232,24 @@ INSERT OR IGNORE INTO backends_new (id, route_id, platform_id, model_id, weight,
 
 DROP TABLE IF EXISTS backends;
 ALTER TABLE backends_new RENAME TO backends;
+"#;
+
+// Migration V6: per-backend forward params (param_overrides / unknown_params) + per-route default_max_tokens
+const SCHEMA_V6_MIGRATION: &str = r#"
+-- routes: 客户端未传 max_tokens 时填充的默认值
+ALTER TABLE routes ADD COLUMN default_max_tokens INTEGER;
+
+-- backends: 转发前 merge 进请求体的参数覆盖（JSON object）
+ALTER TABLE backends ADD COLUMN param_overrides TEXT;
+
+-- backends: 未知参数转发策略（Auto=按平台自动 / Drop=丢弃 / Passthrough=透传）
+ALTER TABLE backends ADD COLUMN unknown_params TEXT NOT NULL DEFAULT 'Auto';
+"#;
+
+// Migration V7: 性能指标采集——首字时长（TTFT）与流式标记
+// ttft_ms: 流式请求从发出到收到上游第一个 chunk 的耗时；非流式为 NULL
+// is_stream: 是否流式请求（流式的 latency_ms 在流结束时改写为完整耗时，与口径统一）
+const SCHEMA_V7_MIGRATION: &str = r#"
+ALTER TABLE request_stats ADD COLUMN ttft_ms INTEGER;
+ALTER TABLE request_stats ADD COLUMN is_stream INTEGER NOT NULL DEFAULT 0;
 "#;

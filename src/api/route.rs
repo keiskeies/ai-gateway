@@ -100,7 +100,14 @@ pub async fn delete_backend(
 ) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
-    db_block!(db, crate::db::route::delete_backend(&db, &id));
+    web::block(move || -> crate::error::AppResult<()> {
+        crate::db::route::delete_backend(&db, &id)?;
+        // 悬挂统计兜底：把历史统计中该 backend 的 backend_id 置空，保留请求数/token
+        let _ = crate::db::stats::orphan_backend_stats(&db, &id);
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
     cache.refresh();
     Ok(HttpResponse::NoContent().finish())
 }

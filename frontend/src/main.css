@@ -2,21 +2,573 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  background: var(--wall-bg, #0A142E);
 }
 
 #root {
   min-height: 100vh;
 }
 
-.code-block {
-  background: var(--mantine-color-dark-7);
-  color: var(--mantine-color-gray-3);
-  padding: 12px 16px;
-  border-radius: 6px;
+/* ============================================================
+   概览监控大屏 · Deep Navy + Wall Display
+   设计稿：docs/dashboard-screen-design.md
+   原则：单一强调色、深海军蓝三阶明度、实心蓝调文字（不发灰）、
+   大字号 tabular-nums 等宽数字、300–600ms 克制微动效。
+   ============================================================ */
+
+/* ---- 视觉 Token：暗色 = 深海军蓝三阶明度，文字用实心板岩蓝（非半透明白，杜绝灰蒙感） ---- */
+:root {
+  color-scheme: dark;
+  --wall-bg: #0A142E;
+  --wall-glow: rgba(84, 140, 255, 0.11);
+  --panel-bg: #121F3D;
+  --panel-bg-2: #1C2C52;
+  --line: rgba(140, 180, 255, 0.14);
+  --line-strong: rgba(140, 180, 255, 0.28);
+  --text-1: #F2F6FF;
+  --text-2: #C6D3F0;
+  --text-3: #94A7D0;
+  --accent: #5C9DFF;
+  --accent-2: #22D3EE;
+  --ok: #35D399;
+  --warn: #FBBF24;
+  --err: #FF6B7A;
+}
+
+/* 让 Mantine 内置的文字/暗色文字/主体底色变量跟随 token，
+   未逐一定制的组件（Text c="dimmed"、Code、默认 body、Modal 等）不再透出中性灰。
+   :root:root 双写提高优先级，压过 MantineProvider 运行时注入的 :root[attribute]。 */
+:root:root[data-mantine-color-scheme='dark'] {
+  --mantine-color-text: #F2F6FF;
+  --mantine-color-dimmed: #C6D3F0;
+  --mantine-color-body: #121F3D;
+}
+
+:root:root[data-mantine-color-scheme='light'] {
+  color-scheme: light;
+  --wall-bg: #EDF2FB;
+  --wall-glow: rgba(59, 110, 220, 0.08);
+  --panel-bg: #FFFFFF;
+  --panel-bg-2: #E9F0FA;
+  --line: rgba(18, 38, 86, 0.10);
+  --line-strong: rgba(18, 38, 86, 0.20);
+  --text-1: #0A1530;
+  --text-2: #40507A;
+  --text-3: #6C7CA8;
+  --accent: #2E6BE6;
+  --accent-2: #0E9AB8;
+  --ok: #0E9F6E;
+  --warn: #A16207;
+  --err: #DC2626;
+  --mantine-color-text: #0A1530;
+  --mantine-color-dimmed: #40507A;
+  --mantine-color-body: #FFFFFF;
+}
+
+/* 页底色跟随当前方案（内联防闪色在 React 挂载后由 main.tsx 移除，避免切换主题残留） */
+html,
+body {
+  background: var(--wall-bg);
+}
+
+/* 全屏模式（仅深色）：页底再压暗一档 */
+html.wall-fullscreen[data-mantine-color-scheme='dark'] {
+  --wall-bg: #060D24;
+  --wall-glow: rgba(84, 140, 255, 0.14);
+  --line: rgba(140, 180, 255, 0.11);
+}
+
+/* ---- 页底容器：三阶明度的第一阶；至少一屏高，内容放不下时整页滚动 ---- */
+.wall-root {
+  background:
+    radial-gradient(1200px 480px at 50% -10%, var(--wall-glow), transparent 70%),
+    var(--wall-bg);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  box-sizing: border-box;
+  min-height: calc(100vh - 52px - 2 * var(--app-shell-padding, 16px));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 概览页所在的主区背景与页底一致（其他页面不受影响） */
+.mantine-AppShell-main:has(.wall-root) {
+  background:
+    radial-gradient(1200px 480px at 50% -10%, var(--wall-glow), transparent 70%),
+    var(--wall-bg);
+}
+
+/* 全屏模式：隐藏 AppShell 侧栏与顶部 logo 行，主区弹性拉满 */
+.wall-fullscreen .mantine-AppShell-navbar,
+.wall-fullscreen .mantine-AppShell-header {
+  display: none;
+}
+
+.wall-fullscreen .mantine-AppShell-main {
+  padding: 10px;
+}
+
+.wall-fullscreen .wall-root {
+  border: none;
+  border-radius: 0;
+  min-height: calc(100vh - 20px);
+}
+
+/* ---- 页头（56px） ---- */
+.wall-header {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+
+.wall-header-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: 0.02em;
+}
+
+.wall-clock {
   font-size: 13px;
-  overflow-x: auto;
-  white-space: pre;
-  margin: 8px 0;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  margin-left: 12px;
+}
+
+/* ---- KPI 行：6 张卡（新增首字/性能卡），响应式 6 / 3×2 / 2×3 ---- */
+.wall-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 1439px) {
+  .wall-kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .wall-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.wall-kpi {
+  position: relative;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px 9px;
+  overflow: hidden;
+  cursor: default;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+/* 左上 3px 强调竖条（单一强调色，不做每卡一色） */
+.wall-kpi::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 12px;
+  width: 3px;
+  height: 16px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+/* hover：边框提亮 + 上移 1px（无投影、无发光） */
+.wall-kpi:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateY(-1px);
+}
+
+/* 右上 40px 强调色水印图标（低透明度，暗色下靠色相而非明度区分） */
+.wall-kpi-watermark {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  color: var(--accent);
+  opacity: 0.16;
+  pointer-events: none;
+}
+
+.wall-kpi-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  letter-spacing: 0.05em;
+}
+
+.wall-kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.wall-kpi-unit {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* KPI 副行：成功/失败、分位数、输入输出等补充信息（统一 11px） */
+.wall-kpi-sub {
+  margin-top: 5px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 全屏模式：KPI 字号放大一档（大屏远看） */
+html.wall-fullscreen .wall-kpi-value {
+  font-size: 34px;
+}
+
+html.wall-fullscreen .wall-kpi-label {
+  font-size: 13px;
+}
+
+/* delta 徽章：与上一周期比（↑绿 / ↓红，语义按指标方向）；紧凑卡内随数字同行排列 */
+.wall-delta {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 7px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.wall-delta.good {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+}
+
+.wall-delta.bad {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+}
+
+/* Token 双色堆叠条：纯灰底 + 实色，不发光 */
+.wall-token-bar {
+  display: flex;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-bg-2);
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.wall-token-bar > div {
+  height: 100%;
+  transition: width 0.5s ease;
+}
+
+/* 灰底小胶囊（活跃代理 KPI） */
+.wall-capsule {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--text-2);
+  background: var(--panel-bg-2);
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态色点 + 呼吸灯（active_connections > 0 时 2s 呼吸） */
+.wall-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wall-dot.breathing {
+  animation: wall-breathe 2s ease-in-out infinite;
+}
+
+@keyframes wall-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ---- 主区：左 7 右 5（左：趋势+热力，右：错误+平台环），缝隙居中，吃剩余高度 ---- */
+.wall-main-grid {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 12px;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---- 实体汇总行：左 7 模型矩阵 / 右 5 网关健康，自然高度随内容 ---- */
+.wall-sub-grid {
+  display: grid;
+  grid-template-columns: 7fr 5fr;
+  gap: 12px;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+@media (max-width: 1279px) {
+  .wall-main-grid,
+  .wall-sub-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 左列：趋势图吃剩余高度，热力图自然高 */
+.wall-left-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 主区右列：错误分析 + 平台分布叠放 */
+.wall-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* ---- 面板（三阶明度第二阶） ---- */
+.wall-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  transition: border-color 0.2s ease;
+  min-height: 0;
+}
+
+.wall-panel:hover {
+  border-color: var(--line-strong);
+}
+
+/* 面板标题：13/600 + 字距 + 左侧 3px 强调竖条 */
+.wall-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-1);
+}
+
+.wall-panel-title::before {
+  content: '';
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.wall-panel-sub {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 模型排行：横向条（同调色板） ---- */
+.wall-rank-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.wall-rank-row:hover {
+  background: var(--panel-bg-2);
+}
+
+.wall-rank-label {
+  width: 110px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-2);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall-rank-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--panel-bg-2);
+  overflow: hidden;
+}
+
+.wall-rank-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.wall-rank-value {
+  width: 64px;
+  flex-shrink: 0;
+  text-align: right;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 网关健康瓦片：竖排列表（实体汇总行右列），超高滚动 ---- */
+.wall-tiles-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  max-height: 460px;
+  overflow-y: auto;
+}
+
+.wall-tile {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.wall-tile:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  transform: translateY(-1px);
+}
+
+/* 无流量瓦片：整体降为 60% 灰度（不用彩色竖条） */
+.wall-tile.idle {
+  opacity: 0.6;
+  filter: grayscale(1);
+}
+
+.wall-tile-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall-tile-count {
+  margin-left: auto;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.wall-tile-meta {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+/* 瓦片内嵌成功率微进度条 */
+.wall-tile-meter {
+  flex: 1 1 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--panel-bg-2);
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.wall-tile-meter-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+/* 热力图：accent 单色明度阶梯（层级靠明度，不引入新色） */
+.wall-heatmap {
+  display: grid;
+  grid-template-columns: 26px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  align-items: center;
+}
+
+.wall-heat-label {
+  font-size: 10px;
+  color: var(--text-3);
+}
+
+.wall-heat-cell {
+  height: 11px;
+  border-radius: 2px;
+  background: var(--panel-bg-2);
+  transition: background 0.3s ease;
+}
+
+.wall-fullscreen .wall-heat-cell {
+  height: 15px;
+}
+
+.wall-heat-hours {
+  display: grid;
+  grid-template-columns: 26px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: 3px;
+}
+
+.wall-heat-hour {
+  font-size: 10px;
+  color: var(--text-3);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 错误分析条：复用排行条样式，颜色用状态语义色 */
+.wall-err-summary {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- 图表通用：等宽数字 ---- */
+.wall-chart-num {
+  font-variant-numeric: tabular-nums;
 }
 
 .mantine-Modal-body::-webkit-scrollbar {
@@ -24,6 +576,879 @@ body {
 }
 
 .mantine-Modal-body::-webkit-scrollbar-thumb {
-  background: var(--mantine-color-gray-5);
+  background: var(--line-strong);
   border-radius: 3px;
+}
+
+/* ============================================================
+   全局设计系统 · Quiet Analytics（概览页之外的所有页面共用）
+   平台 / 虚拟模型 / 密钥 / 设置：表格 · 弹窗 · 表单 · 按钮 · 状态
+   同一套 token：单一强调色、三阶明度、零发光、零重投影。
+   ============================================================ */
+
+/* ---------- 1. 应用外壳 ---------- */
+/* 外壳根底色：半透明头部 / 弹层透过时看到的仍是同一套深蓝，而不是 Mantine 的灰 */
+.mantine-AppShell-root {
+  background: var(--wall-bg);
+}
+
+.mantine-AppShell-header {
+  background: color-mix(in srgb, var(--panel-bg) 86%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+
+.mantine-AppShell-navbar {
+  background: var(--panel-bg);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mantine-AppShell-main {
+  background:
+    radial-gradient(1000px 420px at 50% -10%, var(--wall-glow), transparent 70%),
+    var(--wall-bg);
+}
+
+/* 侧栏导航项：单一强调色，激活 = 淡底 + 左侧 3px 竖条 */
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.nav-item:hover {
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+}
+
+.nav-item.active {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+
+.nav-item svg {
+  opacity: 0.75;
+}
+
+.nav-item.active svg,
+.nav-item:hover svg {
+  opacity: 1;
+}
+
+.nav-group-label {
+  padding: 10px 10px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* ---------- 2. 页面骨架 ---------- */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+}
+
+/* 标题前的图标片：淡强调底 + 强调色图标（唯一的彩色装饰） */
+.page-title-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+/* 密钥展示框：淡强调边框 + 等宽全量密钥 */.ds-keybox {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--panel-bg-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  border-radius: 8px;
+}
+
+/* 表格滚动容器：表头吸顶，超出视口内部滚动 */
+.ds-table-wrap {
+  overflow: auto;
+  max-height: calc(100vh - 232px);
+}
+
+.page-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- 3. 面板 / 工具栏 / 空态 ---------- */
+.ds-panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.ds-panel-pad {
+  padding: 14px 16px;
+}
+
+.ds-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ds-grow {
+  flex: 1 1 auto;
+}
+
+.ds-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 52px 16px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.ds-empty svg {
+  opacity: 0.4;
+}
+
+.ds-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.ds-mono {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+}
+
+.ds-dim {
+  color: var(--text-3);
+}
+
+.ds-strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.ds-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ds-hint {
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
+/* 状态胶囊：语义色仅用于状态，其余一律中性 */
+.ds-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.ds-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.ds-pill.bare::before {
+  display: none;
+}
+
+.ds-pill.ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 26%, transparent);
+}
+
+.ds-pill.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 13%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 26%, transparent);
+}
+
+.ds-pill.err {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 13%, transparent);
+  border-color: color-mix(in srgb, var(--err) 26%, transparent);
+}
+
+.ds-pill.accent {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.ds-pill.neutral {
+  color: var(--text-1);
+  background: var(--panel-bg-2);
+  border-color: var(--line-strong);
+}
+
+/* ---------- 4. 表格 ---------- */
+.mantine-Table-table {
+  --table-hover-color: var(--panel-bg-2);
+  --table-border-color: var(--line);
+  font-size: 13px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.mantine-Table-th {
+  padding: 10px 14px !important;
+  background: var(--panel-bg) !important;
+  border-bottom: 1px solid var(--line-strong) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.04em;
+  color: var(--text-2) !important;
+  white-space: nowrap;
+}
+
+.mantine-Table-td {
+  padding: 12px 14px !important;
+  border-bottom: 1px solid var(--line) !important;
+  color: var(--text-2);
+  vertical-align: middle;
+}
+
+.mantine-Table-tr:last-child .mantine-Table-td {
+  border-bottom: none !important;
+}
+
+.mantine-Table-th.ds-num,
+.mantine-Table-td.ds-num {
+  text-align: right;
+}
+
+.mantine-Table-td .ds-strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+/* ---------- 5. 弹窗 ---------- */
+.mantine-Modal-inner {
+  padding: 24px 16px;
+}
+
+.mantine-Modal-content {
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.mantine-Modal-header {
+  padding: 14px 18px;
+  margin-bottom: 0;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.mantine-Modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--text-1);
+}
+
+.mantine-Modal-body {
+  padding: 18px;
+  max-height: calc(100vh - 190px);
+  overflow: auto;
+}
+
+.mantine-Modal-close {
+  color: var(--text-3);
+}
+
+.mantine-Modal-close:hover {
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+}
+
+/* 弹窗底部操作条：随内容滚动吸底，始终可见 */
+.ds-modal-footer {
+  position: sticky;
+  bottom: -18px;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+  padding: 14px 0 18px;
+  border-top: 1px solid var(--line);
+  background: var(--panel-bg);
+}
+
+/* ---------- 6. 表单 ---------- */
+.mantine-InputWrapper-label {
+  margin-bottom: 6px;
+  font-size: 12px !important;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.mantine-InputWrapper-description {
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.mantine-InputWrapper-error {
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.mantine-Input-input {
+  background: var(--panel-bg-2);
+  border-color: var(--line);
+  color: var(--text-1);
+  font-size: 13px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.mantine-Input-input::placeholder {
+  color: var(--text-3);
+}
+
+.mantine-Input-input:focus,
+.mantine-Input-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.mantine-Input-section {
+  color: var(--text-3);
+}
+
+.mantine-Combobox-dropdown,
+.mantine-Select-dropdown,
+.mantine-Menu-dropdown,
+.mantine-Popover-dropdown,
+.mantine-Autocomplete-dropdown,
+.mantine-MultiSelect-dropdown {
+  background: var(--panel-bg-2);
+  border: 1px solid var(--line);
+  box-shadow: none;
+}
+
+.mantine-Combobox-option,
+.mantine-Menu-item {
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.mantine-Combobox-option:hover,
+.mantine-Combobox-option[data-combobox-selected],
+.mantine-Menu-item:hover,
+.mantine-Menu-item[data-hovered] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text-1);
+}
+
+.mantine-Menu-item[data-disabled],
+.mantine-Combobox-option[data-combobox-disabled] {
+  color: var(--text-3);
+}
+
+.mantine-Menu-divider {
+  border-color: var(--line);
+}
+
+/* 表单分组：一组字段一个小标题 */
+.ds-form-section + .ds-form-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.ds-form-section-title {
+  margin-bottom: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+/* ---------- 7. 按钮 ---------- */
+.mantine-Button-root {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow: none;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.mantine-Button-root:active {
+  transform: translateY(1px);
+}
+
+.mantine-Button-root[data-variant='default'] {
+  background: transparent;
+  border-color: var(--line-strong);
+  color: var(--text-2);
+}
+
+.mantine-Button-root[data-variant='default']:hover {
+  background: var(--panel-bg-2);
+  border-color: var(--line-strong);
+  color: var(--text-1);
+}
+
+.mantine-Button-root[data-variant='subtle'] {
+  color: var(--text-2);
+}
+
+.mantine-Button-root[data-variant='subtle']:hover {
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+}
+
+.mantine-ActionIcon-root {
+  color: var(--text-2);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.mantine-ActionIcon-root:hover {
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+}
+
+/* ---------- 8. 其他组件 ---------- */
+.mantine-Badge-root {
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.mantine-Card-root,
+.mantine-Paper-root {
+  background: var(--panel-bg);
+  border-color: var(--line);
+}
+
+.mantine-SegmentedControl-root {
+  gap: 2px;
+  padding: 2px;
+  background: var(--panel-bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.mantine-SegmentedControl-indicator {
+  background: color-mix(in srgb, var(--accent) 20%, var(--panel-bg));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.mantine-SegmentedControl-label {
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.mantine-SegmentedControl-label[data-active] {
+  color: var(--text-1);
+}
+
+.mantine-Tabs-tab {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.mantine-Tabs-tab:hover {
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+}
+
+.mantine-Tabs-tab[data-active] {
+  color: var(--text-1);
+}
+
+.mantine-Tooltip-tooltip {
+  border: 1px solid var(--line);
+  background: var(--panel-bg-2);
+  color: var(--text-1);
+  font-size: 12px;
+  box-shadow: none;
+}
+
+.mantine-Notification-root {
+  background: var(--panel-bg);
+  border-color: var(--line);
+  box-shadow: none;
+}
+
+.mantine-Notification-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mantine-Notification-description {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.mantine-LoadingOverlay-overlay {
+  background: color-mix(in srgb, var(--wall-bg) 72%, transparent);
+}
+
+.mantine-Alert-root {
+  border: 1px solid var(--line);
+}
+
+.mantine-Divider-root {
+  border-color: var(--line);
+}
+
+.mantine-Switch-track,
+.mantine-Checkbox-input {
+  border-color: var(--line-strong);
+}
+
+/* ---------- 9. 滚动条与代码块 ---------- */
+.mantine-Modal-body::-webkit-scrollbar,
+.ds-panel ::-webkit-scrollbar,
+.ds-panel::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.mantine-Modal-body::-webkit-scrollbar-thumb,
+.ds-panel ::-webkit-scrollbar-thumb,
+.ds-panel::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 4px;
+}
+
+.code-block {
+  padding: 12px 14px;
+  background: var(--panel-bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-1);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: pre;
+  margin: 8px 0;
+}
+
+/* ---------- 10. 设置页：分区面板 ---------- */
+.ds-section-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .ds-section-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ds-section-body {
+  padding: 16px 18px 18px;
+}
+
+.ds-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ds-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-bg-2);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.ds-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+/* 提示条：状态语义色仅用于提示，不用于装饰 */
+.ds-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-bg-2);
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-2);
+}
+
+.ds-note svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.ds-note.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 22%, transparent);
+}
+
+/* 表单字段两列栅格（窄屏自动单列） */
+.ds-field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+
+@media (max-width: 700px) {
+  .ds-field-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- 11. 后端模型卡片（虚拟模型编辑弹窗内） ---------- */
+.ds-backend-card {
+  padding: 12px 14px;
+  background: var(--panel-bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  transition: border-color 0.15s ease;
+}
+
+.ds-backend-card:hover {
+  border-color: var(--line-strong);
+}
+
+.ds-backend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ds-backend-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+.ds-backend-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 虚线「添加」按钮：Mantine 7 无 dashed 变体，这里自绘 */
+.ds-add-btn {
+  border-style: dashed !important;
+  border-color: var(--line-strong) !important;
+  background: transparent !important;
+  color: var(--text-2) !important;
+}
+
+.ds-add-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent) !important;
+  background: var(--panel-bg-2) !important;
+  color: var(--text-1) !important;
+}
+
+/* ---- 概览大屏：模型性能矩阵 + 请求明细表（紧凑、tabular-nums、明暗自适应） ---- */
+.wall-matrix,
+.wall-logs {
+  font-size: 12px;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.wall-matrix th,
+.wall-matrix td,
+.wall-logs th,
+.wall-logs td {
+  padding: 5px 8px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-2);
+  border-color: var(--line) !important;
+}
+
+.wall-matrix th,
+.wall-logs th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--line-strong, var(--line)) !important;
+}
+
+.wall-matrix td,
+.wall-logs td {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 数字列统一右对齐 */
+.wall-matrix .wall-num,
+.wall-logs .wall-num {
+  text-align: right;
+}
+
+/* 模型名单元格：稍强调，可省略号截断 */
+.wall-mx-model {
+  font-weight: 600;
+  color: var(--text-1) !important;
+  max-width: 160px;
+}
+
+/* 明细表：超高时纵向滚动（整页仍可滚动，表格自身限高避免过长） */
+.wall-logs-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+.wall-logs-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+  z-index: 1;
+}
+
+/* 模型矩阵：限高滚动 + sticky 表头（与请求明细同模式） */
+.wall-matrix-scroll {
+  max-height: 460px;
+  overflow: auto;
+}
+
+.wall-matrix-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+  z-index: 1;
+}
+
+/* 排序指标列：单元格内嵌相对宽度微条（accent 14% 渐变，替代原排行条形图） */
+.wall-matrix-scroll .wall-mx-sorted {
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--accent) 14%, transparent) var(--bar-w, 0%),
+    transparent var(--bar-w, 0%)
+  ) !important;
+}
+
+/* 排序列表头高亮 */
+.wall-matrix-scroll .wall-mx-th-sorted {
+  color: var(--accent) !important;
 }

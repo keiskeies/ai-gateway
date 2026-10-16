@@ -185,8 +185,8 @@ fn build_tray_menu_items(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry
 
     // Add virtual model token stats items
     for proxy in &proxies {
-        // Get token stats for this proxy
-        let token_stats = ai_gateway::db::stats::proxy_stats(&db_pool, &proxy.id).ok();
+        // Get token stats for this proxy（托盘菜单固定展示全量口径，不做时段过滤）
+        let token_stats = ai_gateway::db::stats::proxy_stats(&db_pool, &proxy.id, None, None).ok();
         let total_tokens = token_stats
             .as_ref()
             .map(|s| s.total_token_input + s.total_token_output)
@@ -241,8 +241,9 @@ fn start_backend_server() {
         // 自动检测系统代理
         let system_proxy = ai_gateway::config::SystemProxy::detect();
         let http_client = system_proxy.apply_to_builder(
+            // 不设 Client 级 timeout：流式长生成远超 request_timeout，
+            // 各请求点均单独设置 per-request timeout
             reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(app_config.defaults.request_timeout_secs))
         ).build().expect("Failed to create HTTP client");
 
         let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
@@ -278,10 +279,14 @@ fn start_backend_server() {
             App::new()
                 .wrap(cors)
                 .wrap(middleware::Logger::default())
+                // 静态资源缓存策略：index.html 必须回源校验，/assets/* 强缓存
+                .wrap(middleware::from_fn(ai_gateway::web_cache::cache_headers))
                 .app_data(web::Data::new(db_pool.clone()))
                 .app_data(web::Data::new(proxy_state.clone()))
                 .app_data(web::Data::new(shared_config.clone()))
                 .app_data(web::Data::new(api_cache.clone()))
+                // JSON body 上限 64MB：actix 默认仅 2MB，长上下文 / base64 图片请求过网关会被 413 拦截
+                .app_data(web::JsonConfig::default().limit(64 * 1024 * 1024))
                 .configure(ai_gateway::api::configure)
                 // Global virtual model proxy routes — all on admin port, model name in request body
                 .route("/v1/chat/completions", web::post().to(ai_gateway::proxy::handler::openai_chat_completions))

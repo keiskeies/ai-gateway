@@ -2,12 +2,12 @@ import { useEffect, useState, useCallback } from 'react'
 import {
   Table, Modal, Select, TextInput, NumberInput, MultiSelect, Button, Group, Stack,
   Text, Badge, ActionIcon, Card, Grid, Divider, Tooltip, Code, CopyButton, Tabs,
-  Combobox, Input, InputBase, useCombobox,
+  Combobox, Input, InputBase, useCombobox, Textarea,
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { notifications } from '@mantine/notifications'
 import {
-  IconPlus, IconTrash, IconCode, IconSettings, IconCopy, IconLoader2,
+  IconPlus, IconTrash, IconCode, IconSettings, IconCopy, IconLoader2, IconRefresh, IconApi, IconCheck,
 } from '@tabler/icons-react'
 import {
   listProxies, createProxy, updateProxy, deleteProxy,
@@ -27,6 +27,10 @@ interface BackendRow {
   weight: number
   priority: number
   capabilities: string[]
+  /** 未知参数策略：Auto=按平台自动 / Drop=丢弃 / Passthrough=透传 */
+  unknown_params: string
+  /** 参数覆盖 JSON（编辑框内为字符串，提交时 parse 校验） */
+  param_overrides: string
 }
 
 interface RemoteModelsCache {
@@ -157,8 +161,10 @@ export default function Proxies() {
   const [editingProxy, setEditingProxy] = useState<any>(null)
   const [formName, setFormName] = useState('')
   const [formLbStrategy, setFormLbStrategy] = useState('RoundRobin')
+  // 客户端未传 max_tokens 时填充的默认值（空 = 不干预）
+  const [formDefaultMaxTokens, setFormDefaultMaxTokens] = useState<number | ''>('')
   const [formBackends, setFormBackends] = useState<BackendRow[]>([
-    { platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [] },
+    { platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [], unknown_params: 'Auto', param_overrides: '' },
   ])
   const [submitting, setSubmitting] = useState(false)
 
@@ -275,7 +281,8 @@ export default function Proxies() {
   const resetForm = () => {
     setFormName('')
     setFormLbStrategy('RoundRobin')
-    setFormBackends([{ platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [] }])
+    setFormDefaultMaxTokens('')
+    setFormBackends([{ platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [], unknown_params: 'Auto', param_overrides: '' }])
     setEditingProxy(null)
     setRemoteModelsCache({})
     setFetchingMap({})
@@ -304,6 +311,7 @@ export default function Proxies() {
     } catch { /* skip */ }
 
     setFormLbStrategy(route?.lb_strategy || 'RoundRobin')
+    setFormDefaultMaxTokens(route?.default_max_tokens ?? '')
 
     if (route?.backends?.length) {
       const backends: BackendRow[] = route.backends.map((b: any) => ({
@@ -312,6 +320,8 @@ export default function Proxies() {
         weight: b.weight ?? 1,
         priority: b.priority ?? 0,
         capabilities: b.capabilities || [],
+        unknown_params: b.unknown_params || 'Auto',
+        param_overrides: b.param_overrides && Object.keys(b.param_overrides).length > 0 ? JSON.stringify(b.param_overrides, null, 2) : '',
       }))
       setFormBackends(backends)
 
@@ -335,7 +345,7 @@ export default function Proxies() {
         }
       }
     } else {
-      setFormBackends([{ platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [] }])
+      setFormBackends([{ platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [], unknown_params: 'Auto', param_overrides: '' }])
     }
   }
 
@@ -383,7 +393,7 @@ export default function Proxies() {
   const addBackendRow = () => {
     setFormBackends(prev => [
       ...prev,
-      { platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [] },
+      { platform_id: '', model_id: '', weight: 1, priority: 0, capabilities: [], unknown_params: 'Auto', param_overrides: '' },
     ])
   }
 
@@ -406,15 +416,31 @@ export default function Proxies() {
       notifications.show({ title: t(locale, 'createFailed'), message: t(locale, 'proxyName'), color: 'red' })
       return
     }
+    // 参数覆盖 JSON 校验：空串 = 不覆盖，否则必须是合法 JSON object
+    const parsedOverrides: Record<string, any>[] = []
+    for (const b of formBackends) {
+      const text = (b.param_overrides || '').trim()
+      if (!text) { parsedOverrides.push({}); continue }
+      try {
+        const obj = JSON.parse(text)
+        if (typeof obj !== 'object' || Array.isArray(obj) || obj === null) throw new Error('not an object')
+        parsedOverrides.push(obj)
+      } catch {
+        notifications.show({ title: t(locale, 'createFailed'), message: `${t(locale, 'paramOverridesInvalid')}: ${b.model_id || t(locale, 'selectModel')}`, color: 'red' })
+        return
+      }
+    }
     const backends = formBackends
-      .filter(b => b.platform_id && b.model_id)
-      .map(b => ({
+      .map((b, i) => ({
         platform_id: b.platform_id,
         model_id: b.model_id,
         weight: b.weight,
         priority: b.priority,
         capabilities: b.capabilities,
+        unknown_params: b.unknown_params || 'Auto',
+        param_overrides: parsedOverrides[i] ?? {},
       }))
+      .filter(b => b.platform_id && b.model_id)
 
     setSubmitting(true)
     try {
@@ -430,6 +456,7 @@ export default function Proxies() {
         if (backends.length > 0) {
           await createRoute(editingProxy.id, {
             lb_strategy: formLbStrategy || 'RoundRobin',
+            default_max_tokens: formDefaultMaxTokens === '' ? null : formDefaultMaxTokens,
             backends,
           })
         }
@@ -439,6 +466,7 @@ export default function Proxies() {
         if (backends.length > 0) {
           await createRoute(proxy.id, {
             lb_strategy: formLbStrategy || 'RoundRobin',
+            default_max_tokens: formDefaultMaxTokens === '' ? null : formDefaultMaxTokens,
             backends,
           })
         }
@@ -594,96 +622,129 @@ console.log(message.content[0].text);`
   // ── Render ────────────────────────────────────────────────────────
 
   return (
-    <Stack gap="md">
-      {/* Header */}
-      <Group justify="space-between">
-        <Text fw={600} size="lg">{t(locale, 'proxies')}</Text>
-        <Button leftSection={<IconPlus size={16} />} onClick={handleOpenCreate}>
-          {t(locale, 'newProxy')}
-        </Button>
-      </Group>
+    <div className="page">
+      {/* ===== 页头 ===== */}
+      <div className="page-head">
+        <div>
+          <div className="page-title">
+            <span className="page-title-chip"><IconApi size={17} stroke={1.7} /></span>
+            {t(locale, 'proxies')}
+          </div>
+          <div className="page-sub">
+            {proxies.length} {t(locale, 'total')}
+          </div>
+        </div>
+        <div className="page-actions">
+          <Button
+            variant="default"
+            leftSection={<IconRefresh size={15} />}
+            onClick={loadAll}
+            loading={loading}
+          >
+            {t(locale, 'refresh')}
+          </Button>
+          <Button leftSection={<IconPlus size={15} />} onClick={handleOpenCreate}>
+            {t(locale, 'newProxy')}
+          </Button>
+        </div>
+      </div>
 
-      {/* Table */}
-      <Card shadow="xs" radius="md" withBorder>
-        <Table highlightOnHover verticalSpacing="sm">
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th w={160}>{t(locale, 'name')}</Table.Th>
-              <Table.Th>{t(locale, 'backends')}</Table.Th>
-              <Table.Th w={120}>{t(locale, 'action')}</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {loading && (
+      {/* ===== 虚拟模型列表 ===== */}
+      <div className="ds-panel">
+        <div className="ds-table-wrap">
+          <Table stickyHeader>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={3}>
-                  <Group justify="center" py="lg">
-                    <IconLoader2 size={20} className="animate-spin" />
-                  </Group>
-                </Table.Td>
+                <Table.Th style={{ width: 200 }}>{t(locale, 'name')}</Table.Th>
+                <Table.Th>{t(locale, 'backends')}</Table.Th>
+                <Table.Th style={{ width: 150 }}>{t(locale, 'lbStrategy')}</Table.Th>
+                <Table.Th className="ds-num" style={{ width: 140 }}>{t(locale, 'action')}</Table.Th>
               </Table.Tr>
-            )}
-            {!loading && proxies.length === 0 && (
-              <Table.Tr>
-                <Table.Td colSpan={3}>
-                  <Text c="dimmed" ta="center" py="lg">{t(locale, 'noProxies')}</Text>
-                </Table.Td>
-              </Table.Tr>
-            )}
-            {proxies.map((proxy: any) => {
-              const route = proxyRoutes[proxy.id]
-              const backends = route?.backends || []
-              return (
-                <Table.Tr key={proxy.id}>
-                  <Table.Td>
-                    <Badge variant="light" color="violet" size="sm"
-                      style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 12, padding: '2px 10px' }}>
-                      {proxy.name}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    {backends.length === 0 ? (
-                      <Text c="dimmed" size="sm">-</Text>
-                    ) : (
-                      <Group gap={4} wrap="wrap">
-                        {backends.map((b: any) => (
-                          <Badge
-                            key={b.id}
-                            variant="outline"
-                            size="sm"
-                            style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 11 }}
-                          >
-                            {getPlatformDisplayName(b.platform_id)}.{b.model_id}
-                          </Badge>
-                        ))}
-                      </Group>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap={4}>
-                      <Tooltip label={t(locale, 'usageCode')}>
-                        <ActionIcon variant="subtle" color="blue" onClick={() => handleOpenUsage(proxy)}>
-                          <IconCode size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                      <Tooltip label={t(locale, 'edit')}>
-                        <ActionIcon variant="subtle" color="gray" onClick={() => handleOpenEdit(proxy)}>
-                          <IconSettings size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                      <Tooltip label={t(locale, 'delete')}>
-                        <ActionIcon variant="subtle" color="red" onClick={() => confirmDelete(proxy.id)}>
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      </Tooltip>
-                    </Group>
+            </Table.Thead>
+            <Table.Tbody>
+              {loading && proxies.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={4}>
+                    <div className="ds-empty">{t(locale, 'loading')}</div>
                   </Table.Td>
                 </Table.Tr>
-              )
-            })}
-          </Table.Tbody>
-        </Table>
-      </Card>
+              )}
+              {!loading && proxies.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={4}>
+                    <div className="ds-empty">
+                      <IconApi size={28} stroke={1.2} />
+                      <span>{t(locale, 'noProxies')}</span>
+                    </div>
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {proxies.map((proxy: any) => {
+                const route = proxyRoutes[proxy.id]
+                const backends = route?.backends || []
+                const lbValue = route?.lb_strategy || 'RoundRobin'
+                const lbLabel = getLbOptions(locale).find(o => o.value === lbValue)?.label || lbValue
+                return (
+                  <Table.Tr key={proxy.id}>
+                    <Table.Td>
+                      <span className="ds-pill accent bare ds-mono">{proxy.name}</span>
+                    </Table.Td>
+                    <Table.Td>
+                      {backends.length === 0 ? (
+                        <span className="ds-dim">—</span>
+                      ) : (
+                        <Group gap={6} wrap="wrap">
+                          {backends.slice(0, 4).map((b: any) => (
+                            <span
+                              key={b.id}
+                              className="ds-pill neutral bare"
+                              title={`${getPlatformDisplayName(b.platform_id)} · ${b.model_id}`}
+                            >
+                              {getPlatformDisplayName(b.platform_id)}
+                              <span className="ds-mono ds-dim" style={{ marginLeft: 4 }}>{b.model_id}</span>
+                            </span>
+                          ))}
+                          {backends.length > 4 && (
+                            <Tooltip
+                              label={backends.slice(4).map((b: any) => `${getPlatformDisplayName(b.platform_id)} · ${b.model_id}`).join('\n')}
+                              multiline
+                              w={260}
+                            >
+                              <span className="ds-pill accent bare">+{backends.length - 4}</span>
+                            </Tooltip>
+                          )}
+                        </Group>
+                      )}
+                    </Table.Td>
+                    <Table.Td>
+                      <span className="ds-dim" style={{ fontSize: 12 }}>{lbLabel}</span>
+                    </Table.Td>
+                    <Table.Td className="ds-num">
+                      <Group gap={4} wrap="nowrap" justify="flex-end">
+                        <Tooltip label={t(locale, 'usageCode')}>
+                          <ActionIcon size="md" onClick={() => handleOpenUsage(proxy)}>
+                            <IconCode size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label={t(locale, 'edit')}>
+                          <ActionIcon size="md" onClick={() => handleOpenEdit(proxy)}>
+                            <IconSettings size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        <Tooltip label={t(locale, 'delete')}>
+                          <ActionIcon size="md" color="red" onClick={() => confirmDelete(proxy.id)}>
+                            <IconTrash size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                )
+              })}
+            </Table.Tbody>
+          </Table>
+        </div>
+      </div>
 
       {/* ── Create/Edit Modal ────────────────────────────────────── */}
       <Modal
@@ -694,125 +755,148 @@ console.log(message.content[0].text);`
         closeOnClickOutside={false}
         closeOnEscape={!submitting}
       >
-        <Stack gap="md">
-          <TextInput
-            label={t(locale, 'proxyName')}
-            placeholder="qc480"
-            required
-            value={formName}
-            onChange={e => setFormName(e.currentTarget.value)}
-            description={t(locale, 'virtualModelPlaceholder')}
-          />
+        <div>
+          <div className="ds-form-section">
+            <div className="ds-form-section-title">{t(locale, 'basicInfo')}</div>
+            <Stack gap="sm">
+              <TextInput
+                label={t(locale, 'proxyName')}
+                placeholder="qc480"
+                required
+                value={formName}
+                onChange={e => setFormName(e.currentTarget.value)}
+                description={t(locale, 'virtualModelPlaceholder')}
+              />
 
-          <Select
-            label={t(locale, 'lbStrategy')}
-            data={getLbOptions(locale)}
-            value={formLbStrategy}
-            onChange={v => setFormLbStrategy(v || 'RoundRobin')}
-          />
+              <Select
+                label={t(locale, 'lbStrategy')}
+                data={getLbOptions(locale)}
+                value={formLbStrategy}
+                onChange={v => setFormLbStrategy(v || 'RoundRobin')}
+              />
 
-          <Divider label={t(locale, 'backendModels')} labelPosition="center" />
+              <NumberInput
+                label={t(locale, 'defaultMaxTokens')}
+                description={t(locale, 'defaultMaxTokensHint')}
+                min={1}
+                value={formDefaultMaxTokens}
+                onChange={v => setFormDefaultMaxTokens(typeof v === 'number' ? v : '')}
+              />
+            </Stack>
+          </div>
 
-          {/* Backend rows */}
-          {formBackends.map((backend, index) => (
-            <Card key={index} radius="sm" withBorder padding="sm">
-              <Group justify="space-between" mb="xs">
-                <Text size="sm" fw={600}>
-                  {t(locale, 'backendModel')} #{index + 1}
-                </Text>
-                {index > 0 && (
-                  <Button
-                    variant="subtle"
-                    color="red"
-                    size="compact-xs"
-                    leftSection={<IconTrash size={12} />}
-                    onClick={() => removeBackendRow(index)}
-                  >
-                    {t(locale, 'delete')}
-                  </Button>
-                )}
-              </Group>
+          <div className="ds-form-section">
+            <div className="ds-form-section-title">{t(locale, 'backendModels')}</div>
+            <Stack gap="sm">
+              {formBackends.map((backend, index) => (
+                <div key={index} className="ds-backend-card">
+                  <div className="ds-backend-head">
+                    <div className="ds-backend-title">
+                      <span className="ds-backend-index">{index + 1}</span>
+                      {t(locale, 'backendModel')}
+                    </div>
+                    {index > 0 && (
+                      <Tooltip label={t(locale, 'delete')}>
+                        <ActionIcon size="sm" color="red" onClick={() => removeBackendRow(index)}>
+                          <IconTrash size={14} />
+                        </ActionIcon>
+                      </Tooltip>
+                    )}
+                  </div>
 
-              <Grid gutter="xs">
-                <Grid.Col span={6}>
-                  <Select
-                    label={t(locale, 'selectPlatform')}
-                    placeholder={t(locale, 'selectPlatform')}
-                    data={platformSelectOptions}
-                    value={backend.platform_id}
-                    onChange={v => handlePlatformChange(index, v || '')}
-                    searchable
-                    size="sm"
-                  />
-                </Grid.Col>
-                <Grid.Col span={6}>
-                  <ModelSelect
-                    value={backend.model_id}
-                    onChange={(v: string) => handleModelChange(index, v)}
-                    data={getModelOptions(backend.platform_id)}
-                    label={t(locale, 'selectModel')}
-                    placeholder={
-                      fetchingMap[backend.platform_id]
-                        ? t(locale, 'loading')
-                        : t(locale, 'selectModel')
-                    }
-                    disabled={!backend.platform_id}
-                    fetching={fetchingMap[backend.platform_id]}
-                  />
-                </Grid.Col>
-              </Grid>
+                  <div className="ds-field-grid">
+                    <Select
+                      label={t(locale, 'selectPlatform')}
+                      placeholder={t(locale, 'selectPlatform')}
+                      data={platformSelectOptions}
+                      value={backend.platform_id}
+                      onChange={v => handlePlatformChange(index, v || '')}
+                      searchable
+                    />
+                    <ModelSelect
+                      value={backend.model_id}
+                      onChange={(v: string) => handleModelChange(index, v)}
+                      data={getModelOptions(backend.platform_id)}
+                      label={t(locale, 'selectModel')}
+                      placeholder={
+                        fetchingMap[backend.platform_id]
+                          ? t(locale, 'loading')
+                          : t(locale, 'selectModel')
+                      }
+                      disabled={!backend.platform_id}
+                      fetching={fetchingMap[backend.platform_id]}
+                    />
+                    <NumberInput
+                      label={t(locale, 'weight')}
+                      min={1}
+                      value={backend.weight}
+                      onChange={v => updateBackendField(index, 'weight', typeof v === 'number' ? v : 1)}
+                    />
+                    <NumberInput
+                      label={t(locale, 'priority')}
+                      min={0}
+                      value={backend.priority}
+                      onChange={v => updateBackendField(index, 'priority', typeof v === 'number' ? v : 0)}
+                    />
+                  </div>
 
-              <Grid gutter="xs" mt="xs">
-                <Grid.Col span={4}>
-                  <NumberInput
-                    label={t(locale, 'weight')}
-                    min={1}
-                    value={backend.weight}
-                    onChange={v => updateBackendField(index, 'weight', typeof v === 'number' ? v : 1)}
-                    size="sm"
-                  />
-                </Grid.Col>
-                <Grid.Col span={4}>
-                  <NumberInput
-                    label={t(locale, 'priority')}
-                    min={0}
-                    value={backend.priority}
-                    onChange={v => updateBackendField(index, 'priority', typeof v === 'number' ? v : 0)}
-                    size="sm"
-                  />
-                </Grid.Col>
-                <Grid.Col span={4}>
-                  <MultiSelect
-                    label={t(locale, 'capabilities')}
-                    placeholder={t(locale, 'selectCapabilities')}
-                    data={capabilityOptions}
-                    value={backend.capabilities}
-                    onChange={v => updateBackendField(index, 'capabilities', v)}
-                    size="sm"
-                  />
-                </Grid.Col>
-              </Grid>
-            </Card>
-          ))}
+                  <div style={{ marginTop: 12 }}>
+                    <MultiSelect
+                      label={t(locale, 'capabilities')}
+                      placeholder={t(locale, 'selectCapabilities')}
+                      data={capabilityOptions}
+                      value={backend.capabilities}
+                      onChange={v => updateBackendField(index, 'capabilities', v)}
+                    />
+                  </div>
 
-          <Button
-            variant="dashed"
-            onClick={addBackendRow}
-            leftSection={<IconPlus size={16} />}
-            fullWidth
-          >
-            {t(locale, 'addBackendModel')}
-          </Button>
+                  <div className="ds-field-grid" style={{ marginTop: 12 }}>
+                    <Select
+                      label={t(locale, 'unknownParams')}
+                      description={t(locale, 'unknownParamsHint')}
+                      data={[
+                        { value: 'Auto', label: t(locale, 'paramStrategyAuto') },
+                        { value: 'Drop', label: t(locale, 'paramStrategyDrop') },
+                        { value: 'Passthrough', label: t(locale, 'paramStrategyPassthrough') },
+                      ]}
+                      value={backend.unknown_params}
+                      onChange={v => updateBackendField(index, 'unknown_params', v || 'Auto')}
+                    />
+                    <Textarea
+                      label={t(locale, 'paramOverrides')}
+                      description={t(locale, 'paramOverridesHint')}
+                      placeholder='{"temperature": 0.2, "max_tokens": 8192}'
+                      autosize
+                      minRows={2}
+                      maxRows={6}
+                      value={backend.param_overrides}
+                      onChange={e => updateBackendField(index, 'param_overrides', e.currentTarget.value)}
+                    />
+                  </div>
+                </div>
+              ))}
 
-          <Group justify="flex-end" mt="sm">
-            <Button variant="subtle" onClick={() => { closeCreate(); resetForm() }} disabled={submitting}>
+              <Button
+                variant="default"
+                className="ds-add-btn"
+                onClick={addBackendRow}
+                leftSection={<IconPlus size={15} />}
+                fullWidth
+              >
+                {t(locale, 'addBackendModel')}
+              </Button>
+            </Stack>
+          </div>
+
+          <div className="ds-modal-footer">
+            <Button variant="default" onClick={() => { closeCreate(); resetForm() }} disabled={submitting}>
               {t(locale, 'cancel')}
             </Button>
             <Button onClick={handleSubmit} loading={submitting}>
               {editingProxy ? t(locale, 'save') : t(locale, 'create')}
             </Button>
-          </Group>
-        </Stack>
+          </div>
+        </div>
       </Modal>
 
       {/* ── Usage Modal ──────────────────────────────────────────── */}
@@ -846,20 +930,21 @@ console.log(message.content[0].text);`
                   {lang.children.map(proto => (
                     <Tabs.Panel key={proto.key} value={proto.key} pt="sm">
                       <div style={{ position: 'relative' }}>
-                        <Code block style={{ maxHeight: 400, overflow: 'auto', fontSize: 13 }}>
+                        <pre className="code-block" style={{ maxHeight: 400, overflow: 'auto' }}>
                           {proto.code}
-                        </Code>
+                        </pre>
                         <CopyButton value={proto.code}>
                           {({ copied, copy }) => (
-                            <ActionIcon
-                              color={copied ? 'teal' : 'gray'}
-                              variant="subtle"
-                              size="sm"
-                              onClick={copy}
-                              style={{ position: 'absolute', top: 8, right: 8 }}
-                            >
-                              {copied ? <IconCopy size={14} /> : <IconCopy size={14} />}
-                            </ActionIcon>
+                            <Tooltip label={copied ? (locale === 'zh' ? '已复制' : 'Copied') : (locale === 'zh' ? '复制' : 'Copy')}>
+                              <ActionIcon
+                                variant="subtle"
+                                size="sm"
+                                onClick={copy}
+                                style={{ position: 'absolute', top: 8, right: 8 }}
+                              >
+                                {copied ? <IconCheck size={14} style={{ color: 'var(--ok)' }} /> : <IconCopy size={14} />}
+                              </ActionIcon>
+                            </Tooltip>
                           )}
                         </CopyButton>
                       </div>
@@ -880,11 +965,11 @@ console.log(message.content[0].text);`
         size="sm"
       >
         <Text size="sm" c="dimmed">{t(locale, 'deleteConfirm')}</Text>
-        <Group justify="flex-end" mt="md">
-          <Button variant="subtle" onClick={closeDelete}>{t(locale, 'cancel')}</Button>
+        <div className="ds-modal-footer">
+          <Button variant="default" onClick={closeDelete}>{t(locale, 'cancel')}</Button>
           <Button color="red" onClick={handleDelete}>{t(locale, 'confirm')}</Button>
-        </Group>
+        </div>
       </Modal>
-    </Stack>
+    </div>
   )
 }

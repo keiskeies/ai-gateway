@@ -21,7 +21,8 @@ pub struct UnifiedRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedMessage {
     pub role: Role,
-    pub content: Option<String>,
+    /// OpenAI 风格内容：字符串或内容块数组（多模态），见 `protocol::content`
+    pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<UnifiedToolCall>>,

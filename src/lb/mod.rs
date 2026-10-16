@@ -71,4 +71,12 @@ impl BackendSelector {
             counter.fetch_sub(1, Ordering::Relaxed);
         }
     }
+
+    /// 当前全部在途连接总数（概览大屏「并发连接」KPI）
+    pub fn active_connections_total(&self) -> i64 {
+        self.connections
+            .iter()
+            .map(|entry| entry.value().load(Ordering::Relaxed) as i64)
+            .sum()
+    }
 }

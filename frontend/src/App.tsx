@@ -16,11 +16,11 @@ import { useAppContext } from './ThemeContext'
 import { t, type Locale, type ThemeMode, type TranslationKey } from './i18n'
 
 const NAV_ITEMS = [
-  { key: '/', icon: IconDashboard, label: 'dashboard' as TranslationKey, color: '#2563eb' },
-  { key: '/platforms', icon: IconCloudShare, label: 'platforms' as TranslationKey, color: '#7c3aed' },
-  { key: '/proxies', icon: IconApi, label: 'proxies' as TranslationKey, color: '#db2777' },
-  { key: '/api-keys', icon: IconKey, label: 'apiKeys' as TranslationKey, color: '#d97706' },
-  { key: '/settings', icon: IconSettings, label: 'settings' as TranslationKey, color: '#64748b' },
+  { key: '/', icon: IconDashboard, label: 'dashboard' as TranslationKey },
+  { key: '/platforms', icon: IconCloudShare, label: 'platforms' as TranslationKey },
+  { key: '/proxies', icon: IconApi, label: 'proxies' as TranslationKey },
+  { key: '/api-keys', icon: IconKey, label: 'apiKeys' as TranslationKey },
+  { key: '/settings', icon: IconSettings, label: 'settings' as TranslationKey },
 ]
 
 export default function App() {
@@ -43,9 +43,9 @@ export default function App() {
             <Burger opened={mobileOpened} onClick={toggleMobile} hiddenFrom="sm" size="sm" />
             <Burger opened={desktopOpened} onClick={toggleDesktop} visibleFrom="sm" size="sm" />
             <Group gap={6} onClick={() => navigate('/')} style={{ cursor: 'pointer' }}>
-              <img src="./logo.png" alt="" style={{ height: 28 }} />
-              <Text fw={700} size="lg">AI Gateway</Text>
-              <Text size="xs" c="dimmed">v1.2.4</Text>
+              <img src="./logo.png" alt="" style={{ height: 26 }} />
+              <Text fw={700} size="md" style={{ color: 'var(--text-1)', letterSpacing: '0.01em' }}>AI Gateway</Text>
+              <span className="ds-pill neutral bare">v1.3.0</span>
             </Group>
           </Group>
           <Group gap={4}>
@@ -85,22 +85,18 @@ export default function App() {
       </AppShell.Header>
 
       <AppShell.Navbar p="xs">
+        <div className="nav-group-label">{t(locale, 'dashboard') === '概览' ? '导航' : 'NAVIGATION'}</div>
         {NAV_ITEMS.map(item => {
           const active = location.pathname === item.key
           return (
-            <Button
+            <button
               key={item.key}
-              variant={active ? 'light' : 'subtle'}
-              color={item.color}
-              fullWidth
-              justify="flex-start"
-              leftSection={<item.icon size={18} />}
+              className={`nav-item${active ? ' active' : ''}`}
               onClick={() => { navigate(item.key); toggleMobile() }}
-              style={{ fontWeight: active ? 600 : 400 }}
-              mb={4}
             >
-              {t(locale, item.label)}
-            </Button>
+              <item.icon size={18} />
+              <span>{t(locale, item.label)}</span>
+            </button>
           )
         })}
       </AppShell.Navbar>

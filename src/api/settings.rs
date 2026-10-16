@@ -96,6 +96,11 @@ pub async fn update_config(
             need_save = true;
         }
 
+        if let Some(timeout) = body.test_connection_timeout_secs {
+            cfg.defaults.test_connection_timeout_secs = timeout;
+            need_save = true;
+        }
+
         let snapshot = cfg.clone();
         (snapshot, need_save)
     }; // write lock released here

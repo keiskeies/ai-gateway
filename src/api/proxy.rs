@@ -108,12 +108,8 @@ pub async fn update(
     let id = path.into_inner();
     let req = body.into_inner();
     let db = db.into_inner();
-    let proxy = web::block(move || {
-        // 先删除该 proxy 的所有请求统计
-        crate::db::stats::delete_by_proxy(&db, &id)?;
-        crate::db::proxy::update(&db, &id, &req)
-    })
-    .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    let proxy = web::block(move || crate::db::proxy::update(&db, &id, &req))
+        .await.map_err(|e| AppError::Internal(e.to_string()))??;
     cache.refresh();
     Ok(HttpResponse::Ok().json(proxy))
 }
@@ -125,8 +121,12 @@ pub async fn delete(
 ) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
-    web::block(move || crate::db::proxy::delete(&db, &id))
-        .await.map_err(|e| AppError::Internal(e.to_string()))??;
+    web::block(move || {
+        // 级联清理该 proxy 的历史请求统计（避免悬挂统计行干扰后续统计口径）
+        let _ = crate::db::stats::delete_by_proxy(&db, &id);
+        crate::db::proxy::delete(&db, &id)
+    })
+    .await.map_err(|e| AppError::Internal(e.to_string()))??;
     cache.refresh();
     Ok(HttpResponse::NoContent().finish())
 }

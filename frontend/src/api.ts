@@ -105,11 +105,27 @@ export const createApiKey = (data: any) => api.post('/api-keys', data).then(r =>
 export const deleteApiKey = (id: string) => api.delete(`/api-keys/${id}`)
 
 // Stats
-export const getOverview = () => api.get('/stats/overview').then(r => r.data)
-export const getProxyStats = (proxyId: string) => api.get(`/stats/proxy/${proxyId}`).then(r => r.data)
-export const getPlatformStats = (platformId: string) => api.get(`/stats/platform/${platformId}`).then(r => r.data)
-export const getModelTimeSeries = (granularity: 'day' | 'month' | 'year', limit?: number) =>
-  api.get('/stats/model-timeseries', { params: { granularity, limit } }).then(r => r.data)
+// 概览页统计通用时间范围（RFC3339 UTC，[from, to)）
+export interface RangeOpts { from?: string; to?: string }
+export const getOverview = (opts?: RangeOpts) => api.get('/stats/overview', { params: opts }).then(r => r.data)
+export const getProxyStats = (proxyId: string, opts?: RangeOpts) => api.get(`/stats/proxy/${proxyId}`, { params: opts }).then(r => r.data)
+export const getPlatformStats = (platformId: string, opts?: RangeOpts) => api.get(`/stats/platform/${platformId}`, { params: opts }).then(r => r.data)
+export const getBackendStats = (backendId: string) => api.get(`/stats/backend/${backendId}`).then(r => r.data)
+export const getModelTimeSeries = (
+  granularity: 'hour' | 'day' | 'month' | 'year',
+  opts?: { from?: string; to?: string; limit?: number }
+) =>
+  api.get('/stats/model-timeseries', { params: { granularity, ...opts } }).then(r => r.data)
+export const getErrorStats = (opts?: RangeOpts) => api.get('/stats/errors', { params: opts }).then(r => r.data)
+export const getHeatmap = (opts?: RangeOpts) => api.get('/stats/heatmap', { params: opts }).then(r => r.data)
+export const getLatencyPercentiles = (opts?: RangeOpts) => api.get('/stats/latency', { params: opts }).then(r => r.data)
+// 模型维度汇总（时间范围内每模型全量统计：请求/失败/token/延时/首字/速度）
+export const getModelSummaries = (opts?: RangeOpts) => api.get('/stats/model-summaries', { params: opts }).then(r => r.data)
+// 请求明细分页列表
+export const getRequestLogs = (
+  opts?: RangeOpts & { model?: string; status?: 'success' | 'fail'; page?: number; page_size?: number }
+) => api.get('/stats/requests', { params: opts }).then(r => r.data)
+export const cleanupStats = () => api.post('/stats/cleanup').then(r => r.data)
 
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)

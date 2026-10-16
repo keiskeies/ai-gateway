@@ -8,10 +8,8 @@ import {
   Button,
   Group,
   Stack,
-  Text,
-  Badge,
   ActionIcon,
-  Card,
+  Tooltip,
 } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { notifications } from '@mantine/notifications'
@@ -21,6 +19,7 @@ import {
   IconTrash,
   IconRefresh,
   IconPlugConnected,
+  IconX,
 } from '@tabler/icons-react'
 import { listPlatforms, createPlatform, updatePlatform, deletePlatform } from '../api'
 import { useAppContext } from '../ThemeContext'
@@ -186,142 +185,135 @@ export default function Platforms() {
   }))
 
   return (
-    <Stack gap="md">
-      <Group justify="space-between">
-        <Group gap="xs">
-          <IconPlugConnected size={22} stroke={1.5} />
-          <Text fw={600} size="lg">{t(locale, 'platforms')}</Text>
-        </Group>
-        <Group gap="xs">
+    <div className="page">
+      {/* ===== 页头 ===== */}
+      <div className="page-head">
+        <div>
+          <div className="page-title">
+            <span className="page-title-chip"><IconPlugConnected size={17} stroke={1.7} /></span>
+            {t(locale, 'platforms')}
+          </div>
+          <div className="page-sub">
+            {platforms.length} {t(locale, 'total')}
+          </div>
+        </div>
+        <div className="page-actions">
           <Button
-            variant="subtle"
-            size="compact-sm"
-            leftSection={<IconRefresh size={16} />}
+            variant="default"
+            leftSection={<IconRefresh size={15} />}
             onClick={loadPlatforms}
+            loading={loading}
           >
             {t(locale, 'refresh')}
           </Button>
           <Button
-            size="compact-sm"
-            leftSection={<IconPlus size={16} />}
+            leftSection={<IconPlus size={15} />}
             onClick={openCreate}
           >
             {t(locale, 'addPlatform')}
           </Button>
-        </Group>
-      </Group>
+        </div>
+      </div>
 
-      <Card withBorder padding={0}>
-        <Table
-          highlightOnHover
-          verticalSpacing="sm"
-          horizontalSpacing="md"
-          stickyHeader
-        >
-          <Table.Thead>
-            <Table.Tr>
-              <Table.Th>{t(locale, 'name')}</Table.Th>
-              <Table.Th>{t(locale, 'type')}</Table.Th>
-              <Table.Th>{t(locale, 'baseUrl')}</Table.Th>
-              <Table.Th>API Key</Table.Th>
-              <Table.Th>{t(locale, 'action')}</Table.Th>
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {loading && platforms.length === 0 && (
+      {/* ===== 平台列表 ===== */}
+      <div className="ds-panel">
+        <div className="ds-table-wrap">
+          <Table stickyHeader>
+            <Table.Thead>
               <Table.Tr>
-                <Table.Td colSpan={5}>
-                  <Text c="dimmed" ta="center" py="md">
-                    {t(locale, 'loading')}
-                  </Text>
-                </Table.Td>
+                <Table.Th style={{ width: 200 }}>{t(locale, 'name')}</Table.Th>
+                <Table.Th style={{ width: 150 }}>{t(locale, 'type')}</Table.Th>
+                <Table.Th>{t(locale, 'baseUrl')}</Table.Th>
+                <Table.Th style={{ width: 200 }}>API Key</Table.Th>
+                <Table.Th className="ds-num" style={{ width: 110 }}>{t(locale, 'action')}</Table.Th>
               </Table.Tr>
-            )}
-            {!loading && platforms.length === 0 && (
-              <Table.Tr>
-                <Table.Td colSpan={5}>
-                  <Text c="dimmed" ta="center" py="md">
-                    {t(locale, 'noPlatforms')}
-                  </Text>
-                </Table.Td>
-              </Table.Tr>
-            )}
-            {platforms.map((platform) => {
-              const preset = platformPresets.find(p => p.name === platform.name)
-              const displayName = preset ? getPresetName(preset, locale) : platform.name
-
-              return (
-                <Table.Tr key={platform.id}>
-                  <Table.Td>
-                    <Text fw={500}>{displayName}</Text>
-                  </Table.Td>
-                  <Table.Td>
-                    <Badge variant="light" size="sm">
-                      {getPlatformTypeLabel(platform.type, locale)}
-                    </Badge>
-                  </Table.Td>
-                  <Table.Td>
-                    <Text size="sm" truncate maw={320}>
-                      {platform.base_url}
-                    </Text>
-                  </Table.Td>
-                  <Table.Td>
-                    {platform.api_key ? (
-                      <Text size="sm" ff="monospace" c="dimmed">
-                        {platform.api_key.slice(0, 8)}...
-                      </Text>
-                    ) : (
-                      <Text size="sm" c="dimmed">-</Text>
-                    )}
-                  </Table.Td>
-                  <Table.Td>
-                    <Group gap="xs" wrap="nowrap">
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        size="sm"
-                        onClick={() => openEdit(platform)}
-                      >
-                        <IconEdit size={16} />
-                      </ActionIcon>
-                      {deleteConfirmId === platform.id ? (
-                        <Group gap={4} wrap="nowrap">
-                          <ActionIcon
-                            variant="filled"
-                            color="red"
-                            size="sm"
-                            onClick={() => handleDelete(platform.id)}
-                          >
-                            <IconTrash size={16} />
-                          </ActionIcon>
-                          <ActionIcon
-                            variant="subtle"
-                            color="gray"
-                            size="sm"
-                            onClick={() => setDeleteConfirmId(null)}
-                          >
-                            <Text size="xs">X</Text>
-                          </ActionIcon>
-                        </Group>
-                      ) : (
-                        <ActionIcon
-                          variant="subtle"
-                          color="red"
-                          size="sm"
-                          onClick={() => setDeleteConfirmId(platform.id)}
-                        >
-                          <IconTrash size={16} />
-                        </ActionIcon>
-                      )}
-                    </Group>
+            </Table.Thead>
+            <Table.Tbody>
+              {loading && platforms.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={5}>
+                    <div className="ds-empty">{t(locale, 'loading')}</div>
                   </Table.Td>
                 </Table.Tr>
-              )
-            })}
-          </Table.Tbody>
-        </Table>
-      </Card>
+              )}
+              {!loading && platforms.length === 0 && (
+                <Table.Tr>
+                  <Table.Td colSpan={5}>
+                    <div className="ds-empty">
+                      <IconPlugConnected size={28} stroke={1.2} />
+                      <span>{t(locale, 'noPlatforms')}</span>
+                    </div>
+                  </Table.Td>
+                </Table.Tr>
+              )}
+              {platforms.map((platform) => {
+                const preset = platformPresets.find(p => p.name === platform.name)
+                const displayName = preset ? getPresetName(preset, locale) : platform.name
 
+                return (
+                  <Table.Tr key={platform.id}>
+                    <Table.Td>
+                      <div className="ds-strong">{displayName}</div>
+                    </Table.Td>
+                    <Table.Td>
+                      <span className="ds-pill neutral bare">{getPlatformTypeLabel(platform.type, locale)}</span>
+                    </Table.Td>
+                    <Table.Td>
+                      <div
+                        className="ds-mono ds-dim"
+                        title={platform.base_url}
+                        style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      >
+                        {platform.base_url}
+                      </div>
+                    </Table.Td>
+                    <Table.Td>
+                      {platform.api_key ? (
+                        <span className="ds-mono ds-dim" title={platform.api_key.slice(0, 8)}>
+                          {platform.api_key.slice(0, 8)}••••••
+                        </span>
+                      ) : (
+                        <span className="ds-dim">—</span>
+                      )}
+                    </Table.Td>
+                    <Table.Td className="ds-num">
+                      <Group gap={4} wrap="nowrap" justify="flex-end">
+                        <Tooltip label={t(locale, 'editPlatform')}>
+                          <ActionIcon size="md" onClick={() => openEdit(platform)}>
+                            <IconEdit size={16} />
+                          </ActionIcon>
+                        </Tooltip>
+                        {deleteConfirmId === platform.id ? (
+                          <>
+                            <Tooltip label={t(locale, 'confirmDelete')}>
+                              <ActionIcon variant="filled" color="red" size="md" onClick={() => handleDelete(platform.id)}>
+                                <IconTrash size={15} />
+                              </ActionIcon>
+                            </Tooltip>
+                            <Tooltip label={t(locale, 'cancel')}>
+                              <ActionIcon size="md" onClick={() => setDeleteConfirmId(null)}>
+                                <IconX size={15} />
+                              </ActionIcon>
+                            </Tooltip>
+                          </>
+                        ) : (
+                          <Tooltip label={t(locale, 'delete')}>
+                            <ActionIcon size="md" color="red" onClick={() => setDeleteConfirmId(platform.id)}>
+                              <IconTrash size={16} />
+                            </ActionIcon>
+                          </Tooltip>
+                        )}
+                      </Group>
+                    </Table.Td>
+                  </Table.Tr>
+                )
+              })}
+            </Table.Tbody>
+          </Table>
+        </div>
+      </div>
+
+      {/* ===== 新增 / 编辑弹窗 ===== */}
       <Modal
         opened={modalOpen}
         onClose={() => { closeModal(); setEditItem(null) }}
@@ -329,10 +321,10 @@ export default function Platforms() {
         size="lg"
         closeOnClickOutside={false}
       >
-        <Stack gap="md">
-          {!editItem && (
+        {!editItem && (
+          <div className="ds-form-section">
+            <div className="ds-form-section-title">{t(locale, 'quickPreset')}</div>
             <Select
-              label={t(locale, 'quickPreset')}
               placeholder={t(locale, 'quickPreset')}
               data={presetSelectData}
               value={presetValue}
@@ -340,59 +332,67 @@ export default function Platforms() {
               searchable
               clearable
             />
-          )}
+          </div>
+        )}
 
-          <TextInput
-            label={t(locale, 'platformName')}
-            placeholder="OpenAI, DeepSeek, etc."
-            required
-            value={formValues.name}
-            onChange={(e) => updateField('name', e.currentTarget.value)}
-          />
+        <div className="ds-form-section">
+          <div className="ds-form-section-title">{t(locale, 'basicInfo')}</div>
+          <Stack gap="sm">
+            <TextInput
+              label={t(locale, 'platformName')}
+              placeholder="OpenAI, DeepSeek, etc."
+              required
+              value={formValues.name}
+              onChange={(e) => updateField('name', e.currentTarget.value)}
+            />
+            <Select
+              label={t(locale, 'platformType')}
+              data={typeSelectData}
+              required
+              value={formValues.type}
+              onChange={(val) => updateField('type', val || 'OpenAI')}
+            />
+            <TextInput
+              label={t(locale, 'baseUrl')}
+              placeholder="https://api.openai.com/v1"
+              required
+              value={formValues.base_url}
+              onChange={(e) => updateField('base_url', e.currentTarget.value)}
+            />
+          </Stack>
+        </div>
 
-          <Select
-            label={t(locale, 'platformType')}
-            data={typeSelectData}
-            required
-            value={formValues.type}
-            onChange={(val) => updateField('type', val || 'OpenAI')}
-          />
+        <div className="ds-form-section">
+          <div className="ds-form-section-title">{t(locale, 'credentials')}</div>
+          <Stack gap="sm">
+            <PasswordInput
+              label={t(locale, 'apiKey')}
+              placeholder="sk-..."
+              value={formValues.api_key}
+              onChange={(e) => updateField('api_key', e.currentTarget.value)}
+            />
+            <TextInput
+              label={t(locale, 'organization')}
+              placeholder="org-xxx"
+              description="Optional"
+              value={formValues.organization}
+              onChange={(e) => updateField('organization', e.currentTarget.value)}
+            />
+          </Stack>
+        </div>
 
-          <TextInput
-            label={t(locale, 'baseUrl')}
-            placeholder="https://api.openai.com/v1"
-            required
-            value={formValues.base_url}
-            onChange={(e) => updateField('base_url', e.currentTarget.value)}
-          />
-
-          <PasswordInput
-            label={t(locale, 'apiKey')}
-            placeholder="sk-..."
-            value={formValues.api_key}
-            onChange={(e) => updateField('api_key', e.currentTarget.value)}
-          />
-
-          <TextInput
-            label={t(locale, 'organization')}
-            placeholder="org-xxx (optional)"
-            value={formValues.organization}
-            onChange={(e) => updateField('organization', e.currentTarget.value)}
-          />
-
-          <Group justify="flex-end" mt="md">
-            <Button variant="subtle" onClick={() => { closeModal(); setEditItem(null) }}>
-              {t(locale, 'cancel')}
-            </Button>
-            <Button
-              onClick={handleSubmit}
-              disabled={!formValues.name || !formValues.type || !formValues.base_url}
-            >
-              {editItem ? t(locale, 'save') : t(locale, 'create')}
-            </Button>
-          </Group>
-        </Stack>
+        <div className="ds-modal-footer">
+          <Button variant="default" onClick={() => { closeModal(); setEditItem(null) }}>
+            {t(locale, 'cancel')}
+          </Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={!formValues.name || !formValues.type || !formValues.base_url}
+          >
+            {editItem ? t(locale, 'save') : t(locale, 'create')}
+          </Button>
+        </div>
       </Modal>
-    </Stack>
+    </div>
   )
 }

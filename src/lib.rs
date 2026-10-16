@@ -7,3 +7,4 @@ pub mod lb;
 pub mod protocol;
 pub mod proxy;
 pub mod api;
+pub mod web_cache;

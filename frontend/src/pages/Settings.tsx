@@ -1,16 +1,9 @@
 import { useEffect, useState } from 'react'
 import {
-  Card,
   NumberInput,
   TextInput,
   Select,
   Button,
-  Group,
-  Stack,
-  Text,
-  Grid,
-  ThemeIcon,
-  Alert,
 } from '@mantine/core'
 import { useForm } from '@mantine/form'
 import { notifications } from '@mantine/notifications'
@@ -19,8 +12,10 @@ import {
   IconAdjustments,
   IconAlertTriangle,
   IconCheck,
+  IconRefresh,
+  IconSettings,
 } from '@tabler/icons-react'
-import { getSettings, updateSettings } from '../api'
+import { getSettings, updateSettings, cleanupStats } from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale } from '../i18n'
 
@@ -62,6 +57,28 @@ export default function Settings() {
 
   const [originalPort, setOriginalPort] = useState<number>(1994)
   const [originalHost, setOriginalHost] = useState<string>('0.0.0.0')
+  const [cleaningStats, setCleaningStats] = useState(false)
+
+  const onCleanupStats = async () => {
+    setCleaningStats(true)
+    try {
+      const result = await cleanupStats()
+      const deleted: number = result?.deleted ?? 0
+      notifications.show({
+        title: t(locale, 'statsCleanup'),
+        message: deleted > 0 ? t(locale, 'statsCleanupSuccess', String(deleted)) : t(locale, 'statsCleanupNothing'),
+        color: deleted > 0 ? 'green' : 'gray',
+        icon: <IconCheck size={18} />,
+      })
+    } catch {
+      notifications.show({
+        message: t(locale, 'loadFailed'),
+        color: 'red',
+      })
+    } finally {
+      setCleaningStats(false)
+    }
+  }
 
   useEffect(() => { loadSettings() }, [])
 
@@ -137,27 +154,52 @@ export default function Settings() {
   const lbOptions = getLbOptions(locale)
 
   return (
-    <Stack gap="lg">
-      {/* Header */}
-      <Text fw={700} size="lg">
-        {t(locale, 'settings')}
-      </Text>
+    <div className="page">
+      {/* ===== 页头 ===== */}
+      <div className="page-head">
+        <div>
+          <div className="page-title">
+            <span className="page-title-chip"><IconSettings size={17} stroke={1.7} /></span>
+            {t(locale, 'settings')}
+          </div>
+          <div className="page-sub ds-num">
+            {form.values.listen_host}:{form.values.admin_port}
+          </div>
+        </div>
+        <div className="page-actions">
+          <Button
+            variant="default"
+            leftSection={<IconRefresh size={15} />}
+            onClick={loadSettings}
+            loading={loading}
+          >
+            {t(locale, 'refresh')}
+          </Button>
+          <Button
+            type="submit"
+            form="settings-form"
+            loading={saving}
+            leftSection={<IconCheck size={15} />}
+          >
+            {t(locale, 'save')}
+          </Button>
+        </div>
+      </div>
 
-      <form onSubmit={form.onSubmit(onSave)}>
-        <Stack gap="md">
-          {/* Server Settings */}
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group gap="sm" mb="md">
-              <ThemeIcon variant="light" size="lg" radius="md" color="blue">
-                <IconDeviceDesktop size={18} />
-              </ThemeIcon>
-              <Text fw={600}>
-                {t(locale, 'serverSettings')}
-              </Text>
-            </Group>
-
-            <Grid>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+      {/* ===== 设置分区 ===== */}
+      <form id="settings-form" onSubmit={form.onSubmit(onSave)}>
+        <div className="ds-section-grid">
+          {/* 服务端设置 */}
+          <section className="ds-panel">
+            <header className="ds-section-head">
+              <span className="ds-chip"><IconDeviceDesktop size={16} /></span>
+              <div>
+                <div className="ds-section-title">{t(locale, 'serverSettings')}</div>
+                <div className="ds-hint">{t(locale, 'settingsNote')}</div>
+              </div>
+            </header>
+            <div className="ds-section-body">
+              <div className="ds-field-grid">
                 <NumberInput
                   label={t(locale, 'adminPort')}
                   description={t(locale, 'adminPortDesc')}
@@ -165,51 +207,39 @@ export default function Settings() {
                   max={65535}
                   {...form.getInputProps('admin_port')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
                 <TextInput
                   label={t(locale, 'listenHost')}
                   description={t(locale, 'listenHostDesc')}
                   placeholder="0.0.0.0"
                   {...form.getInputProps('listen_host')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+              </div>
+              <div style={{ marginTop: 14 }}>
                 <Select
                   label={t(locale, 'logLevel')}
                   description={t(locale, 'logLevelDesc')}
                   data={LOG_OPTIONS}
                   {...form.getInputProps('log_level')}
                 />
-              </Grid.Col>
-            </Grid>
+              </div>
+              <div className="ds-note warn">
+                <IconAlertTriangle size={14} />
+                <span>{t(locale, 'settingsNote')}</span>
+              </div>
+            </div>
+          </section>
 
-            <Alert
-              variant="light"
-              color="yellow"
-              icon={<IconAlertTriangle size={16} />}
-              mt="md"
-              p="xs"
-            >
-              <Text size="xs">
-                {t(locale, 'settingsNote')}
-              </Text>
-            </Alert>
-          </Card>
-
-          {/* Request Policy */}
-          <Card shadow="sm" padding="lg" radius="md" withBorder>
-            <Group gap="sm" mb="md">
-              <ThemeIcon variant="light" size="lg" radius="md" color="violet">
-                <IconAdjustments size={18} />
-              </ThemeIcon>
-              <Text fw={600}>
-                {t(locale, 'defaultSettings')}
-              </Text>
-            </Group>
-
-            <Grid>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+          {/* 请求策略 */}
+          <section className="ds-panel">
+            <header className="ds-section-head">
+              <span className="ds-chip"><IconAdjustments size={16} /></span>
+              <div>
+                <div className="ds-section-title">{t(locale, 'defaultSettings')}</div>
+                <div className="ds-hint">{t(locale, 'lbStrategyDefaultDesc')}</div>
+              </div>
+            </header>
+            <div className="ds-section-body">
+              <div className="ds-field-grid">
                 <NumberInput
                   label={t(locale, 'maxRetries')}
                   description={t(locale, 'maxRetriesDesc')}
@@ -217,24 +247,18 @@ export default function Settings() {
                   max={10}
                   {...form.getInputProps('max_retries')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
                 <NumberInput
                   label={t(locale, 'retryBackoffMs')}
                   description={t(locale, 'retryBackoffMsDesc')}
                   min={100}
                   {...form.getInputProps('retry_backoff_ms')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
                 <NumberInput
                   label={t(locale, 'requestTimeoutSecs')}
                   description={t(locale, 'requestTimeoutSecsDesc')}
                   min={1}
                   {...form.getInputProps('request_timeout_secs')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
                 <NumberInput
                   label={t(locale, 'testConnTimeoutSecs')}
                   description={t(locale, 'testConnTimeoutSecsDesc')}
@@ -242,30 +266,40 @@ export default function Settings() {
                   max={120}
                   {...form.getInputProps('test_connection_timeout_secs')}
                 />
-              </Grid.Col>
-              <Grid.Col span={{ base: 12, sm: 6, md: 4 }}>
+              </div>
+              <div style={{ marginTop: 14 }}>
                 <Select
                   label={t(locale, 'lbStrategyDefault')}
                   description={t(locale, 'lbStrategyDefaultDesc')}
                   data={lbOptions}
                   {...form.getInputProps('lb_strategy')}
                 />
-              </Grid.Col>
-            </Grid>
-          </Card>
+              </div>
+            </div>
+          </section>
 
-          {/* Save Button */}
-          <Group justify="flex-end">
-            <Button
-              type="submit"
-              loading={saving}
-              style={{ minWidth: 120 }}
-            >
-              {t(locale, 'save')}
-            </Button>
-          </Group>
-        </Stack>
+          {/* 数据维护 */}
+          <section className="ds-panel">
+            <header className="ds-section-head">
+              <span className="ds-chip"><IconAlertTriangle size={16} /></span>
+              <div>
+                <div className="ds-section-title">{t(locale, 'statsCleanup')}</div>
+                <div className="ds-hint">{t(locale, 'statsCleanupDesc')}</div>
+              </div>
+            </header>
+            <div className="ds-section-body">
+              <Button
+                variant="subtle"
+                leftSection={<IconRefresh size={15} />}
+                onClick={onCleanupStats}
+                loading={cleaningStats}
+              >
+                {t(locale, 'statsCleanup')}
+              </Button>
+            </div>
+          </section>
+        </div>
       </form>
-    </Stack>
+    </div>
   )
 }
