@@ -61,7 +61,8 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Install tauri-cli
-        run: cargo install tauri-cli
+        # 固定 2.11.5：2.12.x 依赖 zip ^8，而 zip 8.x 全系列已被 yank，导致 cargo install 失败
+        run: cargo install tauri-cli --version 2.11.5 --locked
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
