@@ -46,32 +46,45 @@
 ## 📸 Screenshots
 
 <p align="center">
-  <img src="doc/ai-gateway1.jpg" width="80%" alt="AI Gateway Main Interface" />
+  <img src="doc/dashboard-wall.png" width="90%" alt="AI Gateway Monitoring Wall" />
 </p>
-<p align="center"><em>Main Interface — Virtual Model Management</em></p>
+<p align="center"><em>Monitoring Wall — per-model requests / latency / TTFT / output speed / cache hit rate across hour / day / month / year</em></p>
 
 <details>
 <summary>📱 Click to see more screenshots</summary>
 
 <p align="center">
-  <img src="doc/ai-gateway2.jpg" width="80%" alt="AI Gateway Platform Management" />
+  <img src="doc/request-logs.png" width="90%" alt="Request Log" />
 </p>
-<p align="center"><em>Platform Management — Add & Configure AI Platforms</em></p>
+<p align="center"><em>Request Log — per-request input / fresh input / output / cache / duration / TTFT / speed, with model & status filters</em></p>
 
 <p align="center">
-  <img src="doc/a-gateway-1.jpg" width="80%" alt="AI Gateway Virtual Model Configuration" />
+  <img src="doc/virtual-models.png" width="90%" alt="Virtual Models" />
 </p>
-<p align="center"><em>Virtual Models — Backend Configuration & Load Balancing Strategies</em></p>
+<p align="center"><em>Virtual Models — multi-backend aggregation & load balancing strategies</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway21.jpg" width="80%" alt="AI Gateway Statistics Overview" />
+  <img src="doc/platforms.png" width="90%" alt="Platform Management" />
 </p>
-<p align="center"><em>Statistics Overview — Token Usage & Request Stats</em></p>
+<p align="center"><em>Platform Management — 15+ platform presets, one-click add</em></p>
+
+<details>
+<summary>🕰️ Legacy UI screenshots (v1.2.x)</summary>
 
 <p align="center">
-  <img src="doc/ai-gateway3.jpg" width="80%" alt="AI Gateway Settings Page" />
+  <img src="doc/ai-gateway1.jpg" width="80%" alt="Legacy main interface" />
 </p>
-<p align="center"><em>Settings Page — Port Configuration & Theme Switching</em></p>
+<p align="center">
+  <img src="doc/ai-gateway2.jpg" width="80%" alt="Legacy platform management" />
+</p>
+<p align="center">
+  <img src="doc/ai-gateway21.jpg" width="80%" alt="Legacy statistics overview" />
+</p>
+<p align="center">
+  <img src="doc/ai-gateway3.jpg" width="80%" alt="Legacy settings page" />
+</p>
+
+</details>
 
 </details>
 
@@ -121,6 +134,15 @@ Anthropic SDK ──→ /v1/messages ───────┘
 - Backend down? **Auto-failover** to healthy backends
 - Rate limited? 429 / 5xx / timeout **auto-retry** with exponential backoff
 - Fully transparent: your app never notices backend switches
+
+### 📊 Monitoring Wall — Full-Chain Performance Stats
+
+A complete performance profile for every model, across every time granularity (hour / day / month / year):
+
+- **8 metric trends**: requests / failures / input / output / latency / TTFT / output speed (tok/s) / cache hit
+- **Model performance matrix**: success rate, duration, speed and cache hit rate for all models at a glance, auto-sorted by the selected metric
+- **Request log**: per-request input / fresh input / output / cache read / duration / TTFT / speed, with model & status filters and pagination
+- **Cache hit rate** (CC Switch semantics): `hit / (hit + fresh input)` — the real benefit of prefix caching
 
 ---
 
@@ -309,7 +331,7 @@ request_timeout_secs = 120
 | Layer | Technology |
 |-------|-----------|
 | Backend | Rust · Actix-Web · SQLite (r2d2) · Reqwest |
-| Frontend | React · TypeScript · Ant Design · Vite |
+| Frontend | React · TypeScript · Mantine · Vite |
 | Desktop | Tauri 2.0 |
 | Database | SQLite (rusqlite + r2d2 connection pool) |
 
@@ -317,7 +339,7 @@ request_timeout_secs = 120
 
 ## 🗺️ Roadmap
 
-- [ ] 📊 Richer statistics dashboard (daily/weekly/monthly usage trends)
+- [x] 📊 Richer statistics dashboard (monitoring wall: per-model trends / request log / cache hit rate)
 - [ ] 🔑 Fine-grained API key permissions (per-model / per-quota rate limiting)
 - [ ] 🌐 Multi-modal gateway (translation / TTS / embedding unified endpoints)
 - [ ] 🔔 Backend health checks & anomaly alerting

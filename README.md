@@ -46,32 +46,45 @@
 ## 📸 效果展示
 
 <p align="center">
-  <img src="doc/ai-gateway1.jpg" width="80%" alt="AI Gateway 主界面" />
+  <img src="doc/dashboard-wall.png" width="90%" alt="AI Gateway 监控大屏" />
 </p>
-<p align="center"><em>主界面 — 虚拟大模型管理</em></p>
+<p align="center"><em>监控大屏 — 每模型请求/延时/首字/输出速度/缓存命中率，时/日/月/年全时段趋势</em></p>
 
 <details>
 <summary>📱 点击查看更多截图</summary>
 
 <p align="center">
-  <img src="doc/ai-gateway2.jpg" width="80%" alt="AI Gateway 平台管理" />
+  <img src="doc/request-logs.png" width="90%" alt="请求明细" />
 </p>
-<p align="center"><em>平台管理 — 添加与配置 AI 平台</em></p>
+<p align="center"><em>请求明细 — 逐条输入/新增输入/输出/缓存/耗时/首字/速度，支持模型与状态筛选</em></p>
 
 <p align="center">
-  <img src="doc/a-gateway-1.jpg" width="80%" alt="AI Gateway 虚拟模型配置" />
+  <img src="doc/virtual-models.png" width="90%" alt="虚拟大模型管理" />
 </p>
-<p align="center"><em>虚拟模型 — 后端配置与负载均衡策略</em></p>
+<p align="center"><em>虚拟大模型 — 多后端聚合与负载均衡策略</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway21.jpg" width="80%" alt="AI Gateway 统计概览" />
+  <img src="doc/platforms.png" width="90%" alt="平台管理" />
 </p>
-<p align="center"><em>统计概览 — Token 用量与请求统计</em></p>
+<p align="center"><em>平台管理 — 15+ 平台预设，一键添加</em></p>
+
+<details>
+<summary>🕰️ 旧版界面截图（v1.2.x）</summary>
 
 <p align="center">
-  <img src="doc/ai-gateway3.jpg" width="80%" alt="AI Gateway 设置页面" />
+  <img src="doc/ai-gateway1.jpg" width="80%" alt="旧版主界面" />
 </p>
-<p align="center"><em>设置页面 — 端口配置与主题切换</em></p>
+<p align="center">
+  <img src="doc/ai-gateway2.jpg" width="80%" alt="旧版平台管理" />
+</p>
+<p align="center">
+  <img src="doc/ai-gateway21.jpg" width="80%" alt="旧版统计概览" />
+</p>
+<p align="center">
+  <img src="doc/ai-gateway3.jpg" width="80%" alt="旧版设置页面" />
+</p>
+
+</details>
 
 </details>
 
@@ -121,6 +134,15 @@ Anthropic SDK ──→ /v1/messages ───────┘
 - 后端挂了？**自动切换**到健康的后端
 - 被限流了？429 / 5xx / 超时 **自动重试** + 指数退避
 - 完全透明：你的应用感知不到后端切换
+
+### 📊 监控大屏 · 全链路性能统计
+
+每个模型、每个时段（时/日/月/年）的完整性能画像：
+
+- **8 项指标趋势**：请求 / 失败 / 输入 / 输出 / 延时 / 首字时长（TTFT）/ 输出速度（tok/s）/ 缓存命中
+- **模型性能矩阵**：一屏看清所有模型的成功率、耗时、速度、缓存命中率，跟随指标自动排序
+- **请求明细**：逐条记录输入 / 新增输入 / 输出 / 缓存读 / 耗时 / 首字 / 速度，支持模型与状态筛选、分页回溯
+- **缓存命中率**（CC Switch 口径）：`命中 / (命中 + 新增输入)`，直观反映前缀缓存的真实收益
 
 ---
 
@@ -308,7 +330,7 @@ request_timeout_secs = 120
 | 层 | 技术 |
 |---|---|
 | 后端 | Rust · Actix-Web · SQLite (r2d2) · Reqwest |
-| 前端 | React · TypeScript · Ant Design · Vite |
+| 前端 | React · TypeScript · Mantine · Vite |
 | 桌面端 | Tauri 2.0 |
 | 数据库 | SQLite (rusqlite + r2d2 连接池) |
 
@@ -316,7 +338,7 @@ request_timeout_secs = 120
 
 ## 🗺️ Roadmap
 
-- [ ] 📊 更丰富的统计面板（按天/周/月的用量趋势图）
+- [x] 📊 更丰富的统计面板（监控大屏：每模型全时段趋势 / 请求明细 / 缓存命中率）
 - [ ] 🔑 API Key 细粒度权限控制（按模型/按额度限流）
 - [ ] 🌐 多语言网关（翻译 / TTS / Embedding 统一端点）
 - [ ] 🔔 后端健康检查 & 异常告警通知
