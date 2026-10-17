@@ -52,6 +52,12 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V7 (request_stats ttft_ms / stream flags)");
     }
 
+    if current_version < 8 {
+        conn.execute_batch(SCHEMA_V8_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 8)", [])?;
+        tracing::info!("Database migrated to V8 (request_stats cache_read_tokens / cache_write_tokens)");
+    }
+
     Ok(())
 }
 
@@ -252,4 +258,13 @@ ALTER TABLE backends ADD COLUMN unknown_params TEXT NOT NULL DEFAULT 'Auto';
 const SCHEMA_V7_MIGRATION: &str = r#"
 ALTER TABLE request_stats ADD COLUMN ttft_ms INTEGER;
 ALTER TABLE request_stats ADD COLUMN is_stream INTEGER NOT NULL DEFAULT 0;
+"#;
+
+// Migration V8: 缓存命中统计
+// cache_read_tokens: 命中上游提示词缓存的 token 数（OpenAI prompt_tokens_details.cached_tokens /
+//   DeepSeek prompt_cache_hit_tokens / Anthropic cache_read_input_tokens，归一为同一字段）
+// cache_write_tokens: 缓存写入 token 数（目前仅 Anthropic cache_creation_input_tokens 有此概念）
+const SCHEMA_V8_MIGRATION: &str = r#"
+ALTER TABLE request_stats ADD COLUMN cache_read_tokens INTEGER;
+ALTER TABLE request_stats ADD COLUMN cache_write_tokens INTEGER;
 "#;

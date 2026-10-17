@@ -140,17 +140,17 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   margin-left: 12px;
 }
 
-/* ---- KPI 行：6 张卡（新增首字/性能卡），响应式 6 / 3×2 / 2×3 ---- */
+/* ---- KPI 行：7 张卡（新增首字/性能/缓存卡），响应式 7 / 4+3 / 2×4 ---- */
 .wall-kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 12px;
   flex-shrink: 0;
 }
 
-@media (max-width: 1439px) {
+@media (max-width: 1599px) {
   .wall-kpi-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 

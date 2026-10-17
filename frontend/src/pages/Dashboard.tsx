@@ -40,6 +40,7 @@ import {
   IconStack,
   IconApi,
   IconRocket,
+  IconDatabase,
 } from '@tabler/icons-react'
 import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs } from '../api'
 import { useAppContext } from '../ThemeContext'
@@ -70,6 +71,10 @@ interface OverviewStats {
   // 性能指标（V7）：全局平均首字 / 输出速度
   avg_ttft_ms?: number
   avg_output_speed_tps?: number
+  // 缓存命中（V8，CC Switch 口径）
+  total_cache_read_tokens?: number
+  fresh_input_tokens?: number
+  cache_hit_rate?: number
 }
 
 interface ProxyWithStats {
@@ -120,6 +125,7 @@ interface ModelTimeSeriesPoint {
   stream_requests?: number
   avg_ttft_ms?: number
   output_speed_tps?: number
+  cache_read_tokens?: number
 }
 
 interface ModelTimeSeriesStats {
@@ -140,6 +146,9 @@ interface ModelSummaryRow {
   avg_latency_ms: number
   avg_ttft_ms: number
   output_speed_tps: number
+  cache_read_tokens: number
+  fresh_input_tokens: number
+  cache_hit_rate: number
 }
 
 // 请求明细行（后端 /stats/requests）
@@ -155,6 +164,9 @@ interface RequestLogItem {
   latency_ms: number
   ttft_ms: number | null
   output_speed_tps: number | null
+  cache_read_tokens: number | null
+  cache_write_tokens: number | null
+  fresh_input_tokens: number | null
   is_stream: boolean
   error_type: string | null
 }
@@ -195,7 +207,7 @@ interface LatencyPercentiles {
   max: number
 }
 
-type Metric = 'requests' | 'failed_requests' | 'token_input' | 'token_output' | 'avg_latency_ms' | 'avg_ttft_ms' | 'output_speed_tps'
+type Metric = 'requests' | 'failed_requests' | 'token_input' | 'token_output' | 'avg_latency_ms' | 'avg_ttft_ms' | 'output_speed_tps' | 'cache_read_tokens'
 type Granularity = 'hour' | 'day' | 'month' | 'year'
 type RangeKey = 'today' | '24h' | '7d' | '30d' | '12m' | 'all'
 
@@ -208,10 +220,11 @@ const METRIC_LABEL_KEYS: Record<Metric, TranslationKey> = {
   avg_latency_ms: 'metricLatency',
   avg_ttft_ms: 'metricTtft',
   output_speed_tps: 'metricSpeed',
+  cache_read_tokens: 'metricCacheRead',
 }
 
 // 可求和指标（计数/token）：排行按求和；平均类指标（延时/首字/速度）按请求数加权
-const SUM_METRICS: ReadonlySet<Metric> = new Set(['requests', 'failed_requests', 'token_input', 'token_output'])
+const SUM_METRICS: ReadonlySet<Metric> = new Set(['requests', 'failed_requests', 'token_input', 'token_output', 'cache_read_tokens'])
 const isSumMetric = (m: Metric) => SUM_METRICS.has(m)
 
 // 时段 → 允许粒度 + 默认粒度（选时段时自动切粒度，粒度控件按范围禁用）
@@ -281,6 +294,7 @@ function formatMetricValue(m: Metric, v: number): string {
       return Math.round(v).toLocaleString()
     case 'token_input':
     case 'token_output':
+    case 'cache_read_tokens':
       return formatTokenCount(v)
     case 'avg_latency_ms':
     case 'avg_ttft_ms':
@@ -958,6 +972,17 @@ export default function Dashboard() {
           </div>
         </KpiCard>
 
+        {/* 缓存命中率：CC Switch 口径 cache_read / (cache_read + fresh_input)；副行展示新增输入与命中量 */}
+        <KpiCard label={t(locale, 'kpiCacheHit')} icon={<IconDatabase size={22} />}>
+          <div className="wall-kpi-value">
+            {(stats.cache_hit_rate || 0).toFixed(1)}
+            <span className="wall-kpi-unit">%</span>
+          </div>
+          <div className="wall-kpi-sub">
+            {t(locale, 'colFreshInput')} {formatTokenCount(stats.fresh_input_tokens || 0)} · {t(locale, 'metricCacheRead')} {formatTokenCount(stats.total_cache_read_tokens || 0)}
+          </div>
+        </KpiCard>
+
         <KpiCard label={t(locale, 'totalTokens')} icon={<IconCoin size={22} />}>
           <div className="wall-kpi-value">{formatTokenCount(totalTokens)}</div>
           {/* 输入/输出双色堆叠条：深底 + 实色（token 驱动，亮/暗自动跟随） */}
@@ -1007,6 +1032,7 @@ export default function Dashboard() {
                   { label: t(locale, 'mShortLatency'), value: 'avg_latency_ms' },
                   { label: t(locale, 'mShortTtft'), value: 'avg_ttft_ms' },
                   { label: t(locale, 'mShortSpeed'), value: 'output_speed_tps' },
+                  { label: t(locale, 'mShortCache'), value: 'cache_read_tokens' },
                 ]}
               />
               <SegmentedControl
@@ -1229,10 +1255,12 @@ export default function Dashboard() {
                     <th className={thCls('failed_requests')}>{t(locale, 'colFailed')}</th>
                     <th className="wall-num">{t(locale, 'successRate')}</th>
                     <th className={thCls('token_input')}>{t(locale, 'colTokenIn')}</th>
+                    <th className="wall-num">{t(locale, 'colFreshInput')}</th>
                     <th className={thCls('token_output')}>{t(locale, 'colTokenOut')}</th>
                     <th className={thCls('avg_latency_ms')}>{t(locale, 'colDuration')}</th>
                     <th className={thCls('avg_ttft_ms')}>{t(locale, 'colTtft')}</th>
                     <th className={thCls('output_speed_tps')}>{t(locale, 'colSpeed')}</th>
+                    <th className={thCls('cache_read_tokens')}>{t(locale, 'colCacheHit')}</th>
                     <th className="wall-num">{t(locale, 'colStream')}</th>
                   </tr>
                 </thead>
@@ -1250,10 +1278,14 @@ export default function Dashboard() {
                         {mxCell(m, 'failed_requests', formatNumber(m.failed_requests), m.failed_requests > 0 ? { color: status.err } : undefined)}
                         <td className="wall-num" style={{ color: statusColor(rate, isDark) }}>{rate.toFixed(1)}%</td>
                         {mxCell(m, 'token_input', formatTokenCount(m.token_input))}
+                        <td className="wall-num">{formatTokenCount(m.fresh_input_tokens)}</td>
                         {mxCell(m, 'token_output', formatTokenCount(m.token_output))}
                         {mxCell(m, 'avg_latency_ms', formatDurationMs(m.avg_latency_ms))}
                         {mxCell(m, 'avg_ttft_ms', m.avg_ttft_ms > 0 ? formatDurationMs(m.avg_ttft_ms) : '—')}
                         {mxCell(m, 'output_speed_tps', m.output_speed_tps > 0 ? m.output_speed_tps.toFixed(1) : '—')}
+                        <td className="wall-num" title={`${t(locale, 'metricCacheRead')} ${formatTokenCount(m.cache_read_tokens)} · ${t(locale, 'colFreshInput')} ${formatTokenCount(m.fresh_input_tokens)}`}>
+                          {m.cache_read_tokens > 0 ? `${m.cache_hit_rate.toFixed(1)}%` : '—'}
+                        </td>
                         <td className="wall-num">{m.requests ? `${((m.stream_requests / m.requests) * 100).toFixed(0)}%` : '—'}</td>
                       </tr>
                     )
@@ -1351,7 +1383,9 @@ export default function Dashboard() {
                     <th>{t(locale, 'colPlatform')}</th>
                     <th className="wall-num">{t(locale, 'colStatus')}</th>
                     <th className="wall-num">{t(locale, 'colTokenIn')}</th>
+                    <th className="wall-num">{t(locale, 'colFreshInput')}</th>
                     <th className="wall-num">{t(locale, 'colTokenOut')}</th>
+                    <th className="wall-num">{t(locale, 'colCacheHit')}</th>
                     <th className="wall-num">{t(locale, 'colDuration')}</th>
                     <th className="wall-num">{t(locale, 'colTtft')}</th>
                     <th className="wall-num">{t(locale, 'colSpeed')}</th>
@@ -1372,7 +1406,14 @@ export default function Dashboard() {
                           {r.status_code || 'ERR'}
                         </td>
                         <td className="wall-num">{r.token_input != null ? formatTokenCount(r.token_input) : '—'}</td>
+                        <td className="wall-num">{r.fresh_input_tokens != null ? formatTokenCount(r.fresh_input_tokens) : '—'}</td>
                         <td className="wall-num">{r.token_output != null ? formatTokenCount(r.token_output) : '—'}</td>
+                        <td
+                          className="wall-num"
+                          title={r.cache_read_tokens || r.cache_write_tokens ? `${t(locale, 'metricCacheRead')} ${formatTokenCount(r.cache_read_tokens || 0)} · ${t(locale, 'colCacheWrite')} ${formatTokenCount(r.cache_write_tokens || 0)}` : undefined}
+                        >
+                          {r.cache_read_tokens != null && r.cache_read_tokens > 0 ? formatTokenCount(r.cache_read_tokens) : '—'}
+                        </td>
                         <td className="wall-num">{formatDurationMs(r.latency_ms)}</td>
                         <td className="wall-num">{r.ttft_ms != null ? formatDurationMs(r.ttft_ms) : '—'}</td>
                         <td className="wall-num">{r.output_speed_tps != null ? r.output_speed_tps.toFixed(1) : '—'}</td>

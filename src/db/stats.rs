@@ -60,8 +60,62 @@ impl TimeRange {
     }
 }
 
+/// 生成时间范围内的连续周期 key（格式与 SQL 里 STRFTIME 一致），填补无数据周期造成的折线跳空。
+/// - hour 粒度按服务器本地时区（与聚合表达式 datetime(...,'localtime') 口径一致）；
+/// - day/month/year 沿用 UTC（与聚合用裸 created_at 一致）。
+/// 上限 4000 点防失控；解析失败返回空（调用方回退为"仅有数据的周期"）。
+fn fill_periods(granularity: &str, from: &str, to: &str) -> Vec<String> {
+    use chrono::{Datelike, Timelike, Utc};
+    let f = chrono::DateTime::parse_from_rfc3339(from).ok().map(|v| v.with_timezone(&Utc));
+    let t = chrono::DateTime::parse_from_rfc3339(to).ok().map(|v| v.with_timezone(&Utc));
+    let (f, t) = match (f, t) {
+        (Some(f), Some(t)) if t >= f => (f, t),
+        _ => return vec![],
+    };
+    let mut out = Vec::new();
+    match granularity {
+        "hour" => {
+            let fl = f.with_timezone(&chrono::Local).naive_local();
+            let tl = t.with_timezone(&chrono::Local).naive_local();
+            let (Some(mut cur), Some(end)) = (
+                fl.date().and_hms_opt(fl.hour(), 0, 0),
+                tl.date().and_hms_opt(tl.hour(), 0, 0),
+            ) else { return vec![] };
+            while cur <= end && out.len() < 4000 {
+                out.push(cur.format("%Y-%m-%d %H").to_string());
+                cur += chrono::Duration::hours(1);
+            }
+        }
+        "day" => {
+            let mut cur = f.date_naive();
+            let end = t.date_naive();
+            while cur <= end && out.len() < 4000 {
+                out.push(cur.format("%Y-%m-%d").to_string());
+                cur += chrono::Duration::days(1);
+            }
+        }
+        "month" => {
+            let mut cur = (f.year(), f.month());
+            let end = (t.year(), t.month());
+            while cur <= end && out.len() < 4000 {
+                out.push(format!("{:04}-{:02}", cur.0, cur.1));
+                cur = if cur.1 == 12 { (cur.0 + 1, 1) } else { (cur.0, cur.1 + 1) };
+            }
+        }
+        "year" => {
+            let mut cur = f.year();
+            while cur <= t.year() && out.len() < 4000 {
+                out.push(format!("{:04}", cur));
+                cur += 1;
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// 模型时间序列统计：按小时/日/月/年粒度聚合各模型的请求数与 Token 用量。
-/// - 提供 from/to 时以时间范围为准（范围内周期全保留）；否则查询所有有数据的周期，按 limit 截取最近 N 个。
+/// - 提供 from/to 时以时间范围为准，范围内周期连续补齐（无数据的周期补 0 点）；否则查询所有有数据的周期，按 limit 截取最近 N 个。
 /// - hour 粒度按本地时区聚合（与热力图口径一致），其余粒度沿用 UTC 原始值。
 pub fn model_timeseries(
     pool: &DbPool,
@@ -112,8 +166,9 @@ pub fn model_timeseries(
             SUM(rs.is_stream)                   AS stream_requests,
             COALESCE(AVG(rs.ttft_ms), 0)        AS avg_ttft_ms,
             CASE WHEN SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)) > 0
-                 THEN SUM(rs.token_output) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
-                 ELSE 0 END                     AS output_speed_tps
+                 THEN COALESCE(SUM(rs.token_output), 0) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
+                 ELSE 0 END                     AS output_speed_tps,
+            COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens
         FROM request_stats rs
         LEFT JOIN backends b ON rs.backend_id = b.id
         WHERE 1=1
@@ -139,6 +194,7 @@ pub fn model_timeseries(
                 stream_requests: r.get::<_, i64>(7)?,
                 avg_ttft_ms: r.get::<_, f64>(8)?,
                 output_speed_tps: r.get::<_, f64>(9)?,
+                cache_read_tokens: r.get::<_, i64>(10)?,
             })
         },
     )?;
@@ -148,10 +204,23 @@ pub fn model_timeseries(
         all_data.push(row?);
     }
 
-    // 收集所有出现过的周期并排序：范围模式下全保留，否则取最近 limit 个
+    // 收集所有出现过的周期并排序：范围模式下按 from/to 生成连续周期（填补无数据小时的跳空），
+    // 生成失败时回退为"仅有数据的周期"；非范围模式取最近 limit 个。
     let all_periods: BTreeSet<String> = all_data.iter().map(|p| p.period.clone()).collect();
     let periods: Vec<String> = if range_mode {
-        all_periods.iter().cloned().collect()
+        let filled = match (&range.from, &range.to) {
+            (Some(f), Some(t)) => fill_periods(granularity, f, t),
+            _ => vec![],
+        };
+        if filled.is_empty() {
+            all_periods.iter().cloned().collect()
+        } else {
+            // 以连续序列为骨架，并保留序列之外仍出现过的周期（如 to 之后的部分数据，
+            // 理论上已被 WHERE 过滤，这里仅作兜底，避免静默丢数据）
+            let mut set: BTreeSet<String> = filled.into_iter().collect();
+            set.extend(all_periods);
+            set.into_iter().collect()
+        }
     } else {
         all_periods
             .iter()
@@ -284,10 +353,10 @@ pub fn latency_percentiles(pool: &DbPool, from: Option<&str>, to: Option<&str>) 
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, is_stream) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
             stat.latency_ms, stat.token_input, stat.token_output, stat.error_type, stat.created_at,
-            stat.ttft_ms, stat.is_stream as i64])?;
+            stat.ttft_ms, stat.cache_read_tokens, stat.cache_write_tokens, stat.is_stream as i64])?;
     Ok(())
 }
 
@@ -309,8 +378,10 @@ pub fn model_summaries(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
             COALESCE(AVG(rs.latency_ms), 0)   AS avg_latency_ms,
             COALESCE(AVG(rs.ttft_ms), 0)      AS avg_ttft_ms,
             CASE WHEN SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)) > 0
-                 THEN SUM(rs.token_output) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
-                 ELSE 0 END                   AS output_speed_tps
+                 THEN COALESCE(SUM(rs.token_output), 0) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
+                 ELSE 0 END                   AS output_speed_tps,
+            COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens,
+            COALESCE(SUM(rs.cache_write_tokens), 0) AS cache_write_tokens
         FROM request_stats rs
         LEFT JOIN backends b ON rs.backend_id = b.id
         WHERE 1=1
@@ -321,17 +392,29 @@ pub fn model_summaries(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
     "#;
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(rusqlite::params![range.from, range.to], |r| {
+        let token_input: i64 = r.get(5)?;
+        let cache_read_tokens: i64 = r.get(10)?;
+        let cache_write_tokens: i64 = r.get(11)?;
+        // 新增输入 = 总输入 − 缓存读 − 缓存写（saturating 防御异常数据）
+        let fresh_input = (token_input - cache_read_tokens - cache_write_tokens).max(0);
         Ok(ModelSummary {
             model_id: r.get(0)?,
             requests: r.get(1)?,
             success_requests: r.get(2)?,
             failed_requests: r.get(3)?,
             stream_requests: r.get(4)?,
-            token_input: r.get(5)?,
+            token_input,
             token_output: r.get(6)?,
             avg_latency_ms: r.get(7)?,
             avg_ttft_ms: r.get(8)?,
             output_speed_tps: r.get(9)?,
+            cache_read_tokens,
+            fresh_input_tokens: fresh_input,
+            // CC Switch 口径：命中 / (命中 + 新增输入)
+            cache_hit_rate: {
+                let denominator = cache_read_tokens + fresh_input;
+                if denominator > 0 { cache_read_tokens as f64 / denominator as f64 * 100.0 } else { 0.0 }
+            },
         })
     })?;
     Ok(rows.filter_map(|x| x.ok()).collect())
@@ -387,6 +470,10 @@ pub fn list_requests(
             CASE WHEN rs.token_output > 0 AND rs.latency_ms - COALESCE(rs.ttft_ms, 0) > 0
                  THEN rs.token_output * 1000.0 / (rs.latency_ms - COALESCE(rs.ttft_ms, 0))
                  ELSE NULL END,
+            rs.cache_read_tokens, rs.cache_write_tokens,
+            CASE WHEN rs.token_input IS NOT NULL
+                 THEN MAX(rs.token_input - COALESCE(rs.cache_read_tokens, 0) - COALESCE(rs.cache_write_tokens, 0), 0)
+                 ELSE NULL END AS fresh_input,
             rs.is_stream, rs.error_type
         FROM request_stats rs
         LEFT JOIN backends b ON rs.backend_id = b.id
@@ -413,8 +500,11 @@ pub fn list_requests(
                 latency_ms: r.get(8)?,
                 ttft_ms: r.get(9)?,
                 output_speed_tps: r.get(10)?,
-                is_stream: r.get::<_, i64>(11)? != 0,
-                error_type: r.get(12)?,
+                cache_read_tokens: r.get(11)?,
+                cache_write_tokens: r.get(12)?,
+                fresh_input_tokens: r.get(13)?,
+                is_stream: r.get::<_, i64>(14)? != 0,
+                error_type: r.get(15)?,
             })
         })?
         .filter_map(|x| x.ok())
@@ -510,20 +600,22 @@ pub fn overview(
         rusqlite::params_from_iter(range.params()),
         |r| r.get(0),
     ).unwrap_or(0);
-    // 全局首字 / 速度（KPI 延迟卡副行展示；口径与时序聚合一致）
-    let (avg_ttft, avg_speed): (f64, f64) = conn.query_row(
+    // 全局首字 / 速度 / 缓存命中（KPI 副行展示；口径与时序聚合一致）
+    let (avg_ttft, avg_speed, total_cache_read, total_cache_write): (f64, f64, i64, i64) = conn.query_row(
         &format!(
             r#"SELECT
                 COALESCE(AVG(ttft_ms), 0) AS avg_ttft,
                 CASE WHEN SUM(latency_ms) - SUM(COALESCE(ttft_ms, 0)) > 0
-                     THEN SUM(token_output) * 1000.0 / (SUM(latency_ms) - SUM(COALESCE(ttft_ms, 0)))
-                     ELSE 0 END AS avg_speed
+                     THEN COALESCE(SUM(token_output), 0) * 1000.0 / (SUM(latency_ms) - SUM(COALESCE(ttft_ms, 0)))
+                     ELSE 0 END AS avg_speed,
+                COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
+                COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write
              FROM request_stats{}"#,
             range.where_clause("created_at")
         ),
         rusqlite::params_from_iter(range.params()),
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap_or((0.0, 0.0));
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap_or((0.0, 0.0, 0, 0));
 
     // 对比周期：指定范围时对比等长的前一段区间；未指定时保持昨日口径
     match prev_range(&range) {
@@ -542,7 +634,7 @@ pub fn overview(
                 &conn, total_requests, success_count, avg_latency,
                 total_token_input, total_token_output,
                 total_connections_active, requests_prev_period, avg_latency_prev_period,
-                avg_ttft, avg_speed,
+                avg_ttft, avg_speed, total_cache_read, total_cache_write,
             ))
         }
         None => {
@@ -559,7 +651,7 @@ pub fn overview(
                 &conn, total_requests, success_count, avg_latency,
                 total_token_input, total_token_output,
                 total_connections_active, requests_prev_period, avg_latency_prev_period,
-                avg_ttft, avg_speed,
+                avg_ttft, avg_speed, total_cache_read, total_cache_write,
             ))
         }
     }
@@ -578,6 +670,8 @@ fn build_overview(
     avg_latency_prev_period: f64,
     avg_ttft: f64,
     avg_speed: f64,
+    total_cache_read: i64,
+    total_cache_write: i64,
 ) -> OverviewStats {
     let total_proxies: i64 = conn.query_row("SELECT COUNT(*) FROM proxies", [], |r| r.get(0)).unwrap_or(0);
     let active_proxies = total_proxies; // all proxies are active (no status field)
@@ -591,6 +685,14 @@ fn build_overview(
         total_token_input, total_token_output,
         total_connections_active, requests_prev_period, avg_latency_prev_period,
         avg_ttft_ms: avg_ttft, avg_output_speed_tps: avg_speed,
+        total_cache_read_tokens: total_cache_read,
+        // 新增输入 = 总输入 − 缓存读 − 缓存写（saturating 防御异常数据出现负数）
+        fresh_input_tokens: (total_token_input - total_cache_read - total_cache_write).max(0),
+        // CC Switch 口径：命中 / (命中 + 新增输入)，即"可缓存 prompt 里多少比例真的命中"
+        cache_hit_rate: {
+            let denominator = total_cache_read + (total_token_input - total_cache_read - total_cache_write).max(0);
+            if denominator > 0 { total_cache_read as f64 / denominator as f64 * 100.0 } else { 0.0 }
+        },
     }
 }
 

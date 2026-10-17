@@ -101,6 +101,12 @@ pub struct UnifiedUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// 命中上游提示词缓存的 token 数（OpenAI cached_tokens / Anthropic cache_read_input_tokens）
+    #[serde(default)]
+    pub cache_read_tokens: Option<u32>,
+    /// 缓存写入 token 数（目前仅 Anthropic cache_creation_input_tokens）
+    #[serde(default)]
+    pub cache_write_tokens: Option<u32>,
 }
 
 /// 统一流式chunk

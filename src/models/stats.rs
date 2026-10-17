@@ -14,6 +14,10 @@ pub struct RequestStat {
     pub created_at: String,
     /// 流式请求首字时长（发出请求 → 收到上游第一个 chunk 的毫秒数）；非流式为 None
     pub ttft_ms: Option<i64>,
+    /// 命中上游提示词缓存的 token 数（无缓存数据为 None）
+    pub cache_read_tokens: Option<i64>,
+    /// 缓存写入 token 数（仅 Anthropic cache_creation 有此概念；无数据为 None）
+    pub cache_write_tokens: Option<i64>,
     /// 是否流式请求
     pub is_stream: bool,
 }
@@ -40,6 +44,13 @@ pub struct OverviewStats {
     pub avg_ttft_ms: f64,
     /// 平均输出速度 tok/s（生成阶段口径，见 ModelTimeSeriesPoint::output_speed_tps）
     pub avg_output_speed_tps: f64,
+    /// 缓存命中 token 总量（范围内 SUM(cache_read_tokens)）
+    pub total_cache_read_tokens: i64,
+    /// 新增输入 token（总输入 − 缓存命中 − 缓存写入，即真正新鲜计费的 prompt）
+    pub fresh_input_tokens: i64,
+    /// 缓存命中率 %：cache_read / (cache_read + fresh_input)，与 CC Switch 口径一致；
+    /// 分母（可缓存 prompt）为 0 时为 0
+    pub cache_hit_rate: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +106,8 @@ pub struct ModelTimeSeriesPoint {
     /// 平均输出速度 tok/s：SUM(token_output) / (SUM(latency) - SUM(ttft))，
     /// 即生成阶段口径；生成总时长为 0 时为 0
     pub output_speed_tps: f64,
+    /// 该周期该模型的缓存命中 token 总量
+    pub cache_read_tokens: i64,
 }
 
 /// 模型时间序列统计聚合结果
@@ -123,6 +136,12 @@ pub struct ModelSummary {
     pub avg_ttft_ms: f64,
     /// 平均输出速度 tok/s（生成阶段口径）
     pub output_speed_tps: f64,
+    /// 缓存命中 token 总量
+    pub cache_read_tokens: i64,
+    /// 新增输入 token（总输入 − 缓存命中 − 缓存写入）
+    pub fresh_input_tokens: i64,
+    /// 缓存命中率 %：cache_read / (cache_read + fresh_input)；分母为 0 时为 0
+    pub cache_hit_rate: f64,
 }
 
 /// 请求明细单行（概览大屏请求日志表）
@@ -140,6 +159,12 @@ pub struct RequestLogItem {
     pub ttft_ms: Option<i64>,
     /// 单条输出速度 tok/s（生成阶段口径；无 token 或无生成时长时为 None）
     pub output_speed_tps: Option<f64>,
+    /// 命中缓存的 token 数（无缓存数据为 None）
+    pub cache_read_tokens: Option<i64>,
+    /// 缓存写入 token 数（仅 Anthropic；无数据为 None）
+    pub cache_write_tokens: Option<i64>,
+    /// 新增输入 token = 总输入 − 缓存命中 − 缓存写入（无输入 token 时为 None）
+    pub fresh_input_tokens: Option<i64>,
     pub is_stream: bool,
     pub error_type: Option<String>,
 }

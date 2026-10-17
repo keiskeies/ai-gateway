@@ -96,6 +96,18 @@ pub struct OpenAIUsage {
     /// 部分 OpenAI 兼容上游（如 Ollama、部分第三方网关）的 usage 不带 total_tokens，缺失时按 0 处理
     #[serde(default)]
     pub total_tokens: u32,
+    /// 提示词缓存命中明细（OpenAI 标准字段；DeepSeek 老格式用 prompt_cache_hit_tokens，见下方兜底）
+    #[serde(default)]
+    pub prompt_tokens_details: Option<OpenAIPromptTokensDetails>,
+    /// DeepSeek 老格式：命中缓存的 prompt token 数
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIPromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,7 +310,14 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
                 finish_reason: c.finish_reason,
             }
         }).collect(),
-        usage: resp.usage.map(|u| UnifiedUsage { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens, total_tokens: u.total_tokens }),
+        usage: resp.usage.map(|u| UnifiedUsage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+            // 缓存命中：优先 OpenAI 标准 prompt_tokens_details.cached_tokens，兜底 DeepSeek 老格式
+            cache_read_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens).or(u.prompt_cache_hit_tokens),
+            cache_write_tokens: None,
+        }),
     })
 }
 

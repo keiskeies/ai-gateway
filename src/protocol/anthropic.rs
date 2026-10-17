@@ -70,6 +70,12 @@ pub enum AnthropicContentBlock {
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// 命中提示词缓存的 token 数（注意：不计入 input_tokens，unified 口径需加回）
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u32>,
+    /// 缓存写入 token 数（一次性成本，同样不计入 input_tokens）
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
 }
 
 // ========== 转换实现 ==========
@@ -328,7 +334,14 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
             message: Some(UnifiedMessage { role: Role::Assistant, content, reasoning_content: None, tool_calls, tool_call_id: None, name: None }),
             finish_reason,
         }],
-        usage: Some(UnifiedUsage { prompt_tokens: resp.usage.input_tokens, completion_tokens: resp.usage.output_tokens, total_tokens: resp.usage.input_tokens + resp.usage.output_tokens }),
+        // unified 口径对齐 OpenAI：prompt_tokens 为总提示词（Anthropic 的 input_tokens 不含缓存部分，需加回）
+        usage: Some(UnifiedUsage {
+            prompt_tokens: resp.usage.input_tokens + resp.usage.cache_read_input_tokens.unwrap_or(0) + resp.usage.cache_creation_input_tokens.unwrap_or(0),
+            completion_tokens: resp.usage.output_tokens,
+            total_tokens: resp.usage.input_tokens + resp.usage.output_tokens + resp.usage.cache_read_input_tokens.unwrap_or(0) + resp.usage.cache_creation_input_tokens.unwrap_or(0),
+            cache_read_tokens: resp.usage.cache_read_input_tokens,
+            cache_write_tokens: resp.usage.cache_creation_input_tokens,
+        }),
     })
 }
 

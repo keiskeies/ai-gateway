@@ -102,6 +102,8 @@ fn make_stat(
         error_type,
         created_at: chrono::Utc::now().to_rfc3339(),
         ttft_ms: None,
+        cache_read_tokens: None,
+        cache_write_tokens: None,
         is_stream,
     }
 }
@@ -210,6 +212,9 @@ async fn handle_request(
                     };
                     let token_input = parsed.usage.as_ref().map(|u| u.prompt_tokens as i64);
                     let token_output = parsed.usage.as_ref().map(|u| u.completion_tokens as i64);
+                    // 缓存命中（OpenAI cached_tokens / Anthropic cache_read，已在协议层归一）
+                    let cache_read = parsed.usage.as_ref().and_then(|u| u.cache_read_tokens).map(|v| v as i64);
+                    let cache_write = parsed.usage.as_ref().and_then(|u| u.cache_write_tokens).map(|v| v as i64);
 
                     // 生成：按客户端请求的协议格式输出
                     let cr = match response_protocol {
@@ -218,7 +223,7 @@ async fn handle_request(
                     };
 
                     // 成功路径：恰好记录一次
-                    state.stats_writer.record(make_stat(
+                    let mut stat = make_stat(
                         &resolved_route.proxy_id,
                         &resolved_route.route_id,
                         &backend.id,
@@ -228,7 +233,10 @@ async fn handle_request(
                         token_output,
                         None,
                         false,
-                    ));
+                    );
+                    stat.cache_read_tokens = cache_read;
+                    stat.cache_write_tokens = cache_write;
+                    state.stats_writer.record(stat);
                     return Ok(HttpResponse::Ok().json(cr));
                 } else {
                     // 上游业务失败：先判断是否重试，不在此处记录（避免重试重复计数）
@@ -302,6 +310,19 @@ fn build_forward_request(
             (openai::to_request(unified, &backend.model_id, unknown), format!("{}/chat/completions", platform.base_url.trim_end_matches('/')))
         }
     };
+    // 流式请求注入 stream_options.include_usage：OpenAI 兼容上游默认不在流内返回 usage chunk，
+    // 不注入则网关旁路解析不到 token，统计里输入/输出全为 0（速度也因分母缺失显示 —）。
+    // 客户端已带 stream_options 时不覆盖；Anthropic 流式始终在 message_start/delta 带 usage，无需注入。
+    // 个别不兼容该字段的上游，可用 backend 参数覆盖强制改写（param_overrides 在其后 merge，优先级更高）。
+    if platform.platform_type != crate::models::platform::PlatformType::Anthropic {
+        if let Some(body_obj) = body.as_object_mut() {
+            if body_obj.get("stream").and_then(|v| v.as_bool()) == Some(true)
+                && !body_obj.contains_key("stream_options")
+            {
+                body_obj.insert("stream_options".into(), serde_json::json!({ "include_usage": true }));
+            }
+        }
+    }
     // backend 级参数覆盖：最后 merge，覆盖优先（可强制 temperature / 注入平台特有字段等）
     if let Some(overrides) = backend.param_overrides.as_object() {
         if let Some(body_obj) = body.as_object_mut() {
@@ -342,6 +363,8 @@ struct StreamStatCtx {
     first_token_ms: std::sync::atomic::AtomicI64,
     token_in: std::sync::atomic::AtomicI64,
     token_out: std::sync::atomic::AtomicI64,
+    cache_read: std::sync::atomic::AtomicI64,
+    cache_write: std::sync::atomic::AtomicI64,
     failed: std::sync::atomic::AtomicBool,
     recorded: std::sync::atomic::AtomicBool,
     writer: StatsWriter,
@@ -356,6 +379,8 @@ impl StreamStatCtx {
             first_token_ms: std::sync::atomic::AtomicI64::new(0),
             token_in: std::sync::atomic::AtomicI64::new(0),
             token_out: std::sync::atomic::AtomicI64::new(0),
+            cache_read: std::sync::atomic::AtomicI64::new(0),
+            cache_write: std::sync::atomic::AtomicI64::new(0),
             failed: std::sync::atomic::AtomicBool::new(false),
             recorded: std::sync::atomic::AtomicBool::new(false),
             writer: writer.clone(),
@@ -378,6 +403,16 @@ impl StreamStatCtx {
         );
     }
 
+    /// 吸收一帧 usage：(input, output, cache_read, cache_write)。
+    /// usage 帧携带的是累计总量而非增量，fetch_max 保证多帧/重复帧幂等。
+    fn absorb_usage(&self, pi: i64, po: i64, cr: i64, cw: i64) {
+        use std::sync::atomic::Ordering;
+        self.token_in.fetch_max(pi, Ordering::SeqCst);
+        self.token_out.fetch_max(po, Ordering::SeqCst);
+        self.cache_read.fetch_max(cr, Ordering::SeqCst);
+        self.cache_write.fetch_max(cw, Ordering::SeqCst);
+    }
+
     /// 记录最终统计（恰好一次，用 CAS 保证幂等）
     fn record_once(&self) {
         use std::sync::atomic::Ordering;
@@ -387,6 +422,11 @@ impl StreamStatCtx {
         let mut stat = self.base.clone();
         stat.token_input = Some(self.token_in.load(Ordering::SeqCst));
         stat.token_output = Some(self.token_out.load(Ordering::SeqCst));
+        // 缓存命中仅在流内出现过 usage 时非 0
+        let cr = self.cache_read.load(Ordering::SeqCst);
+        let cw = self.cache_write.load(Ordering::SeqCst);
+        stat.cache_read_tokens = if cr > 0 { Some(cr) } else { None };
+        stat.cache_write_tokens = if cw > 0 { Some(cw) } else { None };
         // 流式延迟统一口径：base 里的 latency_ms 是"响应头到达"时刻（TTFB），
         // 此处改写为"流结束"完整耗时，使非流式与流式的 latency_ms 含义一致
         stat.latency_ms = self.start.elapsed().as_millis() as i64;
@@ -412,9 +452,8 @@ impl Stream for StreamPassthroughBody {
                 if !self.buffer.is_empty() {
                     let payload = self.buffer.trim().strip_prefix("data:").map(|s| s.trim());
                     if let Some(p) = payload {
-                        if let Some((pi, po)) = extract_stream_usage(p) {
-                            self.stats.token_in.fetch_add(pi, Ordering::SeqCst);
-                            self.stats.token_out.fetch_add(po, Ordering::SeqCst);
+                        if let Some((pi, po, cr, cw)) = extract_stream_usage(p) {
+                            self.stats.absorb_usage(pi, po, cr, cw);
                         }
                     }
                 }
@@ -432,9 +471,8 @@ impl Stream for StreamPassthroughBody {
                         Some(rest) => rest.trim(),
                         None => continue,
                     };
-                    if let Some((p, c)) = extract_stream_usage(payload) {
-                        self.stats.token_in.fetch_add(p, Ordering::SeqCst);
-                        self.stats.token_out.fetch_add(c, Ordering::SeqCst);
+                    if let Some((p, c, cr, cw)) = extract_stream_usage(payload) {
+                        self.stats.absorb_usage(p, c, cr, cw);
                     }
                 }
                 Poll::Ready(Some(Ok(bytes)))
@@ -513,9 +551,8 @@ impl Stream for StreamConvertBody {
                 Poll::Ready(None) => {
                     // 上游流结束：补发收尾事件，记统计，正常关流
                     let out = self.converter.finish();
-                    let (pi, po) = self.converter.usage();
-                    self.stats.token_in.fetch_max(pi, Ordering::SeqCst);
-                    self.stats.token_out.fetch_max(po, Ordering::SeqCst);
+                    let (pi, po, cr, cw) = self.converter.usage();
+                    self.stats.absorb_usage(pi, po, cr, cw);
                     if !out.is_empty() {
                         // 先记统计再返回收尾帧：下游可能不再 poll（避免依赖 poll-after-None 行为）
                         self.stats.record_once();
@@ -536,9 +573,8 @@ impl Stream for StreamConvertBody {
                     tracing::warn!("跨协议流式上游错误: {}", e);
                     self.stats.failed.store(true, Ordering::SeqCst);
                     let out = self.converter.emit_error("upstream stream error");
-                    let (pi, po) = self.converter.usage();
-                    self.stats.token_in.fetch_max(pi, Ordering::SeqCst);
-                    self.stats.token_out.fetch_max(po, Ordering::SeqCst);
+                    let (pi, po, cr, cw) = self.converter.usage();
+                    self.stats.absorb_usage(pi, po, cr, cw);
                     self.stats.record_once();
                     return Poll::Ready(Some(Ok(Bytes::from(out))));
                 }
@@ -570,16 +606,22 @@ fn handle_stream_convert(
 }
 
 /// 从流式 SSE 数据中提取 usage（流结束后的统计用）。
+/// 返回 (input, output, cache_read, cache_write)。
 /// 支持 OpenAI 风格（chunk 里的 usage.prompt_tokens/completion_tokens）
 /// 和 Anthropic 风格（message_start 的 input_tokens / message_delta 的 output_tokens）。
-fn extract_stream_usage(payload: &str) -> Option<(i64, i64)> {
+fn extract_stream_usage(payload: &str) -> Option<(i64, i64, i64, i64)> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
 
     // OpenAI 风格：chunk 顶层带 usage
     if let Some(u) = v.get("usage").and_then(|u| u.as_object()) {
         let p = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
         let c = u.get("completion_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-        if p > 0 || c > 0 { return Some((p, c)); }
+        // 缓存命中：OpenAI 标准 prompt_tokens_details.cached_tokens，兜底 DeepSeek 老格式
+        let cr = u.get("prompt_tokens_details")
+            .and_then(|d| d.get("cached_tokens")).and_then(|x| x.as_i64())
+            .or_else(|| u.get("prompt_cache_hit_tokens").and_then(|x| x.as_i64()))
+            .unwrap_or(0);
+        if p > 0 || c > 0 || cr > 0 { return Some((p, c, cr, 0)); }
     }
 
     // Anthropic 风格：SSE event 为 "type: message_start / message_delta"，data 内携带 usage
@@ -587,13 +629,16 @@ fn extract_stream_usage(payload: &str) -> Option<(i64, i64)> {
     match event_type {
         Some("message_start") => {
             let u = v.get("message")?.get("usage")?.as_object()?;
-            let p = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            Some((p, 0))
+            let input = u.get("input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            let cr = u.get("cache_read_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            let cw = u.get("cache_creation_input_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
+            // Anthropic 的 input_tokens 不含缓存部分，统一为"总提示词"口径
+            Some((input + cr + cw, 0, cr, cw))
         }
         Some("message_delta") => {
             let u = v.get("usage")?.as_object()?;
             let c = u.get("output_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
-            Some((0, c))
+            Some((0, c, 0, 0))
         }
         _ => None,
     }
