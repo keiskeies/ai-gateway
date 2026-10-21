@@ -1,13 +1,24 @@
 use rusqlite::Connection;
 use crate::error::AppResult;
 
-pub fn run_migrations(conn: &Connection) -> AppResult<()> {
-    // Check current version
-    let current_version: i32 = conn.query_row(
+/// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
+/// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
+/// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
+pub const CURRENT_SCHEMA_VERSION: i64 = 21;
+
+/// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
+/// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
+pub fn version(conn: &Connection) -> i64 {
+    conn.query_row(
         "SELECT value FROM _schema_version WHERE id = 1",
         [],
         |row| row.get(0),
-    ).unwrap_or(0);
+    ).unwrap_or(0)
+}
+
+pub fn run_migrations(conn: &Connection) -> AppResult<()> {
+    // Check current version
+    let current_version: i32 = version(conn) as i32;
 
     if current_version < 1 {
         conn.execute_batch(SCHEMA_V1)?;
@@ -58,6 +69,259 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V8 (request_stats cache_read_tokens / cache_write_tokens)");
     }
 
+    if current_version < 9 {
+        conn.execute_batch(SCHEMA_V9_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 9)", [])?;
+        tracing::info!("Database migrated to V9 (backend reasoning_style / reasoning_echo)");
+    }
+
+    if current_version < 10 {
+        conn.execute_batch(SCHEMA_V10_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 10)", [])?;
+        tracing::info!("Database migrated to V10 (users / sessions for admin login)");
+    }
+
+    if current_version < 11 {
+        conn.execute_batch(SCHEMA_V11_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 11)", [])?;
+        tracing::info!("Database migrated to V11 (api_keys.enabled)");
+    }
+
+    if current_version < 12 {
+        conn.execute_batch(SCHEMA_V12_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 12)", [])?;
+        tracing::info!("Database migrated to V12 (request_stats.api_key_id for per-key usage)");
+    }
+
+    if current_version < 13 {
+        conn.execute_batch(SCHEMA_V13_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 13)", [])?;
+        tracing::info!("Database migrated to V13 (platform_health connectivity history)");
+    }
+
+    if current_version < 14 {
+        conn.execute_batch(SCHEMA_V14_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 14)", [])?;
+        tracing::info!("Database migrated to V14 (orphaned bound API keys disabled)");
+    }
+
+    if current_version < 15 {
+        conn.execute_batch(SCHEMA_V15_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 15)", [])?;
+        tracing::info!("Database migrated to V15 (request_stats.cost per-request cost estimate)");
+    }
+
+    if current_version < 16 {
+        conn.execute_batch(SCHEMA_V16_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 16)", [])?;
+        tracing::info!("Database migrated to V16 (request_attempts retry trace)");
+    }
+
+    if current_version < 17 {
+        migrate_api_keys_to_hashed(conn)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 17)", [])?;
+        tracing::info!("Database migrated to V17 (api_keys keeps sha256 hash + mask, never plaintext)");
+    }
+
+    if current_version < 18 {
+        conn.execute_batch(SCHEMA_V18_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 18)", [])?;
+        tracing::info!("Database migrated to V18 (api_keys expiry + quota)");
+    }
+
+    if current_version < 19 {
+        conn.execute_batch(SCHEMA_V19_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 19)", [])?;
+        tracing::info!("Database migrated to V19 (alerts + request_stats.api_key_id index)");
+    }
+
+    if current_version < 20 {
+        conn.execute_batch(SCHEMA_V20_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 20)", [])?;
+        tracing::info!("Database migrated to V20 (api_keys cost quota + rolling quota window)");
+    }
+
+    if current_version < 21 {
+        conn.execute_batch(SCHEMA_V21_MIGRATION)?;
+        // 加列单独走、带守卫：`execute_batch` 逐语句自动提交，建表成功而加列失败时版本号仍停在 20，
+        // 重跑就会撞上"列已存在"——SQLite 没有 ADD COLUMN IF NOT EXISTS，只能自己查。
+        let has_col: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('request_stats') WHERE name = 'replayed_from'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_col == 0 {
+            conn.execute("ALTER TABLE request_stats ADD COLUMN replayed_from INTEGER", [])?;
+        }
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 21)", [])?;
+        tracing::info!("Database migrated to V21 (opt-in request_bodies + request_stats.replayed_from)");
+    }
+
+    Ok(())
+}
+
+/// 请求正文只在显式开启时落库，默认关（见 §2 原则 10"默认不存请求正文"）。
+/// 单独一张表而不是给 `request_stats` 加 TEXT 列：绝大多数部署一行正文都不存，
+/// 把大字段挂在每条统计行上会让默认路径的表一直变胖。
+/// 无外键，与 `request_attempts` 同一口径——正文要能活得比统计行清理更自由，
+/// 反过来清理统计时按 `request_id` 一起删（见 db::stats::purge_older_than）。
+/// `replayed_from` 存被重放那条 `request_stats.id`：重放产生的新请求必须能看出是重放。
+const SCHEMA_V21_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS request_bodies (
+    request_id TEXT PRIMARY KEY,
+    protocol   TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    bytes      INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#;
+
+/// 预算配额与滚动窗口。两列都可空，空即"不限 / 累计"——V18 那批 Key 迁移后行为一字不变。
+/// `quota_window` 存 `day`/`week`/`month`（小写），NULL 就是 V18 的累计口径；
+/// 窗口只改变分母统计哪一段 `request_stats`，不需要谁去把已用量清零。
+const SCHEMA_V20_MIGRATION: &str = r#"
+ALTER TABLE api_keys ADD COLUMN quota_cost REAL;
+ALTER TABLE api_keys ADD COLUMN quota_window TEXT;
+"#;
+
+/// 通知中心：告警行是"扫描到的当前状态 + 已读/解决状态"，不是事件流水。
+/// dedupe_key 唯一（如 `platform_streak:<id>`），同一条件反复扫到只更新 last_seen；
+/// 消息存 i18n code + JSON 参数数组而不是成品句子，否则切换语言就读到另一种语言的旧告警。
+/// 顺带给 request_stats.api_key_id 建索引：Key 用量和配额告警都按 Key 聚合，此前只有全表扫。
+const SCHEMA_V19_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS alerts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedupe_key  TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL,
+    severity    TEXT NOT NULL,
+    ref_type    TEXT,
+    ref_id      TEXT,
+    code        TEXT NOT NULL,
+    args        TEXT NOT NULL,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    read_at     TEXT,
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_open ON alerts(resolved_at, last_seen);
+CREATE INDEX IF NOT EXISTS idx_stats_api_key ON request_stats(api_key_id);
+"#;
+
+/// Key 的过期与配额。三列都可空，空即"不限"——
+/// 已有 Key 迁移后行为完全不变，不会因为多了三列就突然被拒。
+const SCHEMA_V18_MIGRATION: &str = r#"
+ALTER TABLE api_keys ADD COLUMN expires_at TEXT;
+ALTER TABLE api_keys ADD COLUMN quota_requests INTEGER;
+ALTER TABLE api_keys ADD COLUMN quota_tokens INTEGER;
+"#;
+
+/// V17 的目标结构：`key_hash` 用来鉴权，`key_mask` 只用来在列表里认人。
+/// 明文列 `key` 直接消失——留着它，"我们只存哈希"就只是一句注释。
+const SCHEMA_V17_TABLE: &str = r#"
+CREATE TABLE api_keys_target (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    key_hash    TEXT NOT NULL UNIQUE,
+    key_mask    TEXT NOT NULL,
+    proxy_id    TEXT,
+    created_at  TEXT NOT NULL,
+    last_used   TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1
+);
+"#;
+
+const SCHEMA_V17_SWAP: &str = r#"
+DROP TABLE api_keys;
+ALTER TABLE api_keys_target RENAME TO api_keys;
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_proxy ON api_keys(proxy_id);
+"#;
+
+/// 空库/手工删过表时直接建出目标结构（无数据可搬）
+const SCHEMA_V17_EMPTY: &str = r#"
+CREATE TABLE IF NOT EXISTS api_keys (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    key_hash    TEXT NOT NULL UNIQUE,
+    key_mask    TEXT NOT NULL,
+    proxy_id    TEXT,
+    created_at  TEXT NOT NULL,
+    last_used   TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_keys_proxy ON api_keys(proxy_id);
+"#;
+
+/// SQLite 没有 sha256，所以回填只能在 Rust 里做：先读出旧行，算出摘要与掩码，
+/// 再在同一个事务里换表。中断重启不会留下"旧表已删、新表半空"的库。
+/// 已发出去的 Key 仍然能用（校验时同样对客户端传来的值取摘要），
+/// 变的只是"再也读不回明文"——这正是这次迁移的目的。
+fn migrate_api_keys_to_hashed(conn: &Connection) -> AppResult<()> {
+    let has_plaintext: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name='key'",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if has_plaintext == 0 {
+        conn.execute_batch(SCHEMA_V17_EMPTY)?;
+        return Ok(());
+    }
+
+    let rows: Vec<(String, String, String, Option<String>, String, Option<String>, i64)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, key, proxy_id, created_at, last_used, enabled FROM api_keys",
+        )?;
+        let loaded = stmt.query_map([], |row| Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        )))?.collect::<Result<Vec<_>, _>>()?;
+        loaded
+    };
+
+    conn.execute_batch("BEGIN;")?;
+    let migrated = (|| -> AppResult<()> {
+        conn.execute_batch(SCHEMA_V17_TABLE)?;
+        for (id, name, plain, proxy_id, created_at, last_used, enabled) in &rows {
+            conn.execute(
+                "INSERT INTO api_keys_target (id, name, key_hash, key_mask, proxy_id, created_at, last_used, enabled) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                rusqlite::params![
+                    id,
+                    name,
+                    crate::db::api_key::hash_key(plain),
+                    crate::db::api_key::key_mask(plain),
+                    proxy_id,
+                    created_at,
+                    last_used,
+                    enabled,
+                ],
+            )?;
+        }
+        conn.execute_batch(SCHEMA_V17_SWAP)?;
+        Ok(())
+    })();
+    match migrated {
+        Ok(()) => conn.execute_batch("COMMIT;")?,
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK;");
+            return Err(e);
+        }
+    }
+
+    // 换表不会销毁旧页：DROP TABLE 只把页标成空闲，明文密钥的字节仍躺在库文件和 -wal 里。
+    // 所以回填后做一次 VACUUM 重写库文件——否则"库里只存摘要"只在读接口成立，
+    // 拿到 .db 的人还是能捞回历史明文。这是一次性代价（只在这条迁移里跑）。
+    // 顺序有讲究：WAL 模式下 VACUUM 的新页先落在 -wal，所以必须再 checkpoint 把它们折回主文件；
+    // 反过来先 checkpoint 等于亲手把明文页刷进 .db，再 VACUUM 也来不及了。
+    conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+
+    tracing::info!("api_keys 明文密钥已换成哈希，共迁移 {} 条", rows.len());
     Ok(())
 }
 
@@ -268,3 +532,250 @@ const SCHEMA_V8_MIGRATION: &str = r#"
 ALTER TABLE request_stats ADD COLUMN cache_read_tokens INTEGER;
 ALTER TABLE request_stats ADD COLUMN cache_write_tokens INTEGER;
 "#;
+
+// Migration V9: 思考参数适配
+// reasoning_style: Auto / OpenAiEffort / AnthropicThinking / OpenRouter / Qwen / Glm / VllmQwen / Disabled
+// reasoning_echo: OpenAI assistant reasoning_content 回传策略（Drop / Keep / Auto）
+const SCHEMA_V9_MIGRATION: &str = r#"
+ALTER TABLE backends ADD COLUMN reasoning_style TEXT NOT NULL DEFAULT 'Auto';
+ALTER TABLE backends ADD COLUMN reasoning_echo TEXT NOT NULL DEFAULT 'Drop';
+"#;
+
+// Migration V10: 管理端登录——用户与会话
+// password_hash: Argon2id PHC 字符串
+// sessions.token_hash: 会话 token 的 SHA-256（cookie 中只保存原始 token，DB 不落明文）
+const SCHEMA_V10_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS users (
+    id              TEXT PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash      TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at      TEXT NOT NULL,
+    expires_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+"#;
+
+// Migration V11: API Key 生命周期——启用/禁用
+const SCHEMA_V11_MIGRATION: &str = r#"
+ALTER TABLE api_keys ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+"#;
+
+// Migration V12: 密钥维度用量——请求统计记录发起方 API Key（旧行为 NULL，不参与密钥聚合）
+const SCHEMA_V12_MIGRATION: &str = r#"
+ALTER TABLE request_stats ADD COLUMN api_key_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_request_stats_api_key ON request_stats(api_key_id, created_at);
+"#;
+
+// Migration V13: 平台健康历史——每次连通性测试落一行，列表页 CHECK 列读最后一次而不是本次会话
+// 不建外键：平台删除后历史行留着（与 request_stats 的悬挂行同一口径），聚合从 platforms 侧 JOIN 自然过滤
+const SCHEMA_V13_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS platform_health (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform_id TEXT NOT NULL,
+    ok          INTEGER NOT NULL,
+    latency_ms  INTEGER NOT NULL,
+    model_count INTEGER NOT NULL DEFAULT 0,
+    error       TEXT,
+    created_at  TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_platform_health_platform ON platform_health(platform_id, created_at);
+"#;
+
+// Migration V14: 绑定关系不再随虚拟模型一起消失
+// api_keys.proxy_id 原本带 ON DELETE SET NULL：删除虚拟模型会把绑定 Key 静默升级成全局凭据。
+// 这里重建表去掉该外键（保留 proxy_id 作为历史绑定，与其他悬挂数据同一口径），
+// 再把早已指向不存在模型的 Key 一律停用——它们本来就鉴权失败，enabled=1 只是状态造假。
+const SCHEMA_V14_MIGRATION: &str = r#"
+DROP TABLE IF EXISTS api_keys_v14;
+CREATE TABLE api_keys_v14 (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    key         TEXT NOT NULL UNIQUE,
+    proxy_id    TEXT,
+    created_at  TEXT NOT NULL,
+    last_used   TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1
+);
+INSERT INTO api_keys_v14 (id, name, key, proxy_id, created_at, last_used, enabled)
+    SELECT id, name, key, proxy_id, created_at, last_used, enabled FROM api_keys;
+DROP TABLE api_keys;
+ALTER TABLE api_keys_v14 RENAME TO api_keys;
+CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key);
+CREATE INDEX IF NOT EXISTS idx_api_keys_proxy ON api_keys(proxy_id);
+
+UPDATE api_keys SET enabled = 0
+WHERE enabled = 1 AND proxy_id IS NOT NULL
+  AND proxy_id NOT IN (SELECT id FROM proxies);
+"#;
+
+// Migration V15: 单请求成本估算落库
+// 口径：models.input_price / output_price 按"每 100 万 token"计，两侧都有价才算得出成本，
+// 只填一侧或都没填 → 整单留 NULL（不做半截估算）。写入时算一次并冻结在行里，
+// 之后改价不会回头重写历史（所以旧行一律 NULL，不回填）。
+const SCHEMA_V15_MIGRATION: &str = r#"
+ALTER TABLE request_stats ADD COLUMN cost REAL;
+"#;
+
+// Migration V16: 重试轨迹
+// 一条 request_stats 只记最终那次尝试，重试/fallback 依次试过哪些后端因此不可见。
+// request_id 由网关在收到请求时生成并写进最终行，尝试明细另存 request_attempts（一次尝试一行）。
+// 不建外键：后端/平台被删后轨迹仍要能读（与 platform_health、request_stats 悬挂行同一口径），
+// 所以关键展示字段（model_id）直接冗余在尝试行里。
+// 不存请求/响应正文；error_message 落库前截断，且绝不包含密钥。
+// 旧行 request_id 为 NULL → 接口返回空轨迹，前端标注"历史数据，轨迹不可用"，不伪造。
+const SCHEMA_V16_MIGRATION: &str = r#"
+ALTER TABLE request_stats ADD COLUMN request_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_request_stats_request_id ON request_stats(request_id);
+
+CREATE TABLE IF NOT EXISTS request_attempts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id    TEXT NOT NULL,
+    attempt_no    INTEGER NOT NULL,
+    backend_id    TEXT,
+    platform_id   TEXT,
+    model_id      TEXT,
+    status_code   INTEGER,
+    error_type    TEXT,
+    error_message TEXT,
+    latency_ms    INTEGER,
+    started_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_attempts_request ON request_attempts(request_id, attempt_no);
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_db(tag: &str) -> (crate::db::DbPool, std::path::PathBuf) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-db");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join(format!("schema-{}-{}.db", tag, uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&path).expect("init test db");
+        (pool, path)
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    /// 常量必须跟着迁移终点走：加了 V20 却忘了改常量，备份还原会拿旧上限拦掉新快照。
+    #[test]
+    fn current_version_constant_tracks_migrations() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        run_migrations(&conn).expect("migrations run on a fresh db");
+        let reached = version(&conn);
+        assert_eq!(
+            reached, CURRENT_SCHEMA_VERSION,
+            "run_migrations 跑到 V{reached}，常量写的是 V{CURRENT_SCHEMA_VERSION}"
+        );
+    }
+
+    /// V17 回填：迁移前发出去的 Key 迁移后照样能鉴权，而库里已经读不出明文。
+    /// （"能读出来"从来不是问题——问题是它一旦被列表接口原样带回，就等于凭据外泄。）
+    #[test]
+    fn v17_backfill_keeps_existing_keys_working() {
+        let (pool, path) = test_db("v17");
+        let plain = "sk-legacy-plaintext-secret-value-1234";
+        {
+            let conn = pool.get().expect("conn");
+            // 退回到迁移前的形状：明文列 + 版本 16
+            conn.execute_batch(
+                "DROP TABLE api_keys;
+                 CREATE TABLE api_keys (
+                     id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE,
+                     proxy_id TEXT, created_at TEXT NOT NULL, last_used TEXT,
+                     enabled INTEGER NOT NULL DEFAULT 1
+                 );
+                 INSERT INTO api_keys (id, name, key, proxy_id, created_at, enabled)
+                     VALUES ('k1', 'legacy', 'sk-legacy-plaintext-secret-value-1234', 'p1', '2026-01-01T00:00:00Z', 1);
+                 INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 16);"
+            ).expect("roll back to V16 shape");
+
+            run_migrations(&conn).expect("migrate to V17");
+
+            let version: i32 = conn.query_row(
+                "SELECT value FROM _schema_version WHERE id = 1", [], |r| r.get(0)).unwrap();
+            assert!(version >= 17, "迁移链至少要走完 V17");
+            let plaintext_cols: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('api_keys') WHERE name='key'",
+                [], |r| r.get(0)).unwrap();
+            assert_eq!(plaintext_cols, 0, "明文列必须已经消失");
+            // V18 的三列跟着一起补上，回填出来的老行必须还是"不过期 + 不限"，
+            // 否则单纯加列就会让迁移前发的 Key 突然被拒。
+            assert_eq!(conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('api_keys') \
+                 WHERE name IN ('expires_at','quota_requests','quota_tokens')",
+                [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+            assert!(conn.query_row(
+                "SELECT expires_at IS NULL AND quota_requests IS NULL AND quota_tokens IS NULL \
+                 FROM api_keys WHERE id='k1'", [], |r| r.get::<_, i64>(0)).unwrap() != 0);
+        }
+
+        let migrated = crate::db::api_key::get_by_key(&pool, plain).unwrap()
+            .expect("旧 Key 迁移后仍能按明文摘要命中");
+        assert_eq!(migrated.id, "k1");
+        assert_eq!(migrated.proxy_id.as_deref(), Some("p1"));
+        assert!(migrated.enabled);
+        assert!(crate::db::api_key::validate_any(&pool, plain).unwrap());
+        assert!(!crate::db::api_key::validate_any(&pool, &migrated.key_mask).unwrap());
+
+        // 幂等：再跑一次迁移不能报错，也不能再去找明文列
+        run_migrations(&pool.get().unwrap()).expect("V17 迁移可重入");
+        assert!(crate::db::api_key::validate_any(&pool, plain).unwrap());
+
+        // 迁移不只是"读不出明文"，落盘字节也要真的消失：
+        // DROP TABLE 只把页标成空闲，不 VACUUM 的话拿到 .db 的人还能捞回历史明文。
+        for suffix in ["", "-wal"] {
+            let bytes = std::fs::read(format!("{}{}", path.display(), suffix)).unwrap_or_default();
+            assert!(!printable(&bytes).contains(plain), "{suffix} 里仍残留明文");
+        }
+
+        cleanup_db(&path);
+    }
+
+    /// V21 半途失败要能重跑：`execute_batch` 逐语句自动提交，建表成功而加列失败时版本号仍停在 20。
+    /// 再启动时表已在、列也在，SQLite 又没有 ADD COLUMN IF NOT EXISTS——不加守卫就再也起不来。
+    #[test]
+    fn v21_reruns_after_a_partial_migration() {
+        let (pool, path) = test_db("v21-partial");
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 20)", [])
+                .expect("rewind version to 20");
+        }
+
+        run_migrations(&pool.get().unwrap()).expect("V21 半途失败后可重跑");
+
+        let conn = pool.get().unwrap();
+        assert_eq!(version(&conn), CURRENT_SCHEMA_VERSION, "重跑要把版本号补到终点");
+        assert_eq!(conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('request_stats') WHERE name='replayed_from'",
+            [], |r| r.get::<_, i64>(0)).unwrap(), 1, "跳过 ALTER 不等于列不存在");
+        assert_eq!(conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='request_bodies'",
+            [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        cleanup_db(&path);
+    }
+
+    /// 把库文件字节压成"可打印字符 + NUL"的字符串，用来粗判残留明文（跨页会被打断，够用）
+    fn printable(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| if b.is_ascii_graphic() { *b as char } else { '\0' }).collect()
+    }
+}

@@ -59,6 +59,48 @@ impl Default for UnknownParams {
     fn default() -> Self { UnknownParams::Auto }
 }
 
+/// 出站思考参数适配风格。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ReasoningStyle {
+    /// 按平台自动：Anthropic → AnthropicThinking，其他 → OpenAiEffort
+    Auto,
+    /// OpenAI 标准 reasoning_effort
+    OpenAiEffort,
+    /// Anthropic thinking.budget_tokens
+    AnthropicThinking,
+    /// OpenRouter reasoning 对象
+    OpenRouter,
+    /// Qwen / SiliconFlow：enable_thinking + thinking_budget
+    Qwen,
+    /// GLM：thinking.type
+    Glm,
+    /// vLLM + Qwen 模板：chat_template_kwargs.enable_thinking
+    VllmQwen,
+    /// 忽略客户端思考参数，不向上游发送任何思考字段
+    Disabled,
+}
+
+impl Default for ReasoningStyle {
+    fn default() -> Self { ReasoningStyle::Auto }
+}
+
+/// assistant 历史中的 reasoning_content 是否回传（仅 OpenAI 目标生效）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum ReasoningEcho {
+    /// 默认：不回传（DeepSeek Reasoner 等要求）
+    Drop,
+    /// 原样回传（部分 Kimi/GLM 多轮工具调用需要）
+    Keep,
+    /// 预留：按平台/模型判断，当前等价 Drop
+    Auto,
+}
+
+impl Default for ReasoningEcho {
+    fn default() -> Self { ReasoningEcho::Drop }
+}
+
 /// Route links a proxy (virtual model) to its backend models.
 /// Each proxy has exactly one route. The virtual_model name comes from the proxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,9 +130,53 @@ pub struct Backend {
     /// 参数覆盖：JSON object，转发前 merge 进请求体（覆盖优先于客户端值）
     #[serde(default = "default_param_overrides")]
     pub param_overrides: serde_json::Value,
-    /// 未知参数转发策略（默认 Auto：Anthropic 丢弃 / 其他透传）
+    /// 未知参数转发策略（默认 Auto：按源/目标协议自动决定）
     #[serde(default)]
     pub unknown_params: UnknownParams,
+    /// 出站思考参数适配风格
+    #[serde(default)]
+    pub reasoning_style: ReasoningStyle,
+    /// assistant reasoning_content 回传策略
+    #[serde(default)]
+    pub reasoning_echo: ReasoningEcho,
+    /// 输入单价（每 100 万 token）：读取路径按 platform_id + model_id 关联 models 表补齐；
+    /// 模型行缺失或未定价为 None
+    #[serde(default)]
+    pub input_price: Option<f64>,
+    /// 输出单价（每 100 万 token）；口径同 input_price
+    #[serde(default)]
+    pub output_price: Option<f64>,
+}
+
+impl Backend {
+    /// 单价对（每 100 万 token）。入价或出价任一侧缺失就返回 None——半截价格算不出成本，
+    /// 与其猜一个方向，不如整单不估算（成本列为 NULL，聚合也不把它算进覆盖率）。
+    pub fn price_pair(&self) -> Option<(f64, f64)> {
+        match (self.input_price, self.output_price) {
+            (Some(input), Some(output)) => Some((input, output)),
+            _ => None,
+        }
+    }
+
+    /// 本条请求的成本估算：单价齐备且上游回了两侧 token 数才算得出，否则 None。
+    /// token 数为 0 时结果就是 0（与该行自己记录的用量保持一致）。
+    pub fn estimate_cost(&self, token_input: Option<i64>, token_output: Option<i64>) -> Option<f64> {
+        cost_from_prices(self.price_pair(), token_input, token_output)
+    }
+}
+
+/// 成本公式：`(输入 token × 入价 + 输出 token × 出价) / 100 万`。
+/// 单价或 token 任一不齐 → None。缓存命中/写入 token 没有独立定价列，按普通输入价计入
+/// （Anthropic 的 input_tokens 不含缓存部分，因此重缓存流量会低估）。
+pub(crate) fn cost_from_prices(
+    prices: Option<(f64, f64)>,
+    token_input: Option<i64>,
+    token_output: Option<i64>,
+) -> Option<f64> {
+    let (input_price, output_price) = prices?;
+    let input = token_input? as f64;
+    let output = token_output? as f64;
+    Some((input * input_price + output * output_price) / 1_000_000.0)
 }
 
 pub(crate) fn default_param_overrides() -> serde_json::Value { serde_json::json!({}) }
@@ -130,6 +216,10 @@ pub struct CreateBackendRequest {
     pub param_overrides: serde_json::Value,
     #[serde(default)]
     pub unknown_params: UnknownParams,
+    #[serde(default)]
+    pub reasoning_style: ReasoningStyle,
+    #[serde(default)]
+    pub reasoning_echo: ReasoningEcho,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,7 +231,55 @@ pub struct UpdateBackendRequest {
     pub status: Option<BackendStatus>,
     pub param_overrides: Option<serde_json::Value>,
     pub unknown_params: Option<UnknownParams>,
+    pub reasoning_style: Option<ReasoningStyle>,
+    pub reasoning_echo: Option<ReasoningEcho>,
 }
 
 fn default_lb_strategy() -> LBStrategy { LBStrategy::RoundRobin }
 fn default_weight() -> u32 { 1 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn priced(input: Option<f64>, output: Option<f64>) -> Backend {
+        Backend {
+            id: "b1".into(), route_id: "r1".into(), platform_id: "p1".into(), model_id: "m1".into(),
+            weight: 1, priority: 0, max_concurrent: None, capabilities: vec![],
+            status: BackendStatus::Active,
+            param_overrides: default_param_overrides(),
+            unknown_params: UnknownParams::Auto,
+            reasoning_style: ReasoningStyle::Auto,
+            reasoning_echo: ReasoningEcho::default(),
+            input_price: input,
+            output_price: output,
+        }
+    }
+
+    #[test]
+    fn cost_divides_per_million_token_prices() {
+        // 入价 2.5 / 出价 4.0（每 100 万 token）：1000 入 + 500 出 = (2500 + 2000) / 1e6
+        let b = priced(Some(2.5), Some(4.0));
+        let cost = b.estimate_cost(Some(1000), Some(500)).expect("两侧齐备应算出成本");
+        assert!((cost - 0.0045).abs() < 1e-12, "实际 {cost}");
+        // 零用量就是零成本：与该行自己记录的 token 保持一致
+        assert_eq!(b.estimate_cost(Some(0), Some(0)), Some(0.0));
+    }
+
+    #[test]
+    fn half_priced_model_is_not_estimated() {
+        // 只填一侧时整单不估算（宁可不给数，也不按 0 价算出个偏低的车身价）
+        assert_eq!(priced(Some(2.5), None).price_pair(), None);
+        assert_eq!(priced(None, Some(4.0)).price_pair(), None);
+        assert_eq!(priced(Some(2.5), None).estimate_cost(Some(1000), Some(500)), None);
+        assert_eq!(priced(None, None).estimate_cost(Some(1000), Some(500)), None);
+    }
+
+    #[test]
+    fn missing_usage_is_not_estimated() {
+        let b = priced(Some(2.5), Some(4.0));
+        assert_eq!(b.estimate_cost(None, Some(500)), None);
+        assert_eq!(b.estimate_cost(Some(1000), None), None);
+        assert_eq!(b.estimate_cost(None, None), None);
+    }
+}

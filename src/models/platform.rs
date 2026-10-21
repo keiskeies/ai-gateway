@@ -1,4 +1,23 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+
+/// 平台密钥只在进程内和转发时使用，管理接口的响应一律返回掩码：
+/// 明文既不出浏览器，也不可能被表单"原样保存"回去。
+pub fn mask_secret(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = raw.chars().collect();
+    if chars.len() <= 8 {
+        return "••••••••".to_string();
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{}••••••••{}", head, tail)
+}
+
+fn serialize_masked<S: Serializer>(value: &String, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&mask_secret(value))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
@@ -41,6 +60,7 @@ pub struct Platform {
     #[serde(rename = "type")]
     pub platform_type: PlatformType,
     pub base_url: String,
+    #[serde(serialize_with = "serialize_masked")]
     pub api_key: String,
     pub organization: Option<String>,
     pub custom_headers: serde_json::Value,
@@ -84,6 +104,22 @@ fn default_platform_type() -> PlatformType {
     PlatformType::OpenAI
 }
 
+/// 保存前测试连接用的请求：字段都可以是"还没写进数据库"的表单值。
+/// `platform_id` 用于编辑场景——表单里 Key 留空时取回库里已存的 Key，Key 本身永不回传。
+/// `custom_headers` 与转发热路径同口径（鉴权头之后附加，可覆盖），否则靠自定义头鉴权的网关测不出真实结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformTestRequest {
+    #[serde(rename = "type", default = "default_platform_type")]
+    pub platform_type: PlatformType,
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub platform_id: Option<String>,
+    #[serde(default)]
+    pub custom_headers: Option<serde_json::Value>,
+}
+
 /// 内置平台预设
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformPreset {
@@ -111,5 +147,45 @@ impl PlatformPreset {
             Self { name: "Together AI".into(), platform_type: PlatformType::OpenAI, base_url: "https://api.together.xyz/v1".into() },
             Self { name: "OpenRouter".into(), platform_type: PlatformType::OpenAI, base_url: "https://openrouter.ai/api/v1".into() },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(api_key: &str) -> Platform {
+        Platform {
+            id: "p1".into(),
+            name: "demo".into(),
+            platform_type: PlatformType::OpenAI,
+            base_url: "https://api.example.com/v1".into(),
+            api_key: api_key.into(),
+            organization: None,
+            custom_headers: serde_json::json!({}),
+            status: PlatformStatus::Active,
+            rate_limit: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn api_key_is_serialized_masked() {
+        let json = serde_json::to_value(sample("sk-secret-abcdef123456")).unwrap();
+        assert_eq!(json["api_key"], "sk-s••••••••3456");
+        assert!(!json.to_string().contains("abcdef12"));
+    }
+
+    #[test]
+    fn short_and_empty_keys_stay_unusable() {
+        assert_eq!(mask_secret(""), "");
+        assert_eq!(mask_secret("abc123"), "••••••••");
+    }
+
+    #[test]
+    fn masked_value_is_not_the_stored_credential() {
+        // 序列化只用于出网：内部结构仍持有明文，转发链路依赖它
+        assert_eq!(sample("sk-secret-abcdef123456").api_key, "sk-secret-abcdef123456");
     }
 }

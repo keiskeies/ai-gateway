@@ -18,6 +18,7 @@ pub struct ConfigResponse {
     pub retry_backoff_ms: u64,
     pub request_timeout_secs: u64,
     pub test_connection_timeout_secs: u64,
+    pub capture_request_bodies: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +31,7 @@ pub struct UpdateConfigRequest {
     pub retry_backoff_ms: Option<u64>,
     pub request_timeout_secs: Option<u64>,
     pub test_connection_timeout_secs: Option<u64>,
+    pub capture_request_bodies: Option<bool>,
 }
 
 impl From<&AppConfig> for ConfigResponse {
@@ -43,6 +45,7 @@ impl From<&AppConfig> for ConfigResponse {
             retry_backoff_ms: cfg.defaults.retry_backoff_ms,
             request_timeout_secs: cfg.defaults.request_timeout_secs,
             test_connection_timeout_secs: cfg.defaults.test_connection_timeout_secs,
+            capture_request_bodies: cfg.defaults.capture_request_bodies,
         }
     }
 }
@@ -98,6 +101,12 @@ pub async fn update_config(
 
         if let Some(timeout) = body.test_connection_timeout_secs {
             cfg.defaults.test_connection_timeout_secs = timeout;
+            need_save = true;
+        }
+        // 布尔开关不能用 `if let Some(v) = ...` 之外的写法：关掉它传的就是 Some(false)，
+        // 缺字段才是"不改"。前端整表保存每次都带上它。
+        if let Some(capture) = body.capture_request_bodies {
+            cfg.defaults.capture_request_bodies = capture;
             need_save = true;
         }
 

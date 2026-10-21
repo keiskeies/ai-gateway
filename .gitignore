@@ -32,3 +32,16 @@ frontend/tsconfig.tsbuildinfo
 .env
 .env.local
 .gstack/
+
+# 本地 UI 预览实例与临时脚本（含临时 SQLite、exe、cookie，绝不提交）
+.dsh-tmp/
+
+# Python E2E 夹具的缓存
+__pycache__/
+.pytest_cache/
+
+# 本地工具/编辑器产生的临时目录（不属于项目）
+.reasonix/
+.trae/
+.workbuddy/
+.dsh-acl-recovery/

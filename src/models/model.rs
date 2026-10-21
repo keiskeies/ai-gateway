@@ -46,16 +46,114 @@ pub struct CreateModelRequest {
     pub capabilities: Vec<Capability>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 多选导入的请求体：只带勾选的远端模型 ID，档位仍用 `default_*` 那两档占位。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportModelsRequest {
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+}
+
+/// 定价导入的一行。三态与单行编辑、批量编辑逐字一致：字段不出现＝不改、`null`＝清空、数字＝设值。
+/// "CSV 里的空单元格算不算清空"由前端在解析时定（默认算保持原值），到这儿已经是明确的三态。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModelPriceRow {
+    pub model_id: String,
+    #[serde(default = "keep_number")]
+    pub input_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub output_price: NullableNumber,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportPricesRequest {
+    #[serde(default)]
+    pub prices: Vec<ModelPriceRow>,
+}
+
+/// 可空列的三种意图：JSON 里没写＝保持原值，写 `null`＝清空，写数字＝设值。
+///
+/// 为什么不用 `Option<Option<f64>>`：serde_json 把 JSON `null` 交给外层 Option 的 `visit_none`，
+/// "没写"和"写了个空"会塌成同一个值，价格一旦录入就再也退不回"未定价"（成本统计会一直挂着旧价）。
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum NullableNumber {
+    #[default]
+    Keep,
+    Clear,
+    Set(f64),
+}
+
+struct NullableNumberVisitor;
+
+impl<'de> serde::de::Visitor<'de> for NullableNumberVisitor {
+    type Value = NullableNumber;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a number or null")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(NullableNumber::Clear)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(NullableNumber::Set(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(NullableNumber::Set(v as f64))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(NullableNumber::Set(v as f64))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NullableNumber {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(NullableNumberVisitor)
+    }
+}
+
+fn keep_number() -> NullableNumber { NullableNumber::Keep }
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct UpdateModelRequest {
     pub display_name: Option<String>,
     pub max_tokens: Option<u32>,
     pub context_window: Option<u32>,
-    pub input_price: Option<f64>,
-    pub output_price: Option<f64>,
+    #[serde(default = "keep_number")]
+    pub input_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub output_price: NullableNumber,
     pub capabilities: Option<Vec<Capability>>,
     pub status: Option<ModelStatus>,
 }
 
-fn default_max_tokens() -> u32 { 4096 }
-fn default_context_window() -> u32 { 8192 }
+/// 批量编辑的请求体：三态与单行编辑完全一致（没写＝不改，`null`＝清空，给值＝设值），
+/// 所以"清空价格"在两个入口里是同一个动作，不会一处能清、一处清不掉。
+/// 能力只有整组替换一种动作——追加与替换没法用同一个多选框表达，UI 上就写"替换"。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchModelPatch {
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+    #[serde(default = "keep_number")]
+    pub input_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub output_price: NullableNumber,
+    pub capabilities: Option<Vec<Capability>>,
+}
+
+impl BatchModelPatch {
+    pub fn has_change(&self) -> bool {
+        self.input_price != NullableNumber::Keep
+            || self.output_price != NullableNumber::Keep
+            || self.capabilities.is_some()
+    }
+}
+
+// 远端模型列表只给 ID，入库时先按这两档占位，等人在"已同步模型"里补。
+// 导出给 db::model::import_model_ids 用，免得同步与导入两处各写一套默认值。
+pub fn default_max_tokens() -> u32 { 4096 }pub fn default_context_window() -> u32 { 8192 }

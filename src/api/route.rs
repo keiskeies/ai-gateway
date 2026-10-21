@@ -11,6 +11,13 @@ macro_rules! db_block {
     };
 }
 
+/// 全部路由 + 后端（一次请求），供虚拟模型列表页替代逐个拉取
+pub async fn list_all(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
+    let db = db.into_inner();
+    let routes = db_block!(db, crate::db::route::list_all(&db));
+    Ok(HttpResponse::Ok().json(routes))
+}
+
 pub async fn list(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
     let proxy_id = path.into_inner();
     let db = db.into_inner();

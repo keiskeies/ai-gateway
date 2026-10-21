@@ -1,9 +1,13 @@
 pub mod platform;
+pub mod alert;
+pub mod backup;
 pub mod model;
 pub mod proxy;
 pub mod route;
 pub mod stats;
 pub mod api_key;
+pub mod auth;
+pub mod config_transfer;
 
 pub use platform::*;
 pub use model::*;
@@ -11,3 +15,5 @@ pub use proxy::*;
 pub use route::*;
 pub use stats::*;
 pub use api_key::*;
+pub use auth::*;
+pub use config_transfer::*;

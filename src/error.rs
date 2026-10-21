@@ -6,6 +6,8 @@ use std::fmt;
 pub enum AppError {
     NotFound(String),
     BadRequest(String),
+    Unauthorized(String),
+    TooManyRequests(String),
     Conflict(String),
     Internal(String),
     Database(rusqlite::Error),
@@ -30,6 +32,8 @@ impl fmt::Display for AppError {
         match self {
             AppError::NotFound(msg) => write!(f, "Not Found: {}", msg),
             AppError::BadRequest(msg) => write!(f, "Bad Request: {}", msg),
+            AppError::Unauthorized(msg) => write!(f, "Unauthorized: {}", msg),
+            AppError::TooManyRequests(msg) => write!(f, "Too Many Requests: {}", msg),
             AppError::Conflict(msg) => write!(f, "Conflict: {}", msg),
             AppError::Internal(msg) => write!(f, "Internal Error: {}", msg),
             AppError::Database(e) => write!(f, "Database Error: {}", e),
@@ -45,6 +49,8 @@ impl ResponseError for AppError {
         let (code, message) = match self {
             AppError::NotFound(msg) => (404, msg.clone()),
             AppError::BadRequest(msg) => (400, msg.clone()),
+            AppError::Unauthorized(msg) => (401, msg.clone()),
+            AppError::TooManyRequests(msg) => (429, msg.clone()),
             AppError::Conflict(msg) => (409, msg.clone()),
             AppError::Internal(msg) => (500, msg.clone()),
             AppError::Database(e) => (500, format!("Database error: {}", e)),

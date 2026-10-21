@@ -41,11 +41,15 @@ import {
   IconApi,
   IconRocket,
   IconDatabase,
+  IconAlertTriangle,
 } from '@tabler/icons-react'
 import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs } from '../api'
+import { ChartAltTable, peakOf } from '../components/ui/ChartAlt'
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale, type TranslationKey } from '../i18n'
 import { getPresetName, platformPresets } from '../presets'
+// 成本格式化与大屏/控制台共用同一套规则：NULL 渲染成 —，绝不显示 0
+import { formatCost, formatCostCoverage } from '../lib/format'
 
 // ============================================================
 // 概览监控大屏 · Quiet Analytics + Wall Display
@@ -75,6 +79,9 @@ interface OverviewStats {
   total_cache_read_tokens?: number
   fresh_input_tokens?: number
   cache_hit_rate?: number
+  // 成本估算（V15）：NULL = 窗口内没有任何"两侧都定价"的请求，与"成本为 0"是两件事
+  total_cost?: number | null
+  priced_requests?: number
 }
 
 interface ProxyWithStats {
@@ -169,6 +176,8 @@ interface RequestLogItem {
   fresh_input_tokens: number | null
   is_stream: boolean
   error_type: string | null
+  // 成本估算（V15）：未定价 / 只填一侧 / 上游没回 usage / V15 之前的历史行 → null
+  cost: number | null
 }
 
 interface RequestLogPage {
@@ -237,6 +246,11 @@ const RANGE_GRANULARITIES: Record<RangeKey, { allowed: Granularity[]; fallback: 
   all: { allowed: ['day', 'month', 'year'], fallback: 'day' },
 }
 
+// loadData 一次负责这几块；某块本轮取到了就从失败清单里摘掉
+const LOAD_BLOCKS: TranslationKey[] = ['wallBlockKpi', 'healthBoard', 'platformShare', 'errorAnalysis', 'heatmapTitle', 'modelMatrix']
+// 趋势与明细各自单独重载，失败清单按这个全集汇总展示
+const ALL_BLOCKS: TranslationKey[] = [...LOAD_BLOCKS, 'modelStats', 'requestLogs']
+
 // 时段 → UTC RFC3339 范围；all 不传（走后端 limit 截取）
 function rangeToFromTo(range: RangeKey): { from?: string; to?: string } {
   const now = new Date()
@@ -259,13 +273,20 @@ function rangeToFromTo(range: RangeKey): { from?: string; to?: string } {
 // 固定 8 色模型调色板：趋势图 / 排行榜 / 环形占比共用，「一个模型 = 一个颜色」贯穿全页
 // 相邻取色按色相大间隔轮转（蓝→橙→绿→粉→紫→琥珀→青→红），避免冷色扎堆难以区分；
 // 统一中明度（Tailwind-500 档），深浅两套主题下与背景都有足够对比
-const MODEL_PALETTE = ['#3B82F6', '#F97316', '#10B981', '#EC4899', '#8B5CF6', '#F59E0B', '#14B8A6', '#EF4444']
+// 分类色板按明暗方案各一组：深色底靠提亮取可读，浅色底同一批亮色（粉/紫）会糊成一片，
+// 所以浅色组是同一色相族里压暗的版本，对白底与 #EDF2FB 都 ≥4.3:1。
+const MODEL_PALETTE = {
+  dark: ['#3B82F6', '#F97316', '#10B981', '#EC4899', '#8B5CF6', '#F59E0B', '#14B8A6', '#EF4444'],
+  light: ['#1D5FD1', '#C2410C', '#0F7A5A', '#B02565', '#6D34C6', '#A16207', '#0B7285', '#C42020'],
+}
 
-// 强调色 / 状态语义色：按明暗方案各取一组，暗色高亮通透、亮色保证可读对比
-const ACCENT = { dark: '#5C9DFF', light: '#2E6BE6' }
+// 强调色 / 状态语义色：按明暗方案各取一组，暗色高亮通透、亮色保证可读对比。
+// 数值必须与 main.css 的 --accent / --ok / --warn / --err 同步——大屏这里走的是 Recharts
+// 与内联 style，拿不到 CSS 变量，两处不同步就会出现"同一屏两种红"。
+const ACCENT = { dark: '#5C9DFF', light: '#2E63B8' }
 const STATUS = {
   dark: { ok: '#35D399', warn: '#FBBF24', err: '#FF6B7A' },
-  light: { ok: '#0E9F6E', warn: '#A16207', err: '#DC2626' },
+  light: { ok: '#146E54', warn: '#855C12', err: '#A61B2E' },
 }
 
 function formatNumber(n: number | undefined): string {
@@ -393,7 +414,7 @@ function Sparkline({ data, width = 70, height = 30 }: {
   const line = pts.map((p, i) => `${i ? 'L' : 'M'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ')
   const area = `${line} L${width},${height} L0,${height} Z`
   return (
-    <svg width={width} height={height} style={{ display: 'block' }}>
+    <svg width={width} height={height} style={{ display: 'block' }} aria-hidden="true">
       <path d={area} fill="var(--accent)" opacity={0.16} />
       <path d={line} fill="none" stroke="var(--accent)" strokeWidth={1.5} strokeLinejoin="round" />
     </svg>
@@ -442,7 +463,7 @@ function RingGauge({ value, color, size = 44 }: { value: number; color: string; 
 }
 
 // 活跃热力图（周 × 时）：accent 单色明度阶梯表达强度
-function Heatmap({ data, locale }: { data: ActivityHeatmapData | null; locale: Locale }) {
+function Heatmap({ data, locale, isDark }: { data: ActivityHeatmapData | null; locale: Locale; isDark: boolean }) {
   if (!data || data.max === 0) {
     return <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t(locale, 'noChartData')}</span>
   }
@@ -450,7 +471,8 @@ function Heatmap({ data, locale }: { data: ActivityHeatmapData | null; locale: L
   data.cells.forEach((c) => map.set(`${c.weekday}-${c.hour}`, c.count))
   const order = [1, 2, 3, 4, 5, 6, 0] // 周一 → 周日（%w 0=周日）
   const wd = locale === 'zh' ? ['一', '二', '三', '四', '五', '六', '日'] : ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']
-  const steps = [0.15, 0.35, 0.6, 0.85, 1]
+  // 浅色底上 15% 的 accent 与面板底色几乎同亮度，最低档要抬到 35% 才分得出格子
+  const steps = isDark ? [0.15, 0.35, 0.6, 0.85, 1] : [0.35, 0.55, 0.7, 0.85, 1]
   const intensity = (c: number) => {
     if (!c) return 'var(--panel-bg-2)'
     const idx = Math.min(steps.length - 1, Math.floor((c / data.max) * steps.length))
@@ -505,10 +527,11 @@ function DeltaBadge({ cur, prev, higherIsBetter }: {
 }
 
 // KPI 卡：左上 3px 强调竖条（CSS ::before）+ 右上水印图标；widget 为右侧微件（走势线/环形），与文字列垂直居中
-function KpiCard({ label, icon, widget, children }: {
+function KpiCard({ label, icon, widget, missing, children }: {
   label: string
   icon: React.ReactNode
   widget?: React.ReactNode
+  missing?: boolean
   children: React.ReactNode
 }) {
   return (
@@ -517,16 +540,23 @@ function KpiCard({ label, icon, widget, children }: {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="wall-kpi-label">{label}</div>
-          {children}
+          {/* 取不到时不退回 0：大屏上 0 和"没取到"长得一模一样，远看一眼就会误判 */}
+          {missing ? <div className="wall-kpi-value wall-kpi-missing">—</div> : children}
         </div>
-        {widget && <div style={{ flexShrink: 0 }}>{widget}</div>}
+        {!missing && widget && <div style={{ flexShrink: 0 }}>{widget}</div>}
       </div>
     </div>
   )
 }
 
+// 面板取数失败时不能退回"暂无数据"——那是把"没取到"说成"确实没有"
+function PanelFailed({ locale }: { locale: Locale }) {
+  return <span style={{ fontSize: 12, color: 'var(--warn)' }}>{t(locale, 'wallPanelFailed')}</span>
+}
+
 export default function Dashboard() {
   const { locale, isDark } = useAppContext()
+  const palette = isDark ? MODEL_PALETTE.dark : MODEL_PALETTE.light
 
   const [stats, setStats] = useState<OverviewStats>({
     total_requests: 0, success_rate: 0, avg_latency_ms: 0,
@@ -540,6 +570,9 @@ export default function Dashboard() {
   const [heatmap, setHeatmap] = useState<ActivityHeatmapData | null>(null)
   const [percentiles, setPercentiles] = useState<LatencyPercentiles | null>(null)
   const [loading, setLoading] = useState(false)
+  // 三组请求并发写同一份"取不到的模块"，用 ref 收口再触发一次重渲染，免得互相覆盖
+  const failedRef = useRef<Set<TranslationKey>>(new Set())
+  const [, setFailedTick] = useState(0)
 
   const [granularity, setGranularity] = useState<Granularity>('hour')
   const [rangeKey, setRangeKey] = useState<RangeKey>('today')
@@ -568,19 +601,30 @@ export default function Dashboard() {
   const [fsManual, setFsManual] = useState(false)
 
   // ---- 数据加载（所有统计共用页头的时段筛选） ----
+  // 取不到就记下是哪一块：大屏是远看的，"读数停在 0"和"这块没取到"必须分得开
+  const applyFailed = useCallback((owned: TranslationKey[], missing: TranslationKey[]) => {
+    owned.forEach((block) => failedRef.current.delete(block))
+    missing.forEach((block) => failedRef.current.add(block))
+    setFailedTick((n) => n + 1)
+  }, [])
+
   // silent=true：自动刷新时静默拉取，不闪 loading 遮罩，仅原地换数据
   const loadData = useCallback(async (r: RangeKey, silent = false) => {
     const range = rangeToFromTo(r)
     if (!silent) setLoading(true)
+    const missing: TranslationKey[] = []
+    const note = (block: TranslationKey) => {
+      if (!missing.includes(block)) missing.push(block)
+    }
     try {
       const [overview, proxyList, platformList, errs, heat, pct, summaries] = await Promise.all([
-        getOverview(range).catch(() => ({})),
-        listProxies().catch(() => []),
-        listPlatforms().catch(() => []),
-        getErrorStats(range).catch(() => null),
-        getHeatmap(range).catch(() => null),
-        getLatencyPercentiles(range).catch(() => null),
-        getModelSummaries(range).catch(() => []),
+        getOverview(range).catch(() => { note('wallBlockKpi'); return {} }),
+        listProxies().catch(() => { note('healthBoard'); return [] }),
+        listPlatforms().catch(() => { note('platformShare'); return [] }),
+        getErrorStats(range).catch(() => { note('errorAnalysis'); return null }),
+        getHeatmap(range).catch(() => { note('heatmapTitle'); return null }),
+        getLatencyPercentiles(range).catch(() => { note('wallBlockKpi'); return null }),
+        getModelSummaries(range).catch(() => { note('modelMatrix'); return [] }),
       ])
       setStats(overview as OverviewStats)
       setErrorStats(errs as ErrorStats | null)
@@ -607,22 +651,25 @@ export default function Dashboard() {
       )
       setPlatforms(platformsWithStats)
     } catch {
-      // silently fail
+      // 每个接口自己已经记下失败；走到这里只能是意外，不再吞掉状态
     } finally {
+      applyFailed(LOAD_BLOCKS, missing)
       if (!silent) setLoading(false)
     }
-  }, [])
+  }, [applyFailed])
 
   const loadTs = useCallback(async (g: Granularity, r: RangeKey, silent = false) => {
     if (!silent) setTsLoading(true)
     try {
       setTsData(await getModelTimeSeries(g, rangeToFromTo(r)))
+      applyFailed(['modelStats'], [])
     } catch {
       setTsData(null)
+      applyFailed(['modelStats'], ['modelStats'])
     } finally {
       if (!silent) setTsLoading(false)
     }
-  }, [])
+  }, [applyFailed])
 
   // 请求明细：跟随页头时段 + 模型/状态筛选 + 分页
   const loadLogs = useCallback(async (r: RangeKey, page: number, model: string, status: string, silent = false) => {
@@ -637,12 +684,14 @@ export default function Dashboard() {
         status: (status as 'success' | 'fail') || undefined,
       })
       setLogs(data as RequestLogPage)
+      applyFailed(['requestLogs'], [])
     } catch {
       setLogs(null)
+      applyFailed(['requestLogs'], ['requestLogs'])
     } finally {
       if (!silent) setLogsLoading(false)
     }
-  }, [])
+  }, [applyFailed])
 
   useEffect(() => { loadData(rangeKey) }, [loadData, rangeKey, refreshNonce])
   useEffect(() => { loadTs(granularity, rangeKey) }, [granularity, rangeKey, loadTs, refreshNonce])
@@ -727,11 +776,11 @@ export default function Dashboard() {
     const series = models.map((m, i) => ({
       name: `m${i}`,
       label: m,
-      color: MODEL_PALETTE[i % MODEL_PALETTE.length],
+      color: palette[i % palette.length],
     }))
 
     return { chartData, series }
-  }, [tsData, metric])
+  }, [tsData, metric, palette])
 
   // 模型矩阵排序（唯一"每模型"视图，替代原排行条形图）：计数/速度降序，延时/首字升序——最优在前。
   // max 供排序列内嵌微条做宽度分母。
@@ -769,11 +818,11 @@ export default function Dashboard() {
       .map((p, i) => ({
         label: p.name,
         value: p.stats?.total_requests || 0,
-        color: MODEL_PALETTE[i % MODEL_PALETTE.length],
+        color: palette[i % palette.length],
       }))
       .filter((p) => p.value > 0)
       .sort((a, b) => b.value - a.value)
-  }, [platforms])
+  }, [platforms, palette])
 
   const platformTotal = platformShare.reduce((s, p) => s + p.value, 0)
   const sharePercent = (v: number) => (platformTotal ? Math.round((v / platformTotal) * 100) : 0)
@@ -807,6 +856,20 @@ export default function Dashboard() {
   // 平均类指标（延时/首字/速度）堆叠无意义：堆叠模式仅对可求和指标生效
   const effectiveStacked = stacked && isSumMetric(metric)
 
+  // 图表的文本替代（§8.8）：大屏上的图是给两米外看的，读屏的人要拿到同一份数值而不是"这里有一张图"
+  const trendTitle = `${t(locale, 'modelStats')} · ${t(locale, METRIC_LABEL_KEYS[metric])}`
+  // 计数类指标一行是"各模型相加"，平均类相加没有意义——那一行的峰值只能取单模型最大值
+  const trendRowValue = (row: Record<string, any>) => {
+    const values = series.map(s => Number(row[s.name]) || 0)
+    return isSumMetric(metric) ? values.reduce((sum, v) => sum + v, 0) : Math.max(0, ...values)
+  }
+  const trendPeak = peakOf(chartData, trendRowValue)
+  const trendAlt = t(locale, effectiveStacked ? 'chartAltBar' : 'chartAltTrend', trendTitle, String(chartData.length),
+    trendPeak ? valueFormatter(trendRowValue(trendPeak)) : '—', trendPeak ? String(trendPeak.period) : '—')
+  const piePeak = platformShare[0]
+  const pieAlt = t(locale, 'chartAltPie', t(locale, 'platformShare'), String(platformShare.length),
+    piePeak ? getPlatformDisplayName(piePeak.label) : '—', piePeak ? `${sharePercent(piePeak.value)}%` : '—')
+
   // 矩阵排序列渲染：当前指标所在单元格内嵌相对宽度微条，直观呈现"排行"（替代原排行面板）
   const mxCell = (m: ModelSummaryRow, key: Metric, content: string, extraStyle?: React.CSSProperties) => {
     if (key !== metric) return <td className="wall-num" style={extraStyle}>{content}</td>
@@ -824,7 +887,7 @@ export default function Dashboard() {
   const thCls = (key: Metric) => `wall-num${key === metric ? ' wall-mx-th-sorted' : ''}`
 
   const cc = chartTokens(isDark)
-  const axisTick = { fontSize: 11, fill: cc.axis, style: { fontVariantNumeric: 'tabular-nums' } }
+  const axisTick = { fontSize: 12, fill: cc.axis, style: { fontVariantNumeric: 'tabular-nums' } }
   const clockStr = now.toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
 
   // 趋势图共用子元素：分组折线 / 堆叠柱状两种形态复用。
@@ -847,7 +910,7 @@ export default function Dashboard() {
         return v
       }}
     />,
-    <YAxis key="y" width={52} tick={axisTick} tickFormatter={valueFormatter} tickLine={false} axisLine={false} />,
+    <YAxis key="y" width={52} tick={axisTick} tickFormatter={valueFormatter} tickLine={false} axisLine={false} allowDecimals={false} />,
     // hover 十字线 + 毛玻璃 tooltip
     <RTooltip
       key="tt"
@@ -861,11 +924,15 @@ export default function Dashboard() {
         backdropFilter: 'blur(8px)',
         boxShadow: 'none',
       }}
-      labelStyle={{ color: cc.axis, fontSize: 11, marginBottom: 4, fontVariantNumeric: 'tabular-nums' }}
+      labelStyle={{ color: cc.axis, fontSize: 12, marginBottom: 4, fontVariantNumeric: 'tabular-nums' }}
       labelFormatter={(v: string) => (granularity === 'hour' ? `${v.slice(5, 10)} ${v.slice(11, 16)}` : v)}
       formatter={(value: number, name: string) => [valueFormatter(value), series.find((s) => s.name === name)?.label || name]}
     />,
   ]
+
+  const failedBlocks = ALL_BLOCKS.filter((b) => failedRef.current.has(b))
+  const failed = (b: TranslationKey) => failedRef.current.has(b)
+  const kpiDown = failed('wallBlockKpi')
 
   return (
     <div className="wall-root">
@@ -896,6 +963,7 @@ export default function Dashboard() {
             <ActionIcon
               variant="subtle"
               size="lg"
+              aria-label={t(locale, 'autoRefresh')}
               onClick={() => setAutoRefresh((v) => !v)}
               style={{ color: autoRefresh ? ACCENT[isDark ? 'dark' : 'light'] : 'var(--text-3)' }}
             >
@@ -903,17 +971,45 @@ export default function Dashboard() {
             </ActionIcon>
           </Tooltip>
           <Tooltip label={paused ? t(locale, 'resume') : t(locale, 'pause')}>
-            <ActionIcon variant="subtle" size="lg" onClick={() => setPaused((v) => !v)}>
+            <ActionIcon
+              variant="subtle"
+              size="lg"
+              aria-label={t(locale, paused ? 'resume' : 'pause')}
+              onClick={() => setPaused((v) => !v)}
+            >
               {paused ? <IconPlayerPlay size={18} /> : <IconPlayerPause size={18} />}
             </ActionIcon>
           </Tooltip>
           <Tooltip label={fsOn || fsManual ? t(locale, 'exitFullscreen') : t(locale, 'fullscreen')}>
-            <ActionIcon variant="subtle" size="lg" onClick={toggleFullscreen}>
+            <ActionIcon
+              variant="subtle"
+              size="lg"
+              aria-label={t(locale, fsOn || fsManual ? 'exitFullscreen' : 'fullscreen')}
+              onClick={toggleFullscreen}
+            >
               {fsOn || fsManual ? <IconArrowsMinimize size={18} /> : <IconArrowsMaximize size={18} />}
             </ActionIcon>
           </Tooltip>
         </Group>
       </header>
+
+      {/* ===== 取数失败：把"没取到"和"读数是 0"分开，重试一次拉全部 ===== */}
+      {failedBlocks.length > 0 && (
+        <div className="wall-failbar" role="status">
+          <IconAlertTriangle size={16} stroke={1.6} style={{ color: 'var(--warn)', flexShrink: 0 }} />
+          <span className="wall-failbar-list">
+            {t(locale, 'wallPartialFail', failedBlocks.map((b) => t(locale, b)).join(' · '))}
+          </span>
+          <ActionIcon
+            variant="subtle"
+            size="sm"
+            aria-label={t(locale, 'retry')}
+            onClick={() => setRefreshNonce((n) => n + 1)}
+          >
+            <IconRefresh size={14} />
+          </ActionIcon>
+        </div>
+      )}
 
       {/* ===== KPI 行：5 张紧凑卡（label / 大数字 / 副行 | 右侧走势微件） ===== */}
       <div className="wall-kpi-grid">
@@ -921,6 +1017,7 @@ export default function Dashboard() {
           label={t(locale, 'totalRequests')}
           icon={<IconBolt size={22} />}
           widget={<Sparkline data={periodTotals.requests} />}
+          missing={kpiDown}
         >
           <div className="wall-kpi-value">{formatNumber(Math.round(totalRequests))}</div>
           <div className="wall-kpi-sub" style={{ marginTop: 4 }}>
@@ -932,13 +1029,16 @@ export default function Dashboard() {
           label={t(locale, 'successRate')}
           icon={<IconCircleCheck size={22} />}
           widget={<RingGauge value={stats.success_rate || 0} color={rateColor} />}
+          missing={kpiDown}
         >
           <div className="wall-kpi-value" style={{ color: rateColor }}>
             {(stats.success_rate || 0).toFixed(1)}
             <span className="wall-kpi-unit">%</span>
           </div>
           <div className="wall-kpi-sub">
-            {t(locale, 'successCount')} {(errorStats?.success ?? 0).toLocaleString()} · {t(locale, 'failureCount')} {Math.max(0, (errorStats?.total ?? 0) - (errorStats?.success ?? 0)).toLocaleString()}
+            {failed('errorAnalysis')
+              ? `${t(locale, 'successCount')} — · ${t(locale, 'failureCount')} —`
+              : `${t(locale, 'successCount')} ${(errorStats?.success ?? 0).toLocaleString()} · ${t(locale, 'failureCount')} ${Math.max(0, (errorStats?.total ?? 0) - (errorStats?.success ?? 0)).toLocaleString()}`}
           </div>
         </KpiCard>
 
@@ -946,6 +1046,7 @@ export default function Dashboard() {
           label={t(locale, 'avgLatency')}
           icon={<IconStopwatch size={22} />}
           widget={<Sparkline data={periodTotals.latency} />}
+          missing={kpiDown}
         >
           <div className="wall-kpi-value">
             {formatNumber(Math.round(avgLatency))}
@@ -962,7 +1063,7 @@ export default function Dashboard() {
           )}
         </KpiCard>
 
-        <KpiCard label={t(locale, 'metricTtft')} icon={<IconRocket size={22} />}>
+        <KpiCard label={t(locale, 'metricTtft')} icon={<IconRocket size={22} />} missing={kpiDown}>
           <div className="wall-kpi-value">
             {formatNumber(Math.round(stats.avg_ttft_ms || 0))}
             <span className="wall-kpi-unit">ms</span>
@@ -973,7 +1074,7 @@ export default function Dashboard() {
         </KpiCard>
 
         {/* 缓存命中率：CC Switch 口径 cache_read / (cache_read + fresh_input)；副行展示新增输入与命中量 */}
-        <KpiCard label={t(locale, 'kpiCacheHit')} icon={<IconDatabase size={22} />}>
+        <KpiCard label={t(locale, 'kpiCacheHit')} icon={<IconDatabase size={22} />} missing={kpiDown}>
           <div className="wall-kpi-value">
             {(stats.cache_hit_rate || 0).toFixed(1)}
             <span className="wall-kpi-unit">%</span>
@@ -983,7 +1084,7 @@ export default function Dashboard() {
           </div>
         </KpiCard>
 
-        <KpiCard label={t(locale, 'totalTokens')} icon={<IconCoin size={22} />}>
+        <KpiCard label={t(locale, 'totalTokens')} icon={<IconCoin size={22} />} missing={kpiDown}>
           <div className="wall-kpi-value">{formatTokenCount(totalTokens)}</div>
           {/* 输入/输出双色堆叠条：深底 + 实色（token 驱动，亮/暗自动跟随） */}
           <div className="wall-token-bar">
@@ -993,10 +1094,18 @@ export default function Dashboard() {
           <div className="wall-kpi-sub">
             {t(locale, 'inputTokens')} {formatTokenCount(tokenIn)} · {t(locale, 'outputTokens')} {formatTokenCount(tokenOut)}
           </div>
+          {/* 成本口径与概览页一致：只有"两侧都定价"的请求算得出来，所以合计必须同时给出覆盖率 */}
+          <div
+            className="wall-kpi-sub"
+            style={{ marginTop: 2 }}
+            title={t(locale, 'costCoverageHint', String(stats.priced_requests ?? 0), String(stats.total_requests || 0))}
+          >
+            {t(locale, 'cost')} {formatCost(stats.total_cost)} · {t(locale, 'costCoverage', formatCostCoverage(stats.priced_requests, stats.total_requests))}
+          </div>
         </KpiCard>
 
         {/* 网关与并发合并：大数字 = 活跃网关 N/M，副行 = 实时状态 + 并发数 */}
-        <KpiCard label={t(locale, 'activeProxies')} icon={<IconStack size={22} />}>
+        <KpiCard label={t(locale, 'activeProxies')} icon={<IconStack size={22} />} missing={kpiDown || failed('healthBoard')}>
           <div className="wall-kpi-value">
             {activeProxies}
             <span className="wall-kpi-unit">/ {proxies.length || stats.total_proxies || 0}</span>
@@ -1007,7 +1116,7 @@ export default function Dashboard() {
               style={{ background: (stats.total_connections_active || 0) > 0 ? status.ok : 'var(--text-3)' }}
             />
             <span>
-              {(stats.total_connections_active || 0) > 0 ? 'IN FLIGHT' : 'IDLE'} · {t(locale, 'concurrent')} {formatNumber(Math.round(connections))}
+              {(stats.total_connections_active || 0) > 0 ? t(locale, 'inFlight') : t(locale, 'idleState')} · {t(locale, 'concurrent')} {formatNumber(Math.round(connections))}
             </span>
           </div>
         </KpiCard>
@@ -1050,6 +1159,7 @@ export default function Dashboard() {
                 <ActionIcon
                   variant="subtle"
                   size="sm"
+                  aria-label={t(locale, effectiveStacked ? 'groupedMode' : 'stackedMode')}
                   disabled={!isSumMetric(metric)}
                   onClick={() => setStacked((s) => !s)}
                 >
@@ -1057,14 +1167,22 @@ export default function Dashboard() {
                 </ActionIcon>
               </Tooltip>
               <Tooltip label={t(locale, 'refresh')}>
-                <ActionIcon variant="subtle" size="sm" loading={tsLoading} onClick={() => setRefreshNonce((n) => n + 1)}>
+                <ActionIcon
+                  variant="subtle"
+                  size="sm"
+                  aria-label={t(locale, 'refresh')}
+                  loading={tsLoading}
+                  onClick={() => setRefreshNonce((n) => n + 1)}
+                >
                   <IconRefresh size={14} />
                 </ActionIcon>
               </Tooltip>
             </Group>
           </div>
-          {series.length ? (
-            <div style={{ flex: 1, minHeight: 0 }}>
+          {failed('modelStats') ? (
+            <PanelFailed locale={locale} />
+          ) : series.length ? (
+            <div style={{ flex: 1, minHeight: 0 }} role="group" aria-label={trendAlt}>
               <ResponsiveContainer width="100%" height="100%">
                 {effectiveStacked ? (
                   /* 堆叠柱状：展示各时段内模型用量的构成与总量（仅计数类指标可用） */
@@ -1102,6 +1220,11 @@ export default function Dashboard() {
                   </ReLineChart>
                 )}
               </ResponsiveContainer>
+              <ChartAltTable
+                caption={t(locale, 'chartAltCaption', trendTitle)}
+                head={[t(locale, 'chartAltPeriod'), ...series.map(s => s.label)]}
+                rows={chartData.map(row => [String(row.period), ...series.map(s => valueFormatter(Number(row[s.name]) || 0))])}
+              />
             </div>
           ) : (
             <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1120,7 +1243,7 @@ export default function Dashboard() {
             <span className="wall-panel-title">{t(locale, 'heatmapTitle')}</span>
             <span className="wall-panel-sub">{t(locale, RANGE_LABEL_KEYS[rangeKey])}</span>
           </div>
-          <Heatmap data={heatmap} locale={locale} />
+          {failed('heatmapTitle') ? <PanelFailed locale={locale} /> : <Heatmap data={heatmap} locale={locale} isDark={isDark} />}
         </div>
         </div>
 
@@ -1130,7 +1253,9 @@ export default function Dashboard() {
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <span className="wall-panel-title">{t(locale, 'errorAnalysis')}</span>
             </div>
-            {errorStats && errorStats.errors.length ? (
+            {failed('errorAnalysis') ? (
+              <PanelFailed locale={locale} />
+            ) : errorStats && errorStats.errors.length ? (
               errorStats.errors.slice(0, 4).map((e) => (
                 <div key={e.kind} className="wall-rank-row" title={`${ERROR_LABELS[e.kind] ? t(locale, ERROR_LABELS[e.kind]) : e.kind}: ${e.count}`}>
                   <span className="wall-rank-label" style={{ maxWidth: 110 }}>
@@ -1154,11 +1279,14 @@ export default function Dashboard() {
           <div className="wall-panel" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
             <span className="wall-panel-title">{t(locale, 'platformShare')}</span>
-            <span className="wall-panel-sub">{platforms.length} {t(locale, 'total')}</span>
+            <span className="wall-panel-sub">{failed('platformShare') ? '—' : `${platforms.length} ${t(locale, 'total')}`}</span>
           </div>
           <div style={{ flex: 1, display: 'flex', gap: 12, alignItems: 'center', minHeight: 0 }}>
-            <div style={{ width: 120, height: 120, flexShrink: 0 }}>
-              {platformShare.length ? (
+            {/* 环形本身只给一句摘要：旁边那两列"名称 + 数值 + 占比"就是它的表格替代，不必再补一份 */}
+            <div style={{ width: 120, height: 120, flexShrink: 0 }} role="img" aria-label={pieAlt}>
+              {failed('platformShare') ? (
+                <PanelFailed locale={locale} />
+              ) : platformShare.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
@@ -1174,7 +1302,12 @@ export default function Dashboard() {
                       animationDuration={500}
                     >
                       {platformShare.map((p) => (
-                        <Cell key={p.label} fill={p.color} />
+                        /* 每一块扇形自己报数：recharts 给 path 上了 role="img"，不给名字就是一堆无名图片 */
+                        <Cell
+                          key={p.label}
+                          fill={p.color}
+                          aria-label={`${getPlatformDisplayName(p.label)} ${p.value.toLocaleString()} (${sharePercent(p.value)}%)`}
+                        />
                       ))}
                       <Label
                         position="center"
@@ -1216,7 +1349,7 @@ export default function Dashboard() {
             </div>
             <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '3px 12px', alignContent: 'center', minWidth: 0 }}>
               {platformShare.map((p) => (
-                <div key={p.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 11, minWidth: 0 }}>
+                <div key={p.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 12, minWidth: 0 }}>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                     <span className="wall-dot" style={{ background: p.color }} />
                     <span style={{ color: 'var(--text-2)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -1242,10 +1375,12 @@ export default function Dashboard() {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
             <span className="wall-panel-title">{t(locale, 'modelMatrix')}</span>
             <span className="wall-panel-sub">
-              {t(locale, 'sortedBy', t(locale, METRIC_LABEL_KEYS[metric]))} · {summaries.length} {t(locale, 'activeModels')}
+              {t(locale, 'sortedBy', t(locale, METRIC_LABEL_KEYS[metric]))} · {failed('modelMatrix') ? '—' : `${summaries.length} ${t(locale, 'activeModels')}`}
             </span>
           </div>
-          {sortedSummaries.rows.length ? (
+          {failed('modelMatrix') ? (
+            <PanelFailed locale={locale} />
+          ) : sortedSummaries.rows.length ? (
             <div className="wall-matrix-scroll">
               <Table className="wall-matrix" striped highlightOnHover>
                 <thead>
@@ -1267,7 +1402,7 @@ export default function Dashboard() {
                 <tbody>
                   {sortedSummaries.rows.map((m, i) => {
                     const rate = m.requests ? (m.success_requests / m.requests) * 100 : 0
-                    const dot = trendColorOf.get(m.model_id) || MODEL_PALETTE[i % MODEL_PALETTE.length]
+                    const dot = trendColorOf.get(m.model_id) || palette[i % palette.length]
                     return (
                       <tr key={m.model_id}>
                         <td className="wall-mx-model" title={m.model_id}>
@@ -1302,9 +1437,11 @@ export default function Dashboard() {
         <div className="wall-panel" style={{ flexShrink: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
             <span className="wall-panel-title">{t(locale, 'healthBoard')}</span>
-            <span className="wall-panel-sub">{proxies.length} {t(locale, 'total')}</span>
+            <span className="wall-panel-sub">{failed('healthBoard') ? '—' : `${proxies.length} ${t(locale, 'total')}`}</span>
           </div>
-          {proxies.length === 0 ? (
+          {failed('healthBoard') ? (
+            <PanelFailed locale={locale} />
+          ) : proxies.length === 0 ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 0', color: 'var(--text-3)', fontSize: 12 }}>
               <IconApi size={16} />
               {t(locale, 'noProxies')}
@@ -1351,6 +1488,7 @@ export default function Dashboard() {
             <Select
               size="xs"
               w={170}
+              aria-label={t(locale, 'modelFilter')}
               value={logsModel || '__all__'}
               onChange={(v) => setLogsModel(!v || v === '__all__' ? '' : v)}
               data={[{ value: '__all__', label: t(locale, 'allModels') }, ...modelOptions.map((m) => ({ value: m, label: m }))]}
@@ -1366,12 +1504,14 @@ export default function Dashboard() {
                 { label: t(locale, 'statusFail'), value: 'fail' },
               ]}
             />
-            <span style={{ fontSize: 11, color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' }}>
-              {t(locale, 'totalRecords', (logs?.total ?? 0).toLocaleString())}
+            <span style={{ fontSize: 12, color: 'var(--text-3)', fontVariantNumeric: 'tabular-nums' }}>
+              {t(locale, 'totalRecords', failed('requestLogs') ? '—' : (logs?.total ?? 0).toLocaleString())}
             </span>
           </Group>
         </div>
-        {logs && logs.items.length ? (
+        {failed('requestLogs') ? (
+          <PanelFailed locale={locale} />
+        ) : logs && logs.items.length ? (
           <>
             <div className="wall-logs-scroll">
               <Table className="wall-logs" striped highlightOnHover>
@@ -1386,6 +1526,7 @@ export default function Dashboard() {
                     <th className="wall-num">{t(locale, 'colFreshInput')}</th>
                     <th className="wall-num">{t(locale, 'colTokenOut')}</th>
                     <th className="wall-num">{t(locale, 'colCacheHit')}</th>
+                    <th className="wall-num" title={t(locale, 'costHint')}>{t(locale, 'cost')}</th>
                     <th className="wall-num">{t(locale, 'colDuration')}</th>
                     <th className="wall-num">{t(locale, 'colTtft')}</th>
                     <th className="wall-num">{t(locale, 'colSpeed')}</th>
@@ -1403,7 +1544,7 @@ export default function Dashboard() {
                         <td>{r.proxy_name}</td>
                         <td>{getPlatformDisplayName(r.platform_name)}</td>
                         <td className="wall-num" style={{ color: ok ? status.ok : status.err }}>
-                          {r.status_code || 'ERR'}
+                          {r.status_code || t(locale, 'errShort')}
                         </td>
                         <td className="wall-num">{r.token_input != null ? formatTokenCount(r.token_input) : '—'}</td>
                         <td className="wall-num">{r.fresh_input_tokens != null ? formatTokenCount(r.fresh_input_tokens) : '—'}</td>
@@ -1414,6 +1555,7 @@ export default function Dashboard() {
                         >
                           {r.cache_read_tokens != null && r.cache_read_tokens > 0 ? formatTokenCount(r.cache_read_tokens) : '—'}
                         </td>
+                        <td className="wall-num">{r.cost == null ? '—' : formatCost(r.cost)}</td>
                         <td className="wall-num">{formatDurationMs(r.latency_ms)}</td>
                         <td className="wall-num">{r.ttft_ms != null ? formatDurationMs(r.ttft_ms) : '—'}</td>
                         <td className="wall-num">{r.output_speed_tps != null ? r.output_speed_tps.toFixed(1) : '—'}</td>
@@ -1433,6 +1575,13 @@ export default function Dashboard() {
                 onChange={setLogsPage}
                 boundaries={1}
                 siblings={1}
+                getControlProps={(part) => {
+                  const key = part === 'first' ? 'firstPage'
+                    : part === 'previous' ? 'prevPage'
+                    : part === 'next' ? 'nextPage'
+                    : part === 'last' ? 'lastPage' : null
+                  return key ? { 'aria-label': t(locale, key) } : {}
+                }}
               />
             </div>
           </>

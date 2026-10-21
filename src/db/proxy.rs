@@ -49,6 +49,13 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateProxyRequest) -> AppResult<Pr
     Ok(proxy)
 }
 
+/// proxy_id 不再有外键约束，绑定关系由接口自己校验
+pub fn exists(pool: &DbPool, id: &str) -> AppResult<bool> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM proxies WHERE id=?1", [id], |row| row.get(0))?;
+    Ok(count > 0)
+}
+
 pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute("DELETE FROM proxies WHERE id=?1", [id])?;

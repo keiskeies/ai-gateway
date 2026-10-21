@@ -4,10 +4,10 @@ use tokio::sync::mpsc;
 
 use crate::db::DbPool;
 use crate::error::AppError;
-use crate::models::api_key::ApiKey;
+use crate::models::api_key::StoredApiKey;
 use crate::models::platform::Platform;
 use crate::models::route::{Backend, LBStrategy, RetryPolicy};
-use crate::models::stats::RequestStat;
+use crate::models::stats::{RequestAttempt, RequestStat};
 
 /// 已解析的后端：包含完整的 platform 信息，请求时零 DB 查询
 #[derive(Debug, Clone)]
@@ -44,8 +44,8 @@ pub struct RouteCache {
 struct RouteCacheInner {
     /// proxy name → ResolvedRoute
     entries: DashMap<String, CacheEntry>,
-    /// API key 缓存：key_string → ApiKey（零 DB 查询验证）
-    api_keys: DashMap<String, ApiKey>,
+    /// API key 缓存：sha256(密钥明文) → 行（零 DB 查询验证，库里也没有明文可对）
+    api_keys: DashMap<String, StoredApiKey>,
     /// DB 连接池（仅用于刷新缓存）
     db: DbPool,
 }
@@ -136,7 +136,7 @@ impl RouteCache {
             Ok(keys) => {
                 self.inner.api_keys.clear();
                 for key in keys {
-                    self.inner.api_keys.insert(key.key.clone(), key);
+                    self.inner.api_keys.insert(key.key_hash.clone(), key);
                 }
                 tracing::info!("API key 缓存已刷新，共 {} 个", self.inner.api_keys.len());
             }
@@ -146,40 +146,69 @@ impl RouteCache {
         }
     }
 
+    /// 是否配置了任何 API key（未配置时兼容旧行为：允许访问）
+    pub fn has_api_keys(&self) -> bool {
+        !self.inner.api_keys.is_empty()
+    }
+
+    /// 返回可用的 API key：启用且未到期。禁用、过期或不存在时返回 None（纯内存查询）。
+    /// 入参仍是客户端送来的明文——它只用来算摘要，不会被存下或写出。
+    /// 过期判定读的是缓存里的时间戳与当前时钟，所以到点即失效，不需要等一次缓存刷新。
+    pub fn find_enabled_api_key(&self, key: &str) -> Option<StoredApiKey> {
+        self.find_api_key(key)
+            .filter(|api_key| api_key.enabled && !api_key.is_expired(chrono::Utc::now()))
+    }
+
+    /// 按明文找到那把 Key（不管启停与到期），用于把"不存在/已禁用"和"已过期"分开报。
+    pub fn find_api_key(&self, key: &str) -> Option<StoredApiKey> {
+        self.inner.api_keys.get(&crate::db::api_key::hash_key(key))
+            .map(|api_key| api_key.clone())
+    }
+
     /// 检查 API key 是否有效（纯内存查询，零 DB 交互）
     pub fn validate_api_key(&self, key: &str) -> Result<bool, AppError> {
         // 如果没有任何 API key 配置，允许所有访问
-        if self.inner.api_keys.is_empty() {
+        if !self.has_api_keys() {
             return Ok(true);
         }
-        Ok(self.inner.api_keys.contains_key(key))
+        Ok(self.find_enabled_api_key(key).is_some())
     }
 
     /// 记录 API key 最后使用时间（异步发送，不阻塞请求）
-    pub fn touch_api_key(&self, key: &str) {
-        if let Some(ak) = self.inner.api_keys.get(key) {
-            let db = self.inner.db.clone();
-            let id = ak.id.clone();
-            tokio::spawn(async move {
-                let _ = crate::db::api_key::update_last_used(&db, &id);
-            });
-        }
+    /// 调用方手上已经有这一行了，所以这里只要 id，不再查一次表也不重算摘要。
+    pub fn touch_api_key(&self, api_key_id: &str) {
+        let db = self.inner.db.clone();
+        let id = api_key_id.to_string();
+        tokio::spawn(async move {
+            let _ = crate::db::api_key::update_last_used(&db, &id);
+        });
     }
 }
 
-/// 后台统计写入器：通过 channel 接收统计数据，批量异步写入 DB
+/// 后台统计写入器：通过 channel 接收统计数据，批量异步写入 DB。
+/// 请求统计与重试轨迹共用同一个后台任务（同一条热路径、同样只写本地 SQLite），
+/// 两条通道都非阻塞：队列再长也不反压请求，宁可丢轨迹。
 #[derive(Clone)]
 pub struct StatsWriter {
     tx: mpsc::UnboundedSender<RequestStat>,
+    attempt_tx: mpsc::UnboundedSender<RequestAttempt>,
+    body_tx: mpsc::UnboundedSender<crate::models::stats::RequestBody>,
 }
 
 impl StatsWriter {
-    /// 启动后台写入任务，返回 StatsWriter 发送端
-    pub fn start(db: DbPool) -> Self {
+    /// 启动后台写入任务，返回 StatsWriter 发送端。
+    /// `hub` 只被后台任务用来在落库后通知控制台：统计是攒一批 500ms 才写的，
+    /// 不广播就没人知道该刷新了；发送端本身不需要事件总线。
+    pub fn start(db: DbPool, hub: crate::events::EventHub) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<RequestStat>();
+        let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel::<RequestAttempt>();
+        let (body_tx, mut body_rx) = mpsc::unbounded_channel::<crate::models::stats::RequestBody>();
+        let events = hub;
 
         tokio::spawn(async move {
             let mut buffer = Vec::with_capacity(64);
+            let mut attempt_buffer = Vec::with_capacity(64);
+            let mut body_buffer = Vec::with_capacity(64);
             loop {
                 // 收集一批数据，最多等 500ms
                 let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -195,6 +224,46 @@ impl StatsWriter {
                                     if !buffer.is_empty() {
                                         Self::flush(&db, &mut buffer);
                                     }
+                                    if !attempt_buffer.is_empty() {
+                                        Self::flush_attempts(&db, &mut attempt_buffer);
+                                    }
+                                    if !body_buffer.is_empty() {
+                                        Self::flush_bodies(&db, &mut body_buffer);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        attempt = attempt_rx.recv() => {
+                            match attempt {
+                                Some(a) => attempt_buffer.push(a),
+                                None => {
+                                    if !attempt_buffer.is_empty() {
+                                        Self::flush_attempts(&db, &mut attempt_buffer);
+                                    }
+                                    if !buffer.is_empty() {
+                                        Self::flush(&db, &mut buffer);
+                                    }
+                                    if !body_buffer.is_empty() {
+                                        Self::flush_bodies(&db, &mut body_buffer);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        body = body_rx.recv() => {
+                            match body {
+                                Some(b) => body_buffer.push(b),
+                                None => {
+                                    if !body_buffer.is_empty() {
+                                        Self::flush_bodies(&db, &mut body_buffer);
+                                    }
+                                    if !buffer.is_empty() {
+                                        Self::flush(&db, &mut buffer);
+                                    }
+                                    if !attempt_buffer.is_empty() {
+                                        Self::flush_attempts(&db, &mut attempt_buffer);
+                                    }
                                     return;
                                 }
                             }
@@ -205,13 +274,29 @@ impl StatsWriter {
                     }
                 }
 
+                let mut written = 0usize;
+                let mut failed = 0usize;
                 if !buffer.is_empty() {
+                    failed = buffer
+                        .iter()
+                        .filter(|s| s.status_code >= 400 || s.error_type.is_some())
+                        .count();
+                    written = buffer.len();
                     Self::flush(&db, &mut buffer);
+                }
+                if !attempt_buffer.is_empty() {
+                    Self::flush_attempts(&db, &mut attempt_buffer);
+                }
+                if !body_buffer.is_empty() {
+                    Self::flush_bodies(&db, &mut body_buffer);
+                }
+                if written > 0 {
+                    events.publish(crate::events::ConsoleEvent::Requests { count: written, failures: failed });
                 }
             }
         });
 
-        Self { tx }
+        Self { tx, attempt_tx, body_tx }
     }
 
     fn flush(db: &DbPool, buffer: &mut Vec<RequestStat>) {
@@ -222,9 +307,36 @@ impl StatsWriter {
         }
     }
 
+    fn flush_attempts(db: &DbPool, buffer: &mut Vec<RequestAttempt>) {
+        for attempt in buffer.drain(..) {
+            if let Err(e) = crate::db::stats::record_attempt(db, &attempt) {
+                tracing::warn!("写入重试轨迹失败: {}", e);
+            }
+        }
+    }
+
     /// 非阻塞发送统计数据
     pub fn record(&self, stat: RequestStat) {
         // channel 满了就丢弃，不阻塞请求
         let _ = self.tx.send(stat);
+    }
+
+    /// 非阻塞发送一次尝试的轨迹；写失败只影响"能不能回溯重试过程"，不影响请求本身
+    pub fn record_attempt(&self, attempt: RequestAttempt) {
+        let _ = self.attempt_tx.send(attempt);
+    }
+
+    fn flush_bodies(db: &DbPool, buffer: &mut Vec<crate::models::stats::RequestBody>) {
+        for body in buffer.drain(..) {
+            if let Err(e) = crate::db::stats::record_body(db, &body) {
+                tracing::warn!("写入请求正文失败: {}", e);
+            }
+        }
+    }
+
+    /// 非阻塞发送请求正文。只有采集开着时才会被调用（见 proxy::handler::capture_body）；
+    /// 与统计一样绝不阻塞请求，也绝不在请求线程上写 SQL。
+    pub fn record_body(&self, body: crate::models::stats::RequestBody) {
+        let _ = self.body_tx.send(body);
     }
 }

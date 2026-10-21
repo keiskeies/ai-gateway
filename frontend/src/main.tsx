@@ -1,18 +1,30 @@
 import ReactDOM from 'react-dom/client'
 import {
-  MantineProvider, createTheme, Button, ActionIcon, Modal, Table, TextInput,
+  MantineProvider, createTheme, defaultVariantColorsResolver, Button, ActionIcon, Modal, Table, TextInput,
   Select, Textarea, NumberInput, Badge, Card, Paper, Tabs, SegmentedControl,
   Menu, Tooltip, Switch, Checkbox, PasswordInput, Notification, Loader, Pagination, Alert,
 } from '@mantine/core'
 import { Notifications } from '@mantine/notifications'
+import { QueryClientProvider } from '@tanstack/react-query'
 import { HashRouter } from 'react-router-dom'
 import { AppProvider, useAppContext } from './ThemeContext'
 import App from './App'
+import { AppStateProvider } from './app/AppState'
+import { queryClient } from './app/queryClient'
 import { initConfig } from './api'
+import '@fontsource/archivo/latin-500.css'
+import '@fontsource/archivo/latin-600.css'
+import '@fontsource/archivo/latin-700.css'
+import '@fontsource/ibm-plex-sans/latin-400.css'
+import '@fontsource/ibm-plex-sans/latin-500.css'
+import '@fontsource/ibm-plex-sans/latin-600.css'
+import '@fontsource/ibm-plex-mono/latin-400.css'
+import '@fontsource/ibm-plex-mono/latin-500.css'
 import '@mantine/core/styles.css'
 import '@mantine/notifications/styles.css'
 import '@mantine/charts/styles.css'
 import './main.css'
+import './app/console.css'
 
 initConfig()
 
@@ -25,12 +37,24 @@ document.body?.style.removeProperty('background')
    单一强调色 #5C9DFF；gray/dark 调色板整体染成蓝调，
    夜间模式下所有 Mantine 组件（含未覆盖的默认表面）不再透出中性灰。
    页面代码不散落视觉参数，统一由此处 + main.css token 控制。 */
+
+/* 填充面的 autoContrast 有个坑：Mantine 判定深浅时拿的是 light 方案的 brand[6]
+   （#2E63B8），可暗色方案真正铺的底是 brand[4]（#5C9DFF）——于是白字留在亮蓝底上，
+   实测只有 2.7:1。深浅由 CSS token 决定：暗色配深墨（6:1），浅色仍是白字（5.8:1）。 */
+const variantColorResolver = (input: Parameters<typeof defaultVariantColorsResolver>[0]) => {
+  const colors = defaultVariantColorsResolver(input)
+  const brand = !input.color || input.color === 'brand'
+  if (input.variant === 'filled' && brand) return { ...colors, color: 'var(--accent-ink)' }
+  return colors
+}
+
 const theme = createTheme({
   primaryColor: 'brand',
   primaryShade: { light: 6, dark: 4 },
   /* 填充按钮/徽标文字按底色亮度自动取深墨或纯白：
      夜间模式下 #5C9DFF 亮蓝底自动配深字，避免白字发虚 */
   autoContrast: true,
+  variantColorResolver,
   colors: {
     brand: [
       '#E7F0FF', '#CFE1FF', '#A8C8FF', '#7FACFF', '#5C9DFF',
@@ -61,9 +85,9 @@ const theme = createTheme({
   },
   defaultRadius: 'md',
   cursorType: 'pointer',
-  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif",
-  fontFamilyMonospace: "ui-monospace, 'Cascadia Mono', Consolas, monospace",
-  headings: { fontWeight: '600' },
+  fontFamily: "'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif",
+  fontFamilyMonospace: "'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace",
+  headings: { fontFamily: "'Archivo', 'IBM Plex Sans', -apple-system, sans-serif", fontWeight: '600' },
   fontSizes: { xs: '11px', sm: '12px', md: '13px', lg: '15px', xl: '18px' },
   components: {
     Button: Button.extend({ defaultProps: { size: 'sm', radius: 'md' } }),
@@ -105,9 +129,13 @@ function ThemedApp() {
   return (
     <MantineProvider theme={theme} forceColorScheme={isDark ? 'dark' : 'light'}>
       <Notifications position="top-right" />
-      <HashRouter>
-        <App />
-      </HashRouter>
+      <QueryClientProvider client={queryClient}>
+        <AppStateProvider>
+          <HashRouter>
+            <App />
+          </HashRouter>
+        </AppStateProvider>
+      </QueryClientProvider>
     </MantineProvider>
   )
 }

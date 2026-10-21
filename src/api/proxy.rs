@@ -121,12 +121,16 @@ pub async fn delete(
 ) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
-    web::block(move || {
+    let disabled_keys = web::block(move || {
         // 级联清理该 proxy 的历史请求统计（避免悬挂统计行干扰后续统计口径）
         let _ = crate::db::stats::delete_by_proxy(&db, &id);
-        crate::db::proxy::delete(&db, &id)
+        // 绑定该模型的 Key 在模型消失后再也匹配不到路由，停用它让 /keys 的状态不再骗人
+        let disabled = crate::db::api_key::disable_for_proxy(&db, &id)?;
+        crate::db::proxy::delete(&db, &id)?;
+        Ok::<usize, AppError>(disabled)
     })
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
     cache.refresh();
-    Ok(HttpResponse::NoContent().finish())
+    cache.refresh_api_keys();
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "disabled_keys": disabled_keys })))
 }

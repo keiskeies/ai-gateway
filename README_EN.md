@@ -175,6 +175,29 @@ A complete performance profile for every model, across every time granularity (h
 
 ---
 
+## 🔐 Authentication
+
+The dashboard (platforms, virtual models, API keys, settings, overview and stats) requires signing in:
+
+- **First launch**: the dashboard opens the "Create admin account" screen. For safety, initial setup is only accepted from localhost (127.0.0.1) so a LAN peer cannot claim the admin account first.
+- **Sessions**: stored in an HttpOnly cookie, valid for 7 days. Sign out from the user menu in the top-right corner.
+- **Change password**: Settings → Account security. All other sessions are revoked immediately.
+- **Forgot password**: stop the app, delete the rows in the `users` and `sessions` tables, then restart to run setup again.
+
+Access control:
+
+| Path | Authentication |
+|---|---|
+| `/v1/chat/completions`, `/v1/completions`, `/v1/messages` | Gateway API key (`Authorization: Bearer ...` or `x-api-key`) |
+| `/v1/models` | Public |
+| `/health` | Public |
+| `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Public |
+| All other `/api/*` (platforms / models / virtual models / API keys / settings / stats) | Admin session |
+
+> AI requests are allowed while no API key exists (legacy behavior); once a key is created it must be supplied. Credentials live in SQLite (Argon2 hashes); `admin_token` in `config.toml` is a legacy reserved field.
+
+---
+
 ## 🚀 Quick Start
 
 ### Option 1: Download Desktop App (Recommended)
@@ -199,6 +222,7 @@ cargo tauri dev
 ### Three Steps to Get Going
 
 ```
+0️⃣ Create the admin account → Sign in
 1️⃣ Add Platform → Pick preset + Enter API Key → Save
 2️⃣ Create Virtual Model → Pick strategy + Add backends → Start
 3️⃣ Change base_url → Point to http://localhost:1994/v1 → Done

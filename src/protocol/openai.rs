@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use super::content;
+use super::reasoning::{self, MaxTokensField, ReasoningTarget};
 use super::types::*;
+use crate::models::proxy::Protocol;
+use crate::models::route::{ReasoningEcho, ReasoningStyle, UnknownParams};
 
 // ========== OpenAI 格式定义 ==========
 
@@ -34,6 +37,12 @@ pub struct OpenAIMessage {
     pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<serde_json::Value>,
+    /// OpenRouter 等上游把思考内容放在 reasoning 字段
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
+    /// OpenRouter 结构化思考明细
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_details: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -163,6 +172,7 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                     content: msg.content.clone(),
                     reasoning_content: None,
                     tool_calls: None, tool_call_id: None, name: None,
+                    reasoning_blocks: Vec::new(), raw_blocks: Vec::new(),
                 });
             }
             "user" => messages.push(UnifiedMessage {
@@ -170,22 +180,25 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
                 content: msg.content.clone(),
                 reasoning_content: None,
                 tool_calls: None, tool_call_id: None, name: None,
+                reasoning_blocks: Vec::new(), raw_blocks: Vec::new(),
             }),
             "assistant" => messages.push(UnifiedMessage {
                 role: Role::Assistant,
                 content: msg.content.clone(),
-                reasoning_content: msg.reasoning_content.as_ref().and_then(|c| c.as_str()).map(|s| s.to_string()),
+                reasoning_content: reasoning_text(&msg),
                 tool_calls: msg.tool_calls.map(|tcs| tcs.into_iter().map(|tc| UnifiedToolCall {
                     id: tc.id, call_type: tc.call_type,
                     function: UnifiedFunctionCall { name: tc.function.name, arguments: tc.function.arguments },
                 }).collect()),
                 tool_call_id: None, name: None,
+                reasoning_blocks: Vec::new(), raw_blocks: Vec::new(),
             }),
             "tool" => messages.push(UnifiedMessage {
                 role: Role::Tool,
                 content: msg.content.clone(),
                 reasoning_content: None,
                 tool_calls: None, tool_call_id: msg.tool_call_id, name: msg.name,
+                reasoning_blocks: Vec::new(), raw_blocks: Vec::new(),
             }),
             _ => {}
         }
@@ -201,21 +214,70 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
         extra.remove(*key);
     }
 
+    // max_completion_tokens 是 max_tokens 的别名；记录原字段名，OpenAI 目标原样输出
+    let mut max_tokens = req.max_tokens;
+    let mut max_tokens_field = MaxTokensField::MaxTokens;
+    if let Some(value) = extra.remove("max_completion_tokens") {
+        if let Some(n) = value.as_u64() {
+            max_tokens = Some(n.min(u32::MAX as u64) as u32);
+            max_tokens_field = MaxTokensField::MaxCompletionTokens;
+        }
+    }
+
+    let reasoning = reasoning::take_openai_reasoning(&mut extra);
+
     Ok(UnifiedRequest {
         model: req.model, messages, system,
-        max_tokens: req.max_tokens, temperature: req.temperature, top_p: req.top_p,
+        max_tokens, temperature: req.temperature, top_p: req.top_p,
         stream: req.stream, stop,
         tools: req.tools.map(|tools| tools.into_iter().map(|t| UnifiedTool {
             id: format!("tool_{}", t.function.name), tool_type: t.tool_type,
             function: UnifiedFunction { name: t.function.name, description: t.function.description, parameters: t.function.parameters },
         }).collect()),
         tool_choice: req.tool_choice.and_then(|v| serde_json::from_value(v).ok()),
+        source_protocol: Protocol::OpenAI,
+        reasoning,
+        max_tokens_field,
         extra,
     })
 }
 
+fn reasoning_text(msg: &OpenAIMessage) -> Option<String> {
+    if let Some(text) = msg.reasoning_content.as_ref().and_then(value_text) {
+        return Some(text);
+    }
+    if let Some(text) = msg.reasoning.as_ref().and_then(value_text) {
+        return Some(text);
+    }
+    msg.reasoning_details.as_ref().and_then(value_text)
+}
+
+fn value_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Array(items) => {
+            let mut out = String::new();
+            for item in items {
+                if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                    out.push_str(text);
+                } else if let Some(text) = item.get("summary").and_then(|v| v.as_str()) {
+                    out.push_str(text);
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+        _ => None,
+    }
+}
+
 /// 统一格式 → OpenAI 请求
-pub fn to_request(unified: &UnifiedRequest, target_model: &str, unknown: crate::models::route::UnknownParams) -> serde_json::Value {
+pub fn to_request(
+    unified: &UnifiedRequest,
+    target_model: &str,
+    unknown: UnknownParams,
+    target: &ReasoningTarget,
+) -> serde_json::Value {
+    let keep_reasoning = matches!(target.echo, ReasoningEcho::Keep);
     let messages: Vec<OpenAIMessage> = unified.messages.iter().map(|m| {
         let role = match m.role {
             Role::System => "system",
@@ -226,7 +288,11 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str, unknown: crate::
         OpenAIMessage {
             role: role.to_string(),
             content: forward_content(m),
-            reasoning_content: None,
+            reasoning_content: m.reasoning_content.as_ref()
+                .filter(|_| keep_reasoning)
+                .map(|s| serde_json::Value::String(s.clone())),
+            reasoning: None,
+            reasoning_details: None,
             tool_calls: m.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| OpenAIToolCall {
                 id: tc.id.clone(), call_type: tc.call_type.clone(),
                 function: OpenAIFunctionCall { name: tc.function.name.clone(), arguments: tc.function.arguments.clone() },
@@ -239,7 +305,13 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str, unknown: crate::
     let mut req = serde_json::Map::new();
     req.insert("model".into(), serde_json::Value::String(target_model.to_string()));
     req.insert("messages".into(), serde_json::to_value(&messages).unwrap());
-    if let Some(v) = unified.max_tokens { req.insert("max_tokens".into(), serde_json::to_value(v).unwrap()); }
+    if let Some(v) = unified.max_tokens {
+        let field = match unified.max_tokens_field {
+            MaxTokensField::MaxCompletionTokens => "max_completion_tokens",
+            MaxTokensField::MaxTokens => "max_tokens",
+        };
+        req.insert(field.into(), serde_json::to_value(v).unwrap());
+    }
     if let Some(v) = unified.temperature { req.insert("temperature".into(), serde_json::to_value(v).unwrap()); }
     if let Some(v) = unified.top_p { req.insert("top_p".into(), serde_json::to_value(v).unwrap()); }
     if let Some(v) = unified.stream { req.insert("stream".into(), serde_json::to_value(v).unwrap()); }
@@ -253,15 +325,110 @@ pub fn to_request(unified: &UnifiedRequest, target_model: &str, unknown: crate::
     if let Some(tc) = &unified.tool_choice {
         req.insert("tool_choice".into(), serde_json::to_value(tc).unwrap());
     }
-    // 合并 extra 中的未知字段（已知字段优先，不覆盖）；Drop 策略下丢弃（跨协议白名单模式）
-    if unknown != crate::models::route::UnknownParams::Drop {
-        for (k, v) in &unified.extra {
-            if !req.contains_key(k) {
-                req.insert(k.clone(), v.clone());
-            }
+
+    apply_reasoning(&mut req, unified, target);
+
+    // 合并 extra 中的未知字段（已知字段优先，不覆盖）；按源/目标协议决定透传范围
+    for (k, v) in &unified.extra {
+        if !req.contains_key(k) && reasoning::should_forward_extra(
+            &unknown, unified.source_protocol, Protocol::OpenAI, k,
+        ) {
+            req.insert(k.clone(), v.clone());
         }
     }
     serde_json::Value::Object(req)
+}
+
+/// 按 backend 的思考风格写入出站参数；客户端未传思考配置时不主动开启。
+fn apply_reasoning(
+    req: &mut serde_json::Map<String, serde_json::Value>,
+    unified: &UnifiedRequest,
+    target: &ReasoningTarget,
+) {
+    if target.style == ReasoningStyle::Disabled {
+        return;
+    }
+    let Some(cfg) = unified.reasoning.as_ref() else { return };
+    let enabled = cfg.is_enabled();
+    let budget = cfg.effective_budget_tokens();
+    let effort = cfg.effective_effort();
+
+    match target.style {
+        ReasoningStyle::Auto | ReasoningStyle::Disabled => {}
+        ReasoningStyle::OpenAiEffort => {
+            if !enabled {
+                if cfg.enabled == Some(false) {
+                    req.insert("reasoning_effort".into(), serde_json::json!("none"));
+                }
+                return;
+            }
+            if let Some(raw) = cfg.raw.get("reasoning_effort") {
+                req.insert("reasoning_effort".into(), raw.clone());
+            }
+            let value = effort.unwrap_or(reasoning::ReasoningEffort::Medium);
+            req.insert("reasoning_effort".into(), serde_json::json!(value.as_str()));
+        }
+        ReasoningStyle::OpenRouter => {
+            let mut obj = cfg.raw.get("reasoning")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            if !enabled {
+                obj.insert("enabled".into(), serde_json::json!(false));
+            } else {
+                if let Some(effort) = &effort {
+                    obj.insert("effort".into(), serde_json::json!(effort.as_str()));
+                }
+                if let Some(budget) = budget {
+                    obj.insert("max_tokens".into(), serde_json::json!(budget));
+                }
+                if cfg.include_thoughts == Some(false) {
+                    obj.insert("exclude".into(), serde_json::json!(true));
+                }
+            }
+            req.insert("reasoning".into(), serde_json::Value::Object(obj));
+        }
+        ReasoningStyle::Qwen => {
+            if enabled {
+                req.insert("enable_thinking".into(), serde_json::json!(true));
+                if let Some(budget) = budget {
+                    req.insert("thinking_budget".into(), serde_json::json!(budget));
+                }
+            } else if cfg.enabled == Some(false) {
+                req.insert("enable_thinking".into(), serde_json::json!(false));
+            }
+        }
+        ReasoningStyle::Glm => {
+            // GLM 只认 thinking.type，不认 Anthropic 的 budget_tokens
+            if enabled {
+                req.insert("thinking".into(), serde_json::json!({"type": "enabled"}));
+            } else if cfg.enabled == Some(false) {
+                req.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+            }
+        }
+        ReasoningStyle::AnthropicThinking => {
+            if enabled {
+                let mut obj = serde_json::Map::new();
+                obj.insert("type".into(), serde_json::json!("enabled"));
+                if let Some(budget) = budget {
+                    obj.insert("budget_tokens".into(), serde_json::json!(budget));
+                }
+                req.insert("thinking".into(), serde_json::Value::Object(obj));
+            } else if cfg.enabled == Some(false) {
+                req.insert("thinking".into(), serde_json::json!({"type": "disabled"}));
+            }
+        }
+        ReasoningStyle::VllmQwen => {
+            if enabled || cfg.enabled == Some(false) {
+                let mut kwargs = req.get("chat_template_kwargs")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                kwargs.insert("enable_thinking".into(), serde_json::json!(enabled));
+                req.insert("chat_template_kwargs".into(), serde_json::Value::Object(kwargs));
+            }
+        }
+    }
 }
 
 /// 转发给上游时的 content 取值。
@@ -292,6 +459,7 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
     Ok(UnifiedResponse {
         id: resp.id, model: resp.model,
         choices: resp.choices.into_iter().map(|c| {
+            let reasoning = reasoning_text(&c.message);
             UnifiedChoice {
                 index: c.index,
                 message: Some(UnifiedMessage {
@@ -300,12 +468,13 @@ pub fn parse_response(raw: serde_json::Value) -> Result<UnifiedResponse, String>
                         "system" => Role::System, _ => Role::Assistant,
                     },
                     content: extract_message_content(&c.message.content, &c.message.reasoning_content),
-                    reasoning_content: c.message.reasoning_content.as_ref().and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    reasoning_content: reasoning,
                     tool_calls: c.message.tool_calls.map(|tcs| tcs.into_iter().map(|tc| UnifiedToolCall {
                         id: tc.id, call_type: tc.call_type,
                         function: UnifiedFunctionCall { name: tc.function.name, arguments: tc.function.arguments },
                     }).collect()),
                     tool_call_id: None, name: None,
+                    reasoning_blocks: Vec::new(), raw_blocks: Vec::new(),
                 }),
                 finish_reason: c.finish_reason,
             }
@@ -377,12 +546,136 @@ pub fn to_response(unified: &UnifiedResponse) -> serde_json::Value {
     })
 }
 
-/// 生成虚拟模型的 OpenAI models 列表
-pub fn models_list(virtual_models: &[String]) -> serde_json::Value {
-    serde_json::json!({
-        "object": "list",
-        "data": virtual_models.iter().map(|m| serde_json::json!({
-            "id": m, "object": "model", "created": 0, "owned_by": "ai-gateway"
-        })).collect::<Vec<_>>()
-    })
+/// 生成虚拟模型的 OpenAI models 列表（含非标准能力扩展，能读的客户端会受益）
+pub fn models_list(models: &[ModelInfo]) -> serde_json::Value {
+    let data: Vec<serde_json::Value> = models.iter().map(|m| {
+        let reasoning = m.capabilities.iter().any(|c| c.eq_ignore_ascii_case("Reasoning"));
+        let tool = m.capabilities.iter().any(|c| c.eq_ignore_ascii_case("Tool"));
+        let mut item = serde_json::json!({
+            "id": m.name, "object": "model", "created": 0, "owned_by": "ai-gateway"
+        });
+        if !m.capabilities.is_empty() {
+            item["capabilities"] = serde_json::json!(m.capabilities);
+        }
+        if reasoning {
+            item["supported_parameters"] = serde_json::json!([
+                "tools", "tool_choice", "reasoning_effort", "reasoning", "thinking", "max_completion_tokens"
+            ]);
+            item["reasoning"] = serde_json::json!({
+                "efforts": ["minimal", "low", "medium", "high", "xhigh"],
+                "budget_tokens": true
+            });
+        } else if tool {
+            item["supported_parameters"] = serde_json::json!(["tools", "tool_choice"]);
+        }
+        item
+    }).collect();
+    serde_json::json!({ "object": "list", "data": data })
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    pub name: String,
+    pub capabilities: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::route::ReasoningEcho;
+
+    fn target(style: ReasoningStyle, echo: ReasoningEcho) -> ReasoningTarget {
+        ReasoningTarget::new(style, "b1", "m1", echo)
+    }
+
+    fn unified(raw: serde_json::Value) -> UnifiedRequest {
+        parse_request(raw).unwrap()
+    }
+
+    #[test]
+    fn vendor_styles_emit_expected_fields() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 32768, "reasoning_effort": "high"
+        });
+
+        let qwen = to_request(&unified(raw.clone()), "m", UnknownParams::Auto, &target(ReasoningStyle::Qwen, ReasoningEcho::Drop));
+        assert_eq!(qwen["enable_thinking"], true);
+        assert_eq!(qwen["thinking_budget"], 16384);
+
+        let glm = to_request(&unified(raw.clone()), "m", UnknownParams::Auto, &target(ReasoningStyle::Glm, ReasoningEcho::Drop));
+        assert_eq!(glm["thinking"]["type"], "enabled");
+        assert!(glm["thinking"].get("budget_tokens").is_none());
+
+        let openrouter = to_request(&unified(raw.clone()), "m", UnknownParams::Auto, &target(ReasoningStyle::OpenRouter, ReasoningEcho::Drop));
+        assert_eq!(openrouter["reasoning"]["effort"], "high");
+        assert_eq!(openrouter["reasoning"]["max_tokens"], 16384);
+
+        let vllm = to_request(&unified(raw), "m", UnknownParams::Auto, &target(ReasoningStyle::VllmQwen, ReasoningEcho::Drop));
+        assert_eq!(vllm["chat_template_kwargs"]["enable_thinking"], true);
+    }
+
+    #[test]
+    fn no_reasoning_input_emits_no_vendor_switch() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}]
+        });
+        let qwen = to_request(&unified(raw), "m", UnknownParams::Auto, &target(ReasoningStyle::Qwen, ReasoningEcho::Drop));
+        assert!(qwen.get("enable_thinking").is_none());
+    }
+
+    #[test]
+    fn explicit_disable_emits_false_for_qwen() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "none"
+        });
+        let qwen = to_request(&unified(raw), "m", UnknownParams::Auto, &target(ReasoningStyle::Qwen, ReasoningEcho::Drop));
+        assert_eq!(qwen["enable_thinking"], false);
+    }
+
+    #[test]
+    fn max_completion_tokens_alias_is_preserved() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": 123
+        });
+        let req = unified(raw);
+        assert_eq!(req.max_tokens, Some(123));
+        let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert_eq!(body["max_completion_tokens"], 123);
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn models_list_advertises_reasoning() {
+        let models = vec![ModelInfo {
+            name: "virt".into(),
+            capabilities: vec!["Reasoning".into(), "Tool".into()],
+        }];
+        let v = models_list(&models);
+        assert_eq!(v["data"][0]["capabilities"][0], "Reasoning");
+        assert!(v["data"][0]["supported_parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "reasoning_effort"));
+        assert_eq!(v["data"][0]["reasoning"]["budget_tokens"], true);
+    }
+
+    #[test]
+    fn reasoning_echo_is_configurable() {
+        let raw = serde_json::json!({
+            "model": "virt",
+            "messages": [
+                {"role": "assistant", "content": "answer", "reasoning_content": "thought"},
+                {"role": "user", "content": "next"}
+            ]
+        });
+        let req = unified(raw);
+        let keep = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Keep));
+        assert_eq!(keep["messages"][0]["reasoning_content"], "thought");
+        let drop = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert!(drop["messages"][0].get("reasoning_content").is_none());
+    }
 }

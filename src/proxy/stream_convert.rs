@@ -8,11 +8,17 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use crate::protocol::reasoning::synthetic_signature;
+use crate::proxy::reasoning_cache;
+
 pub struct StreamConverter {
     /// true = 客户端是 Anthropic 协议（/v1/messages），输出 Anthropic 事件流
     client_anthropic: bool,
     /// 对外展示的模型名（虚拟模型名）
     model: String,
+    /// 签名缓存归属：backend / 上游真实模型
+    backend_id: String,
+    upstream_model: String,
 
     // ---- SSE 输入缓冲：按空行分割事件，event:/data: 行聚合 ----
     line_buf: String,
@@ -29,6 +35,12 @@ pub struct StreamConverter {
     /// anthropic content block index → openai tool_calls index（已 start 的 tool_use 块）
     tool_block_to_idx: HashMap<i64, i64>,
     tool_counter: i64,
+    /// 已完成的 thinking 块，供签名缓存使用
+    completed_thinking_blocks: Vec<Value>,
+    /// 当前正在流式输出的 thinking 块：(block index, text, signature)
+    stream_thinking: Option<(i64, String, String)>,
+    /// 本次响应出现的 tool_use id
+    tool_ids: Vec<String>,
 
     // ---- 方向 2：OpenAI 上游 → Anthropic 客户端 ----
     msg_id: String,
@@ -55,10 +67,17 @@ pub struct StreamConverter {
 }
 
 impl StreamConverter {
-    pub fn new(client_anthropic: bool, model: &str) -> Self {
+    pub fn new(
+        client_anthropic: bool,
+        model: &str,
+        backend_id: &str,
+        upstream_model: &str,
+    ) -> Self {
         Self {
             client_anthropic,
             model: model.to_string(),
+            backend_id: backend_id.to_string(),
+            upstream_model: upstream_model.to_string(),
             line_buf: String::new(),
             cur_event: String::new(),
             cur_data: String::new(),
@@ -67,6 +86,9 @@ impl StreamConverter {
             started: false,
             tool_block_to_idx: HashMap::new(),
             tool_counter: 0,
+            completed_thinking_blocks: Vec::new(),
+            stream_thinking: None,
+            tool_ids: Vec::new(),
             msg_id: format!("msg_{}", uuid::Uuid::new_v4().simple()),
             next_block: 0,
             open_blocks: Vec::new(),
@@ -110,6 +132,8 @@ impl StreamConverter {
                 self.finish_anthropic();
             } else {
                 // OpenAI 客户端：补 finish + usage + [DONE]
+                self.flush_stream_thinking();
+                self.cache_tool_thinking();
                 let fr = self.stop_reason.unwrap_or("stop");
                 self.emit_openai_chunk(json!({}), Some(fr), true);
                 self.out.push_str("data: [DONE]\n\n");
@@ -117,6 +141,30 @@ impl StreamConverter {
             self.finished = true;
         }
         self.out.clone()
+    }
+
+    /// 上游未发 content_block_stop 时兜底收尾当前 thinking 块
+    fn flush_stream_thinking(&mut self) {
+        if let Some((_, text, signature)) = self.stream_thinking.take() {
+            let mut block = json!({"type": "thinking", "thinking": text});
+            if !signature.is_empty() {
+                block["signature"] = json!(signature);
+            }
+            self.completed_thinking_blocks.push(block);
+        }
+    }
+
+    /// 把本轮 thinking 块按 tool_use id 写入签名缓存
+    fn cache_tool_thinking(&self) {
+        if self.tool_ids.is_empty() || self.completed_thinking_blocks.is_empty() {
+            return;
+        }
+        reasoning_cache::store(
+            &self.tool_ids,
+            &self.completed_thinking_blocks,
+            &self.backend_id,
+            &self.upstream_model,
+        );
     }
 
     /// 上游流出错：按客户端协议发错误帧并正常收尾（SSE 已开始，无法改 HTTP 状态码）
@@ -207,22 +255,34 @@ impl StreamConverter {
             "content_block_start" => {
                 let index = v.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
                 let block = v.get("content_block").cloned().unwrap_or(json!({}));
-                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                    let id = block.get("id").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let name = block.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
-                    let tc_index = self.tool_counter;
-                    self.tool_counter += 1;
-                    self.tool_block_to_idx.insert(index, tc_index);
-                    self.emit_openai_chunk(json!({
-                        "tool_calls": [{
-                            "index": tc_index,
-                            "id": id,
-                            "type": "function",
-                            "function": {"name": name, "arguments": ""}
-                        }]
-                    }), None, false);
+                match block.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                    "tool_use" => {
+                        let id = block.get("id").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                        let name = block.get("name").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                        if !id.is_empty() {
+                            self.tool_ids.push(id.clone());
+                        }
+                        let tc_index = self.tool_counter;
+                        self.tool_counter += 1;
+                        self.tool_block_to_idx.insert(index, tc_index);
+                        self.emit_openai_chunk(json!({
+                            "tool_calls": [{
+                                "index": tc_index,
+                                "id": id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": ""}
+                            }]
+                        }), None, false);
+                    }
+                    "thinking" => {
+                        self.stream_thinking = Some((index, String::new(), String::new()));
+                    }
+                    "redacted_thinking" => {
+                        self.completed_thinking_blocks.push(block);
+                    }
+                    _ => {}
                 }
-                // text / thinking 块无需发 chunk，等 delta
+                // text 块无需发 chunk，等 delta
             }
             "content_block_delta" => {
                 let index = v.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
@@ -235,7 +295,21 @@ impl StreamConverter {
                     }
                     "thinking_delta" => {
                         if let Some(t) = delta.get("thinking").and_then(|t| t.as_str()) {
+                            if let Some((idx, text, _)) = self.stream_thinking.as_mut() {
+                                if *idx == index {
+                                    text.push_str(t);
+                                }
+                            }
                             self.emit_openai_chunk(json!({"reasoning_content": t}), None, false);
+                        }
+                    }
+                    "signature_delta" => {
+                        if let Some(sig) = delta.get("signature").and_then(|s| s.as_str()) {
+                            if let Some((idx, _, signature)) = self.stream_thinking.as_mut() {
+                                if *idx == index {
+                                    signature.push_str(sig);
+                                }
+                            }
                         }
                     }
                     "input_json_delta" => {
@@ -251,6 +325,20 @@ impl StreamConverter {
                         }
                     }
                     _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let index = v.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
+                if let Some((idx, text, signature)) = self.stream_thinking.take() {
+                    if idx == index {
+                        let mut block = json!({"type": "thinking", "thinking": text});
+                        if !signature.is_empty() {
+                            block["signature"] = json!(signature);
+                        }
+                        self.completed_thinking_blocks.push(block);
+                    } else {
+                        self.stream_thinking = Some((idx, text, signature));
+                    }
                 }
             }
             "message_delta" => {
@@ -269,6 +357,8 @@ impl StreamConverter {
                 }
             }
             "message_stop" => {
+                self.flush_stream_thinking();
+                self.cache_tool_thinking();
                 let fr = self.stop_reason.unwrap_or("stop");
                 self.emit_openai_chunk(json!({}), Some(fr), true);
                 self.out.push_str("data: [DONE]\n\n");
@@ -360,35 +450,34 @@ impl StreamConverter {
             }));
         }
 
-        // thinking（DeepSeek R 系风格）
-        if let Some(t) = delta.get("reasoning_content").and_then(|t| t.as_str()) {
-            if !t.is_empty() {
-                let idx = match self.thinking_block {
-                    Some(i) => i,
-                    None => {
-                        let i = self.next_block;
-                        self.next_block += 1;
-                        self.thinking_block = Some(i);
-                        self.open_blocks.push(i);
-                        self.emit_anthropic_event("content_block_start", &json!({
-                            "type": "content_block_start",
-                            "index": i,
-                            "content_block": {"type": "thinking", "thinking": ""}
-                        }));
-                        i
-                    }
-                };
-                self.emit_anthropic_event("content_block_delta", &json!({
-                    "type": "content_block_delta",
-                    "index": idx,
-                    "delta": {"type": "thinking_delta", "thinking": t}
-                }));
-            }
+        // thinking（DeepSeek reasoning_content / OpenRouter reasoning / reasoning_details）
+        if let Some(t) = delta_reasoning_text(&delta) {
+            let idx = match self.thinking_block {
+                Some(i) => i,
+                None => {
+                    let i = self.next_block;
+                    self.next_block += 1;
+                    self.thinking_block = Some(i);
+                    self.open_blocks.push(i);
+                    self.emit_anthropic_event("content_block_start", &json!({
+                        "type": "content_block_start",
+                        "index": i,
+                        "content_block": {"type": "thinking", "thinking": ""}
+                    }));
+                    i
+                }
+            };
+            self.emit_anthropic_event("content_block_delta", &json!({
+                "type": "content_block_delta",
+                "index": idx,
+                "delta": {"type": "thinking_delta", "thinking": t}
+            }));
         }
 
         // 文本
         if let Some(t) = delta.get("content").and_then(|t| t.as_str()) {
             if !t.is_empty() {
+                self.close_thinking_block();
                 let idx = match self.text_block {
                     Some(i) => i,
                     None => {
@@ -414,6 +503,9 @@ impl StreamConverter {
 
         // 工具调用（可多个并行 index）
         if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+            if !tcs.is_empty() {
+                self.close_thinking_block();
+            }
             for tc in tcs {
                 let tc_index = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
                 let block = match self.tool_idx_to_block.get(&tc_index) {
@@ -448,6 +540,7 @@ impl StreamConverter {
 
     /// Anthropic 收尾序列：stop 所有未关闭 block → message_delta（stop_reason + output_tokens）→ message_stop
     fn finish_anthropic(&mut self) {
+        self.close_thinking_block();
         let blocks = std::mem::take(&mut self.open_blocks);
         for i in blocks {
             self.emit_anthropic_event("content_block_stop", &json!({
@@ -455,7 +548,6 @@ impl StreamConverter {
             }));
         }
         self.text_block = None;
-        self.thinking_block = None;
         let sr = self.stop_reason.unwrap_or("end_turn");
         self.emit_anthropic_event("message_delta", &json!({
             "type": "message_delta",
@@ -463,6 +555,20 @@ impl StreamConverter {
             "usage": {"output_tokens": self.usage_out}
         }));
         self.emit_anthropic_event("message_stop", &json!({"type": "message_stop"}));
+    }
+
+    /// OpenAI 上游没有真实 Anthropic 签名：关闭 thinking 块前补一个内部合成签名
+    fn close_thinking_block(&mut self) {
+        let Some(idx) = self.thinking_block.take() else { return };
+        self.emit_anthropic_event("content_block_delta", &json!({
+            "type": "content_block_delta",
+            "index": idx,
+            "delta": {"type": "signature_delta", "signature": synthetic_signature()}
+        }));
+        self.emit_anthropic_event("content_block_stop", &json!({
+            "type": "content_block_stop", "index": idx
+        }));
+        self.open_blocks.retain(|b| *b != idx);
     }
 
     // ================= 输出辅助 =================
@@ -482,6 +588,32 @@ impl StreamConverter {
     }
 }
 
+/// 从 OpenAI 兼容流的 delta 中提取思考文本：
+/// DeepSeek 用 `reasoning_content`，OpenRouter 用 `reasoning` 或 `reasoning_details`。
+fn delta_reasoning_text(delta: &Value) -> Option<String> {
+    if let Some(t) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    if let Some(t) = delta.get("reasoning").and_then(|v| v.as_str()) {
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    let mut out = String::new();
+    if let Some(items) = delta.get("reasoning_details").and_then(|v| v.as_array()) {
+        for item in items {
+            if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                out.push_str(t);
+            } else if let Some(t) = item.get("summary").and_then(|v| v.as_str()) {
+                out.push_str(t);
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,7 +621,7 @@ mod tests {
     /// Anthropic 文本流 → OpenAI chunk 流：role chunk、文本增量、finish=stop、usage、[DONE]
     #[test]
     fn anthropic_text_to_openai() {
-        let mut c = StreamConverter::new(false, "my-model");
+        let mut c = StreamConverter::new(false, "my-model", "b1", "upstream-model");
         let mut out = String::new();
         let events = [
             r#"event: message_start
@@ -522,7 +654,7 @@ data: {"type":"message_stop"}"#,
     /// Anthropic tool_use 流 → OpenAI tool_calls chunk 流（name 先行、arguments 增量、finish=tool_calls）
     #[test]
     fn anthropic_tool_to_openai() {
-        let mut c = StreamConverter::new(false, "my-model");
+        let mut c = StreamConverter::new(false, "my-model", "b1", "upstream-model");
         let mut out = String::new();
         let events = [
             r#"data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":8,"output_tokens":1}}}"#,
@@ -545,7 +677,7 @@ data: {"type":"message_stop"}"#,
     /// OpenAI 文本流 → Anthropic 事件流：message_start、text block、message_delta、message_stop
     #[test]
     fn openai_text_to_anthropic() {
-        let mut c = StreamConverter::new(true, "my-model");
+        let mut c = StreamConverter::new(true, "my-model", "b1", "upstream-model");
         let mut out = String::new();
         let chunks = [
             r#"{"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
@@ -569,7 +701,7 @@ data: {"type":"message_stop"}"#,
     /// OpenAI tool_calls 流 → Anthropic tool_use 块（start 带 id/name，增量 arguments）
     #[test]
     fn openai_tool_to_anthropic() {
-        let mut c = StreamConverter::new(true, "my-model");
+        let mut c = StreamConverter::new(true, "my-model", "b1", "upstream-model");
         let mut out = String::new();
         let chunks = [
             r#"{"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_time","arguments":""}}]},"finish_reason":null}]}"#,
@@ -592,8 +724,8 @@ data: {"type":"message_stop"}"#,
     /// 上游半包：chunk 切在事件中间也能正确解析（跨 chunk 的事件不丢）
     #[test]
     fn split_chunk_boundaries() {
-        let mut a = StreamConverter::new(false, "m");
-        let mut b = StreamConverter::new(false, "m");
+        let mut a = StreamConverter::new(false, "m", "b1", "upstream-model");
+        let mut b = StreamConverter::new(false, "m", "b1", "upstream-model");
         let full = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4}}}\n\ndata: {\"type\":\"message_stop\"}\n\n";
         let whole = {
             let mut o = a.push_chunk(full.as_bytes());
@@ -638,10 +770,98 @@ data: {"type":"message_stop"}"#,
         assert_eq!(a.usage(), b.usage());
     }
 
+    /// Anthropic thinking 流 → OpenAI reasoning_content；签名不下发给客户端
+    #[test]
+    fn anthropic_thinking_to_openai() {
+        let mut c = StreamConverter::new(false, "my-model", "b1", "upstream-model");
+        let mut out = String::new();
+        let events = [
+            r#"data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3,"output_tokens":1}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_1"}}"#,
+            r#"data: {"type":"content_block_stop","index":0}"#,
+            r#"data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}"#,
+            r#"data: {"type":"message_stop"}"#,
+        ];
+        for e in events {
+            out.push_str(&c.push_chunk(format!("{e}\n\n").as_bytes()));
+        }
+        out.push_str(&c.finish());
+        assert!(out.contains("\"reasoning_content\":\"plan\""));
+        assert!(out.contains("\"content\":\"Hi\""));
+        assert!(!out.contains("sig_1"));
+    }
+
+    /// Anthropic thinking + tool_use 流 → OpenAI 客户端，结束时按 tool id 缓存签名
+    #[test]
+    fn anthropic_tool_stream_caches_signature() {
+        let tool_id = format!("toolu_{}", uuid::Uuid::new_v4().simple());
+        let mut c = StreamConverter::new(false, "my-model", "b1", "upstream-model");
+        let events = [
+            format!(r#"data: {{"type":"message_start","message":{{"usage":{{"input_tokens":3}}}}}}"#),
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#.to_string(),
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}"#.to_string(),
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_stream"}}"#.to_string(),
+            r#"data: {"type":"content_block_stop","index":0}"#.to_string(),
+            format!(r#"data: {{"type":"content_block_start","index":1,"content_block":{{"type":"tool_use","id":"{tool_id}","name":"f"}}}}"#),
+            r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#.to_string(),
+            r#"data: {"type":"content_block_stop","index":1}"#.to_string(),
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":6}}"#.to_string(),
+            r#"data: {"type":"message_stop"}"#.to_string(),
+        ];
+        for e in events {
+            c.push_chunk(format!("{e}\n\n").as_bytes());
+        }
+        c.finish();
+        let blocks = reasoning_cache::lookup(&tool_id, "b1", "upstream-model").expect("cached blocks");
+        assert_eq!(blocks[0]["signature"], "sig_stream");
+    }
+
+    /// OpenAI reasoning_content 流 → Anthropic thinking 块 + 合成签名
+    #[test]
+    fn openai_reasoning_to_anthropic() {
+        let mut c = StreamConverter::new(true, "my-model", "b1", "upstream-model");
+        let mut out = String::new();
+        let chunks = [
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"plan"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}"#,
+        ];
+        for ch in chunks {
+            out.push_str(&c.push_chunk(format!("data: {ch}\n\n").as_bytes()));
+        }
+        out.push_str(&c.push_chunk(b"data: [DONE]\n\n"));
+        out.push_str(&c.finish());
+        assert!(out.contains("\"type\":\"thinking\""));
+        assert!(out.contains("\"type\":\"thinking_delta\""));
+        assert!(out.contains("\"thinking\":\"plan\""));
+        assert!(out.contains("\"type\":\"signature_delta\""));
+        assert!(out.contains("\"signature\":\"gw_sig_"));
+        // thinking 块必须在文本块之前关闭
+        let text_start = out.find("\"type\":\"text\"");
+        let thinking_start = out.find("\"type\":\"thinking\"");
+        let sig_pos = out.find("signature_delta").unwrap();
+        let text_delta_pos = out.find("\"type\":\"text_delta\"").unwrap();
+        assert!(thinking_start.is_some() && text_start.is_some());
+        assert!(sig_pos < text_delta_pos);
+    }
+
+    /// OpenRouter 风格的 reasoning 字段同样识别为 thinking
+    #[test]
+    fn openai_reasoning_field_to_anthropic() {
+        let mut c = StreamConverter::new(true, "m", "b1", "upstream-model");
+        let out = c.push_chunk(b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\n");
+        assert!(out.contains("\"type\":\"thinking\""));
+        assert!(out.contains("\"thinking\":\"pondering\""));
+    }
+
     /// 上游出错：OpenAI 客户端收到错误帧 + [DONE]，不 panic
     #[test]
     fn upstream_error_frame() {
-        let mut c = StreamConverter::new(false, "m");
+        let mut c = StreamConverter::new(false, "m", "b1", "upstream-model");
         let out = c.emit_error("boom");
         assert!(out.contains("\"error\""));
         assert!(out.contains("data: [DONE]"));

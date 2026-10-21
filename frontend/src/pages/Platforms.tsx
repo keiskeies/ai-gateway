@@ -1,396 +1,366 @@
-import { useEffect, useState } from 'react'
-import {
-  Table,
-  Modal,
-  Select,
-  TextInput,
-  PasswordInput,
-  Button,
-  Group,
-  Stack,
-  ActionIcon,
-  Tooltip,
-} from '@mantine/core'
-import { useDisclosure } from '@mantine/hooks'
+import { useMemo, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { ActionIcon, Button, Group, Modal, Table, TextInput, Tooltip } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
-  IconPlus,
-  IconEdit,
-  IconTrash,
-  IconRefresh,
+  IconArrowRight,
   IconPlugConnected,
-  IconX,
+  IconPlus,
+  IconRefresh,
+  IconSearch,
+  IconTrash,
 } from '@tabler/icons-react'
-import { listPlatforms, createPlatform, updatePlatform, deletePlatform } from '../api'
+import { useNavigate } from 'react-router-dom'
+import {
+  deletePlatform,
+  getAllPlatformHealth,
+  getAllPlatformStats,
+  listAllRoutes,
+  listModels,
+  listPlatforms,
+} from '../api'
+import { rangeToParams, useAppState } from '../app/AppState'
+import { usePollInterval } from '../app/LiveContext'
 import { useAppContext } from '../ThemeContext'
-import { t, type Locale, type TranslationKey } from '../i18n'
-import { platformPresets, getPresetName } from '../presets'
+import { t } from '../i18n'
+import { PageHeader } from '../components/ui/PageHeader'
+import { EmptyState, ErrorState, PageSkeleton } from '../components/ui/States'
+import { StatusPill } from '../components/ui/StatusPill'
+import { formatDuration, formatLogTime, formatNumber, successRateTone } from '../lib/format'
+import { platformTypeLabel, probePlatformConfig, type PlatformTestResult } from '../lib/platform'
+import { ProviderCreateModal } from '../components/ProviderCreateModal'
+import { getPresetName, platformPresets } from '../presets'
+import type { PlatformDetail, PlatformHealthSummary, PlatformStats, RouteRow } from '../types/stats'
 
-const PLATFORM_TYPES = [
-  { value: 'OpenAI', labelKey: 'openaiType' as TranslationKey },
-  { value: 'Anthropic', labelKey: 'anthropicType' as TranslationKey },
-  { value: 'Ollama', labelKey: 'ollamaType' as TranslationKey },
-  { value: 'Azure', labelKey: 'azureType' as TranslationKey },
-  { value: 'Custom', labelKey: 'customType' as TranslationKey },
-]
-
-function getPlatformTypeLabel(value: string, locale: Locale): string {
-  const entry = PLATFORM_TYPES.find(pt => pt.value === value)
-  return entry ? t(locale, entry.labelKey) : value
+interface ModelRow {
+  id: string
+  platform_id: string
+  model_id: string
 }
 
-interface PlatformFormValues {
-  name: string
-  type: string
-  base_url: string
-  api_key: string
-  organization: string
-}
-
-const emptyForm: PlatformFormValues = {
-  name: '',
-  type: 'OpenAI',
-  base_url: '',
-  api_key: '',
-  organization: '',
+interface ProviderRow {
+  platform: PlatformDetail
+  modelCount: number
+  refModels: number
+  refBackends: number
+  stats: PlatformStats | null
+  health: PlatformHealthSummary | null
 }
 
 export default function Platforms() {
-  const [platforms, setPlatforms] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
-  const [modalOpen, { open: openModal, close: closeModal }] = useDisclosure(false)
-  const [editItem, setEditItem] = useState<any>(null)
-  const [formValues, setFormValues] = useState<PlatformFormValues>({ ...emptyForm })
-  const [presetValue, setPresetValue] = useState<string | null>(null)
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const { locale } = useAppContext()
+  const { range } = useAppState()
+  const pollInterval = usePollInterval()
+  const [search, setSearch] = useState('')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [testingId, setTestingId] = useState<string | null>(null)
+  // 行内测试的即时结果：后端已落健康历史，这里只用于刷新前的即时反馈
+  const [tests, setTests] = useState<Record<string, PlatformTestResult>>({})
+  const [deleteTarget, setDeleteTarget] = useState<ProviderRow | null>(null)
 
-  useEffect(() => { loadPlatforms() }, [])
+  const providersQuery = useQuery({
+    queryKey: ['platforms', range],
+    queryFn: async (): Promise<ProviderRow[]> => {
+      const { from, to } = rangeToParams(range)
+      const [platforms, models, routes, statsRows, healthRows] = await Promise.all([
+        listPlatforms() as Promise<PlatformDetail[]>,
+        listModels().catch(() => []) as Promise<ModelRow[]>,
+        listAllRoutes().catch(() => []) as Promise<RouteRow[]>,
+        getAllPlatformStats({ from, to }).catch(() => []) as Promise<PlatformStats[]>,
+        getAllPlatformHealth({ from, to }).catch(() => []) as Promise<PlatformHealthSummary[]>,
+      ])
 
-  const loadPlatforms = async () => {
-    setLoading(true)
-    try {
-      setPlatforms(await listPlatforms())
-    } catch {
-      notifications.show({
-        title: t(locale, 'loadFailed'),
-        message: '',
-        color: 'red',
-      })
-    }
-    setLoading(false)
-  }
-
-  const openCreate = () => {
-    setEditItem(null)
-    setFormValues({ ...emptyForm })
-    setPresetValue(null)
-    openModal()
-  }
-
-  const openEdit = (record: any) => {
-    setEditItem(record)
-    setFormValues({
-      name: record.name || '',
-      type: record.type || 'OpenAI',
-      base_url: record.base_url || '',
-      api_key: record.api_key || '',
-      organization: record.organization || '',
-    })
-    setPresetValue(null)
-    openModal()
-  }
-
-  const applyPreset = (presetName: string | null) => {
-    setPresetValue(presetName)
-    if (!presetName) return
-    const preset = platformPresets.find(p => p.name === presetName)
-    if (preset) {
-      setFormValues(prev => ({
-        ...prev,
-        name: preset.name,
-        type: preset.platform_type,
-        base_url: preset.base_url,
-      }))
-    }
-  }
-
-  const handleSubmit = async () => {
-    if (!formValues.name || !formValues.type || !formValues.base_url) return
-
-    const payload = {
-      name: formValues.name,
-      type: formValues.type,
-      base_url: formValues.base_url,
-      api_key: formValues.api_key,
-      organization: formValues.organization || undefined,
-    }
-
-    try {
-      if (editItem) {
-        await updatePlatform(editItem.id, payload)
-        notifications.show({
-          message: t(locale, 'updateSuccess'),
-          color: 'green',
-        })
-      } else {
-        await createPlatform(payload)
-        notifications.show({
-          message: t(locale, 'createSuccess'),
-          color: 'green',
-        })
+      const modelCount = new Map<string, number>()
+      for (const model of models ?? []) {
+        if (!model.platform_id) continue
+        modelCount.set(model.platform_id, (modelCount.get(model.platform_id) ?? 0) + 1)
       }
-      closeModal()
-      setEditItem(null)
-      setFormValues({ ...emptyForm })
-      loadPlatforms()
-    } catch (e: any) {
-      notifications.show({
-        title: editItem ? t(locale, 'updateFailed') : t(locale, 'createFailed'),
-        message: e?.response?.data?.error?.message || '',
-        color: 'red',
+
+      const refs = new Map<string, { proxies: Set<string>; backends: number }>()
+      for (const route of routes ?? []) {
+        if (!route.proxy_id) continue
+        for (const backend of route.backends ?? []) {
+          if (!backend.platform_id) continue
+          const entry = refs.get(backend.platform_id) ?? { proxies: new Set<string>(), backends: 0 }
+          entry.proxies.add(route.proxy_id)
+          entry.backends += 1
+          refs.set(backend.platform_id, entry)
+        }
+      }
+
+      const statsByPlatform = new Map<string, PlatformStats>()
+      for (const row of statsRows ?? []) {
+        if (row.platform_id) statsByPlatform.set(row.platform_id, row)
+      }
+
+      const healthByPlatform = new Map<string, PlatformHealthSummary>()
+      for (const row of healthRows ?? []) {
+        if (row.platform_id) healthByPlatform.set(row.platform_id, row)
+      }
+
+      return (platforms ?? []).map(platform => {
+        const ref = refs.get(platform.id)
+        return {
+          platform,
+          modelCount: modelCount.get(platform.id) ?? 0,
+          refModels: ref?.proxies.size ?? 0,
+          refBackends: ref?.backends ?? 0,
+          stats: statsByPlatform.get(platform.id) ?? null,
+          health: healthByPlatform.get(platform.id) ?? null,
+        }
       })
-    }
+    },
+    refetchInterval: pollInterval,
+  })
+
+  const items = useMemo(() => {
+    const query = search.trim().toLowerCase()
+    const list = providersQuery.data ?? []
+    if (!query) return list
+    return list.filter(item => {
+      const haystack = [
+        item.platform.name,
+        item.platform.base_url,
+        platformTypeLabel(item.platform.type),
+      ].join(' ').toLowerCase()
+      return haystack.includes(query)
+    })
+  }, [providersQuery.data, search])
+
+  const degraded = (providersQuery.data ?? []).filter(item => {
+    const stats = item.stats
+    if (!stats || stats.total_requests === 0) return false
+    return stats.success_rate < 99
+  }).length
+
+  const runTest = async (row: ProviderRow) => {
+    setTestingId(row.platform.id)
+    const result = await probePlatformConfig(locale, {
+      type: row.platform.type,
+      base_url: row.platform.base_url,
+      platform_id: row.platform.id,
+    })
+    setTests(prev => ({ ...prev, [row.platform.id]: result }))
+    notifications.show({ title: row.platform.name, message: result.message, color: result.ok ? 'green' : 'red' })
+    setTestingId(null)
+    // 检测已落库，重取列表让 CHECK 列回到持久数据（本次会话结果继续覆盖，避免闪烁）
+    void queryClient.invalidateQueries({ queryKey: ['platforms'] })
   }
 
-  const handleDelete = async (id: string) => {
+  const remove = async () => {
+    if (!deleteTarget) return
+    setSaving(true)
     try {
-      await deletePlatform(id)
+      await deletePlatform(deleteTarget.platform.id)
+      notifications.show({ message: t(locale, 'deleteSuccess'), color: 'green' })
+      setDeleteTarget(null)
+      await queryClient.invalidateQueries({ queryKey: ['platforms'] })
+      await queryClient.invalidateQueries({ queryKey: ['models'] })
+      await queryClient.invalidateQueries({ queryKey: ['overview'] })
+    } catch (error: any) {
       notifications.show({
-        message: t(locale, 'deleteSuccess'),
-        color: 'green',
-      })
-      setDeleteConfirmId(null)
-      loadPlatforms()
-    } catch {
-      notifications.show({
-        message: t(locale, 'loadFailed'),
+        message: error?.response?.data?.error?.message || t(locale, 'loadFailed'),
         color: 'red',
       })
+    } finally {
+      setSaving(false)
     }
   }
 
-  const updateField = <K extends keyof PlatformFormValues>(key: K, value: PlatformFormValues[K]) => {
-    setFormValues(prev => ({ ...prev, [key]: value }))
+  if (providersQuery.isPending) return <PageSkeleton rows={6} />
+  if (providersQuery.isError && !providersQuery.data) {
+    return <ErrorState onRetry={() => void providersQuery.refetch()} />
   }
 
-  const presetSelectData = platformPresets.map(p => ({
-    value: p.name,
-    label: getPresetName(p, locale),
-  }))
-
-  const typeSelectData = PLATFORM_TYPES.map(pt => ({
-    value: pt.value,
-    label: t(locale, pt.labelKey),
-  }))
+  const total = providersQuery.data?.length ?? 0
+  const lastSync = providersQuery.dataUpdatedAt
+    ? new Date(providersQuery.dataUpdatedAt).toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
+    : '—'
 
   return (
-    <div className="page">
-      {/* ===== 页头 ===== */}
-      <div className="page-head">
-        <div>
-          <div className="page-title">
-            <span className="page-title-chip"><IconPlugConnected size={17} stroke={1.7} /></span>
-            {t(locale, 'platforms')}
-          </div>
-          <div className="page-sub">
-            {platforms.length} {t(locale, 'total')}
-          </div>
-        </div>
-        <div className="page-actions">
-          <Button
-            variant="default"
-            leftSection={<IconRefresh size={15} />}
-            onClick={loadPlatforms}
-            loading={loading}
-          >
-            {t(locale, 'refresh')}
-          </Button>
-          <Button
-            leftSection={<IconPlus size={15} />}
-            onClick={openCreate}
-          >
-            {t(locale, 'addPlatform')}
-          </Button>
-        </div>
+    <div className="console-page">
+      <PageHeader
+        kicker={<>{t(locale, 'kickerConfigure')} <span className="console-kicker-sep" /> {t(locale, 'kickerProviders')}</>}
+        title={t(locale, 'platforms')}
+        subtitle={`${total} ${t(locale, 'total')} · ${lastSync}`}
+        actions={
+          <>
+            <Button size="xs" variant="default" leftSection={<IconRefresh size={14} />} onClick={() => void providersQuery.refetch()}>
+              {t(locale, 'refresh')}
+            </Button>
+            <Button size="xs" leftSection={<IconPlus size={14} />} onClick={() => setCreateOpen(true)}>
+              {t(locale, 'addPlatform')}
+            </Button>
+          </>
+        }
+      />
+
+      <div className="console-status-strip">
+        <span className={`console-dot ${degraded > 0 ? 'warn' : 'ok'}`} />
+        <strong>{t(locale, 'platforms')}</strong>
+        <span>{total} {t(locale, 'total')}</span>
+        {degraded > 0 && (
+          <span className="console-issue warn"><span className="console-dot warn" />{degraded} degraded</span>
+        )}
+        <span className="console-status-right">
+          <TextInput
+            size="xs"
+            leftSection={<IconSearch size={13} />}
+            placeholder={t(locale, 'searchProviders')}
+            value={search}
+            onChange={event => setSearch(event.currentTarget.value)}
+            w={240}
+          />
+        </span>
       </div>
 
-      {/* ===== 平台列表 ===== */}
-      <div className="ds-panel">
-        <div className="ds-table-wrap">
-          <Table stickyHeader>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th style={{ width: 200 }}>{t(locale, 'name')}</Table.Th>
-                <Table.Th style={{ width: 150 }}>{t(locale, 'type')}</Table.Th>
-                <Table.Th>{t(locale, 'baseUrl')}</Table.Th>
-                <Table.Th style={{ width: 200 }}>API Key</Table.Th>
-                <Table.Th className="ds-num" style={{ width: 110 }}>{t(locale, 'action')}</Table.Th>
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {loading && platforms.length === 0 && (
+      <section className="console-panel">
+        <div className="console-panel-head">
+          <div className="console-panel-title">{t(locale, 'platformList')}</div>
+          <span className="console-panel-sub">{range.toUpperCase()}</span>
+        </div>
+        {items.length > 0 ? (
+          <div className="console-table-wrap console-table-scroll">
+            <Table className="console-table">
+              <Table.Thead>
                 <Table.Tr>
-                  <Table.Td colSpan={5}>
-                    <div className="ds-empty">{t(locale, 'loading')}</div>
-                  </Table.Td>
+                  <Table.Th>{t(locale, 'thName')}</Table.Th>
+                  <Table.Th>{t(locale, 'thType')}</Table.Th>
+                  <Table.Th>{t(locale, 'thBaseUrl')}</Table.Th>
+                  <Table.Th>{t(locale, 'thCheck')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'models')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'thRefs')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'reqCount')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'successCountShort')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'avgShort')}</Table.Th>
+                  <Table.Th className="num" />
                 </Table.Tr>
-              )}
-              {!loading && platforms.length === 0 && (
-                <Table.Tr>
-                  <Table.Td colSpan={5}>
-                    <div className="ds-empty">
-                      <IconPlugConnected size={28} stroke={1.2} />
-                      <span>{t(locale, 'noPlatforms')}</span>
-                    </div>
-                  </Table.Td>
-                </Table.Tr>
-              )}
-              {platforms.map((platform) => {
-                const preset = platformPresets.find(p => p.name === platform.name)
-                const displayName = preset ? getPresetName(preset, locale) : platform.name
-
-                return (
-                  <Table.Tr key={platform.id}>
-                    <Table.Td>
-                      <div className="ds-strong">{displayName}</div>
-                    </Table.Td>
-                    <Table.Td>
-                      <span className="ds-pill neutral bare">{getPlatformTypeLabel(platform.type, locale)}</span>
-                    </Table.Td>
-                    <Table.Td>
-                      <div
-                        className="ds-mono ds-dim"
-                        title={platform.base_url}
-                        style={{ maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                      >
-                        {platform.base_url}
-                      </div>
-                    </Table.Td>
-                    <Table.Td>
-                      {platform.api_key ? (
-                        <span className="ds-mono ds-dim" title={platform.api_key.slice(0, 8)}>
-                          {platform.api_key.slice(0, 8)}••••••
+              </Table.Thead>
+              <Table.Tbody>
+                {items.map(item => {
+                  const { platform, stats, health } = item
+                  const rate = stats?.success_rate ?? 0
+                  const tone = successRateTone(rate, (stats?.total_requests ?? 0) > 0)
+                  // 本次会话刚测过的结果优先，其余读库里的最后一次
+                  const sessionCheck = tests[platform.id]
+                  const lastOk = sessionCheck ? sessionCheck.ok : health?.last_ok ?? null
+                  const checkTip = sessionCheck?.message ?? (
+                    health && health.last_checked_at
+                      ? t(locale, 'healthChecks', String(health.checks), String(health.failures), formatLogTime(health.last_checked_at, locale))
+                        + (health.last_error ? ` · ${health.last_error}` : '')
+                      : null
+                  )
+                  const presetMatch = platformPresets.find(p => p.name === platform.name)
+                  const displayName = presetMatch ? getPresetName(presetMatch, locale) : platform.name
+                  return (
+                    <Table.Tr key={platform.id} onClick={() => navigate(`/providers/${platform.id}`)}>
+                      <Table.Td><span className="console-strong">{displayName}</span></Table.Td>
+                      <Table.Td>{platformTypeLabel(platform.type)}</Table.Td>
+                      <Table.Td>
+                        <span className="console-mono muted" title={platform.base_url}>
+                          {platform.base_url}
                         </span>
-                      ) : (
-                        <span className="ds-dim">—</span>
-                      )}
-                    </Table.Td>
-                    <Table.Td className="ds-num">
-                      <Group gap={4} wrap="nowrap" justify="flex-end">
-                        <Tooltip label={t(locale, 'editPlatform')}>
-                          <ActionIcon size="md" onClick={() => openEdit(platform)}>
-                            <IconEdit size={16} />
-                          </ActionIcon>
-                        </Tooltip>
-                        {deleteConfirmId === platform.id ? (
-                          <>
-                            <Tooltip label={t(locale, 'confirmDelete')}>
-                              <ActionIcon variant="filled" color="red" size="md" onClick={() => handleDelete(platform.id)}>
-                                <IconTrash size={15} />
-                              </ActionIcon>
-                            </Tooltip>
-                            <Tooltip label={t(locale, 'cancel')}>
-                              <ActionIcon size="md" onClick={() => setDeleteConfirmId(null)}>
-                                <IconX size={15} />
-                              </ActionIcon>
-                            </Tooltip>
-                          </>
+                      </Table.Td>
+                      <Table.Td>
+                        {lastOk == null ? (
+                          <span className="muted">{t(locale, 'notTested')}</span>
                         ) : (
-                          <Tooltip label={t(locale, 'delete')}>
-                            <ActionIcon size="md" color="red" onClick={() => setDeleteConfirmId(platform.id)}>
-                              <IconTrash size={16} />
-                            </ActionIcon>
+                          <Tooltip label={checkTip}>
+                            <StatusPill tone={lastOk ? 'ok' : 'err'}>
+                              {lastOk ? t(locale, 'testedOk') : t(locale, 'testedFail')}
+                            </StatusPill>
                           </Tooltip>
                         )}
-                      </Group>
-                    </Table.Td>
-                  </Table.Tr>
-                )
-              })}
-            </Table.Tbody>
-          </Table>
-        </div>
-      </div>
+                      </Table.Td>
+                      <Table.Td className="num">{item.modelCount || '—'}</Table.Td>
+                      <Table.Td className="num">
+                        <span title={t(locale, 'providerReferenced', String(item.refBackends))}>
+                          {item.refModels || '—'}
+                        </span>
+                      </Table.Td>
+                      <Table.Td className="num">{formatNumber(stats?.total_requests ?? 0)}</Table.Td>
+                      <Table.Td className="num">
+                        {stats?.total_requests
+                          ? <StatusPill tone={tone}>{`${rate.toFixed(1)}%`}</StatusPill>
+                          : <span className="muted">—</span>}
+                      </Table.Td>
+                      <Table.Td className="num">{stats?.total_requests ? formatDuration(stats.avg_latency_ms) : '—'}</Table.Td>
+                      <Table.Td className="num">
+                        <Group gap={2} wrap="nowrap" justify="flex-end">
+                          <Tooltip label={t(locale, 'testConnection')}>
+                            <ActionIcon
+                              size="sm"
+                              variant="subtle"
+                              color={lastOk === false ? 'red' : 'gray'}
+                              loading={testingId === platform.id}
+                              aria-label={t(locale, 'testConnection')}
+                              onClick={event => { event.stopPropagation(); void runTest(item) }}
+                            >
+                              <IconPlugConnected size={15} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <Tooltip label={t(locale, 'delete')}>
+                            <ActionIcon
+                              size="sm"
+                              variant="subtle"
+                              color="red"
+                              aria-label={t(locale, 'delete')}
+                              onClick={event => { event.stopPropagation(); setDeleteTarget(item) }}
+                            >
+                              <IconTrash size={15} />
+                            </ActionIcon>
+                          </Tooltip>
+                          <IconArrowRight size={14} />
+                        </Group>
+                      </Table.Td>
+                    </Table.Tr>
+                  )
+                })}
+              </Table.Tbody>
+            </Table>
+          </div>
+        ) : (
+          <EmptyState
+            title={search ? t(locale, 'noMatchingRequests') : t(locale, 'noPlatforms')}
+            description={search ? t(locale, 'clearFilters') : t(locale, 'platformDesc')}
+            action={search ? (
+              <Button size="xs" variant="default" onClick={() => setSearch('')}>{t(locale, 'clearFilters')}</Button>
+            ) : (
+              <Button size="xs" leftSection={<IconPlus size={14} />} onClick={() => setCreateOpen(true)}>
+                {t(locale, 'addPlatform')}
+              </Button>
+            )}
+          />
+        )}
+      </section>
 
-      {/* ===== 新增 / 编辑弹窗 ===== */}
+      <ProviderCreateModal opened={createOpen} onClose={() => setCreateOpen(false)} />
+
       <Modal
-        opened={modalOpen}
-        onClose={() => { closeModal(); setEditItem(null) }}
-        title={editItem ? t(locale, 'editPlatform') : t(locale, 'addPlatform')}
-        size="lg"
-        closeOnClickOutside={false}
+        opened={Boolean(deleteTarget)}
+        onClose={() => setDeleteTarget(null)}
+        title={`${t(locale, 'delete')} · ${deleteTarget?.platform.name ?? ''}`}
+        size="sm"
       >
-        {!editItem && (
-          <div className="ds-form-section">
-            <div className="ds-form-section-title">{t(locale, 'quickPreset')}</div>
-            <Select
-              placeholder={t(locale, 'quickPreset')}
-              data={presetSelectData}
-              value={presetValue}
-              onChange={applyPreset}
-              searchable
-              clearable
-            />
+        <div className="console-note warn">
+          {deleteTarget
+            ? (deleteTarget.refModels > 0
+              ? t(locale, 'providerDeleteWarn', String(deleteTarget.refModels))
+              : t(locale, 'providerDeleteSafe'))
+            : ''}
+        </div>
+        {deleteTarget && deleteTarget.refModels > 0 && (
+          <div className="console-inspector-field" style={{ paddingTop: 8 }}>
+            <span className="k">{t(locale, 'impactLabel')}</span>
+            <span className="v">{deleteTarget.refBackends} backends · {deleteTarget.modelCount} models</span>
           </div>
         )}
-
-        <div className="ds-form-section">
-          <div className="ds-form-section-title">{t(locale, 'basicInfo')}</div>
-          <Stack gap="sm">
-            <TextInput
-              label={t(locale, 'platformName')}
-              placeholder="OpenAI, DeepSeek, etc."
-              required
-              value={formValues.name}
-              onChange={(e) => updateField('name', e.currentTarget.value)}
-            />
-            <Select
-              label={t(locale, 'platformType')}
-              data={typeSelectData}
-              required
-              value={formValues.type}
-              onChange={(val) => updateField('type', val || 'OpenAI')}
-            />
-            <TextInput
-              label={t(locale, 'baseUrl')}
-              placeholder="https://api.openai.com/v1"
-              required
-              value={formValues.base_url}
-              onChange={(e) => updateField('base_url', e.currentTarget.value)}
-            />
-          </Stack>
-        </div>
-
-        <div className="ds-form-section">
-          <div className="ds-form-section-title">{t(locale, 'credentials')}</div>
-          <Stack gap="sm">
-            <PasswordInput
-              label={t(locale, 'apiKey')}
-              placeholder="sk-..."
-              value={formValues.api_key}
-              onChange={(e) => updateField('api_key', e.currentTarget.value)}
-            />
-            <TextInput
-              label={t(locale, 'organization')}
-              placeholder="org-xxx"
-              description="Optional"
-              value={formValues.organization}
-              onChange={(e) => updateField('organization', e.currentTarget.value)}
-            />
-          </Stack>
-        </div>
-
-        <div className="ds-modal-footer">
-          <Button variant="default" onClick={() => { closeModal(); setEditItem(null) }}>
-            {t(locale, 'cancel')}
-          </Button>
-          <Button
-            onClick={handleSubmit}
-            disabled={!formValues.name || !formValues.type || !formValues.base_url}
-          >
-            {editItem ? t(locale, 'save') : t(locale, 'create')}
-          </Button>
+        <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
+          <Button size="xs" variant="default" onClick={() => setDeleteTarget(null)}>{t(locale, 'cancel')}</Button>
+          <Button size="xs" color="red" loading={saving} onClick={() => void remove()}>{t(locale, 'confirmDelete')}</Button>
         </div>
       </Modal>
     </div>

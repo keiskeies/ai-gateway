@@ -1,4 +1,6 @@
 use actix_web::{web, HttpResponse};
+use std::sync::Arc;
+use crate::cache::RouteCache;
 use crate::config::SystemProxy;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
@@ -139,27 +141,32 @@ pub async fn get(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<Ht
     Ok(HttpResponse::Ok().json(model))
 }
 
-pub async fn create(db: web::Data<DbPool>, body: web::Json<CreateModelRequest>) -> AppResult<HttpResponse> {
+pub async fn create(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, body: web::Json<CreateModelRequest>) -> AppResult<HttpResponse> {
     let req = body.into_inner();
     let db = db.into_inner();
     let model = web::block(move || crate::db::model::create(&db, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Created().json(model))
 }
 
-pub async fn update(db: web::Data<DbPool>, path: web::Path<String>, body: web::Json<UpdateModelRequest>) -> AppResult<HttpResponse> {
+// 单价是在读取路由时 JOIN models 补进缓存后端的，改价后必须刷新缓存，
+// 否则之后的请求仍按旧价（或按"未定价"）落库。
+pub async fn update(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, path: web::Path<String>, body: web::Json<UpdateModelRequest>) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let req = body.into_inner();
     let db = db.into_inner();
     let model = web::block(move || crate::db::model::update(&db, &id, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::Ok().json(model))
 }
 
-pub async fn delete(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
+pub async fn delete(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, path: web::Path<String>) -> AppResult<HttpResponse> {
     let id = path.into_inner();
     let db = db.into_inner();
     web::block(move || crate::db::model::delete(&db, &id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    cache.refresh();
     Ok(HttpResponse::NoContent().finish())
 }

@@ -29,6 +29,8 @@ body {
   --text-2: #C6D3F0;
   --text-3: #94A7D0;
   --accent: #5C9DFF;
+  /* 填充在 --accent 底色上的文字：暗色方案是亮蓝底，必须用深墨才够 4.5:1 */
+  --accent-ink: #0A142E;
   --accent-2: #22D3EE;
   --ok: #35D399;
   --warn: #FBBF24;
@@ -44,6 +46,9 @@ body {
   --mantine-color-body: #121F3D;
 }
 
+/* 浅色 token 与 Mantine 调色板取同一阶（brand/gray 6、red/green 7），否则同一屏里
+   Mantine 的徽标与 console 的 pill 是两种蓝/两种红。状态色不能停在 6 阶：pill 文字落在
+   自身 8% 染色底上，6 阶会掉到 4.5:1 以下（green-6 只有 3.2）。 */
 :root:root[data-mantine-color-scheme='light'] {
   color-scheme: light;
   --wall-bg: #EDF2FB;
@@ -54,12 +59,13 @@ body {
   --line-strong: rgba(18, 38, 86, 0.20);
   --text-1: #0A1530;
   --text-2: #40507A;
-  --text-3: #6C7CA8;
-  --accent: #2E6BE6;
-  --accent-2: #0E9AB8;
-  --ok: #0E9F6E;
-  --warn: #A16207;
-  --err: #DC2626;
+  --text-3: #55658C;
+  --accent: #2E63B8;
+  --accent-ink: #FFFFFF;
+  --accent-2: #0D90AC;
+  --ok: #146E54;
+  --warn: #855C12;
+  --err: #A61B2E;
   --mantine-color-text: #0A1530;
   --mantine-color-dimmed: #40507A;
   --mantine-color-body: #FFFFFF;
@@ -140,6 +146,26 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   margin-left: 12px;
 }
 
+/* ---- 取数失败告警条：大屏是远看的，"读数停在 0"和"这块没取到"必须一眼分得开 ---- */
+.wall-failbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 10px 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 34%, transparent);
+  border-left: 3px solid var(--warn);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warn) 10%, var(--panel-bg));
+  font-size: 13px;
+}
+
+.wall-failbar-list {
+  color: var(--text-1);
+  font-weight: 600;
+  min-width: 0;
+}
+
 /* ---- KPI 行：7 张卡（新增首字/性能/缓存卡），响应式 7 / 4+3 / 2×4 ---- */
 .wall-kpi-grid {
   display: grid;
@@ -215,6 +241,11 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   letter-spacing: -0.01em;
 }
 
+/* 取不到时的大数：灰一点、不抢视线，但绝不写成 0 */
+.wall-kpi-missing {
+  color: var(--text-3);
+}
+
 .wall-kpi-unit {
   font-size: 12px;
   font-weight: 500;
@@ -226,7 +257,7 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
 /* KPI 副行：成功/失败、分位数、输入输出等补充信息（统一 11px） */
 .wall-kpi-sub {
   margin-top: 5px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -242,7 +273,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 /* delta 徽章：与上一周期比（↑绿 / ↓红，语义按指标方向）；紧凑卡内随数字同行排列 */
 .wall-delta {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   padding: 1px 7px;
@@ -278,7 +309,7 @@ html.wall-fullscreen .wall-kpi-label {
 /* 灰底小胶囊（活跃代理 KPI） */
 .wall-capsule {
   display: inline-block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-2);
   background: var(--panel-bg-2);
   border-radius: 10px;
@@ -386,7 +417,7 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 .wall-panel-sub {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -408,7 +439,7 @@ html.wall-fullscreen .wall-kpi-label {
 .wall-rank-label {
   width: 110px;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-2);
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
   white-space: nowrap;
@@ -434,7 +465,7 @@ html.wall-fullscreen .wall-kpi-label {
   width: 64px;
   flex-shrink: 0;
   text-align: right;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-1);
   font-variant-numeric: tabular-nums;
@@ -499,7 +530,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 .wall-tile-meta {
   flex: 1 1 100%;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   margin-top: 2px;
@@ -530,7 +561,7 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 .wall-heat-label {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
@@ -539,6 +570,11 @@ html.wall-fullscreen .wall-kpi-label {
   border-radius: 2px;
   background: var(--panel-bg-2);
   transition: background 0.3s ease;
+}
+
+/* 浅色底上最低档格子与面板底色只差一档，描一圈才读得出网格边界（深色不需要） */
+:root[data-mantine-color-scheme='light'] .wall-heat-cell {
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 .wall-fullscreen .wall-heat-cell {
@@ -553,7 +589,7 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 .wall-heat-hour {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-3);
   text-align: center;
   font-variant-numeric: tabular-nums;
@@ -561,7 +597,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 /* 错误分析条：复用排行条样式，颜色用状态语义色 */
 .wall-err-summary {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
@@ -664,7 +700,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 .nav-group-label {
   padding: 10px 10px 4px;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -804,7 +840,7 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 .ds-hint {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
   line-height: 1.6;
 }
@@ -818,7 +854,7 @@ html.wall-fullscreen .wall-kpi-label {
   padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -972,13 +1008,13 @@ html.wall-fullscreen .wall-kpi-label {
 
 .mantine-InputWrapper-description {
   margin-bottom: 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-3);
 }
 
 .mantine-InputWrapper-error {
   margin-top: 5px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .mantine-Input-input {
@@ -1047,7 +1083,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 .ds-form-section-title {
   margin-bottom: 10px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1102,7 +1138,7 @@ html.wall-fullscreen .wall-kpi-label {
 .mantine-Badge-root {
   height: 20px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: none;
@@ -1278,7 +1314,7 @@ html.wall-fullscreen .wall-kpi-label {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-bg-2);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.65;
   color: var(--text-2);
 }
@@ -1304,6 +1340,59 @@ html.wall-fullscreen .wall-kpi-label {
 @media (max-width: 700px) {
   .ds-field-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* 设置页整行面板（账号安全 / 数据维护） */
+.ds-panel-wide {
+  grid-column: 1 / -1;
+}
+
+.ds-account-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px 16px;
+}
+
+.ds-account-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.ds-section-body-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .ds-account-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* 窄屏时当前密码独占一行，新密码 / 确认密码并排 */
+  .ds-account-fields > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 700px) {
+  .ds-account-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .ds-account-fields > :first-child {
+    grid-column: auto;
+  }
+
+  .ds-account-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
   }
 }
 
@@ -1346,7 +1435,7 @@ html.wall-fullscreen .wall-kpi-label {
   border-radius: 5px;
   background: color-mix(in srgb, var(--accent) 16%, transparent);
   color: var(--accent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
@@ -1387,7 +1476,7 @@ html.wall-fullscreen .wall-kpi-label {
 
 .wall-matrix th,
 .wall-logs th {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-3);
   border-bottom: 1px solid var(--line-strong, var(--line)) !important;
@@ -1405,11 +1494,74 @@ html.wall-fullscreen .wall-kpi-label {
   text-align: right;
 }
 
-/* 模型名单元格：稍强调，可省略号截断 */
+/* 模型名单元格：稍强调 */
 .wall-mx-model {
   font-weight: 600;
   color: var(--text-1) !important;
   max-width: 160px;
+}
+
+/* 请求明细表：auto 布局 —— 文本列（模型/网关/平台/错误）按内容撑开，
+   数字 / 状态码列收窄，超长文本由容器横向滚动查看 */
+.wall-logs {
+  table-layout: auto;
+  width: auto;
+  min-width: 100%;
+}
+
+/* 数字 / 状态码列：仅占内容所需最小宽度 */
+.wall-logs th:nth-child(1),
+.wall-logs th:nth-child(5),
+.wall-logs th:nth-child(6),
+.wall-logs th:nth-child(7),
+.wall-logs th:nth-child(8),
+.wall-logs th:nth-child(9),
+.wall-logs th:nth-child(10),
+.wall-logs th:nth-child(11),
+.wall-logs th:nth-child(12),
+.wall-logs th:nth-child(13),
+.wall-logs td:nth-child(1),
+.wall-logs td:nth-child(5),
+.wall-logs td:nth-child(6),
+.wall-logs td:nth-child(7),
+.wall-logs td:nth-child(8),
+.wall-logs td:nth-child(9),
+.wall-logs td:nth-child(10),
+.wall-logs td:nth-child(11),
+.wall-logs td:nth-child(12),
+.wall-logs td:nth-child(13) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* 文本列：去掉省略号截断，按内容完整展示；超长时靠容器横向滚动 */
+.wall-logs .wall-mx-model,
+.wall-logs td:not(.wall-num) {
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
+}
+
+/* 模型性能矩阵：auto 布局 —— 模型名列（第 1 列）按内容撑开，
+   数字列（第 2–12 列）收窄，超长时由容器横向滚动查看 */
+.wall-matrix {
+  table-layout: auto;
+  width: auto;
+  min-width: 100%;
+}
+
+/* 矩阵数字列（第 2–12 列）：仅占内容所需最小宽度 */
+.wall-matrix th:nth-child(n + 2),
+.wall-matrix td:nth-child(n + 2) {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* 矩阵模型名列：去掉省略号截断与 max-width，按内容完整展示 */
+.wall-matrix .wall-mx-model {
+  overflow: visible;
+  text-overflow: clip;
+  max-width: none;
 }
 
 /* 明细表：超高时纵向滚动（整页仍可滚动，表格自身限高避免过长） */
@@ -1451,4 +1603,104 @@ html.wall-fullscreen .wall-kpi-label {
 /* 排序列表头高亮 */
 .wall-matrix-scroll .wall-mx-th-sorted {
   color: var(--accent) !important;
+}
+
+/* ---- 登录 / 首次初始化 ---- */
+.auth-page {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  box-sizing: border-box;
+  background:
+    radial-gradient(900px 440px at 50% -10%, var(--wall-glow), transparent 70%),
+    var(--wall-bg);
+}
+
+.auth-toolbar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  gap: 4px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  box-sizing: border-box;
+  padding: 28px;
+  background: var(--panel-bg);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(2, 8, 24, 0.32);
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 26px;
+}
+
+.auth-logo {
+  height: 34px;
+}
+
+.auth-brand-name {
+  color: var(--text-1);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.auth-brand-sub {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.auth-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.auth-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auth-shield {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 11px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.auth-hint {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.auth-foot {
+  margin-top: 18px;
+  color: var(--text-3);
+  font-size: 12px;
+  letter-spacing: 0.02em;
 }

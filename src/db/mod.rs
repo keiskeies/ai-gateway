@@ -1,10 +1,14 @@
 pub mod schema;
+pub mod alert;
+pub mod backup;
 pub mod platform;
 pub mod model;
 pub mod proxy;
 pub mod route;
 pub mod stats;
 pub mod api_key;
+pub mod auth;
+pub mod config_transfer;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

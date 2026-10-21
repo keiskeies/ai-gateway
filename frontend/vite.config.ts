@@ -1,7 +1,18 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// 版本号单一来源：Cargo.toml（后端与桌面壳共用）
+const cargoVersion = readFileSync(fileURLToPath(new URL('../Cargo.toml', import.meta.url)), 'utf8')
+  .match(/^version = "([^"]+)"/m)?.[1] ?? '0.0.0'
+
 export default defineConfig({
+  // 构建时间戳：关于分组要显示"这份界面是什么时候构建的"，运行时问不出来
+  define: {
+    __APP_VERSION__: JSON.stringify(cargoVersion),
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   plugins: [react()],
   base: './',
   server: {

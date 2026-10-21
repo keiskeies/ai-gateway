@@ -10,13 +10,14 @@ use crate::cache::{RouteCache, StatsWriter};
 use crate::error::AppError;
 use crate::lb::BackendSelector;
 use crate::models::route::ErrorType;
-use crate::models::stats::RequestStat;
+use crate::models::stats::{RequestAttempt, RequestStat};
 use crate::protocol::{openai, anthropic, types::UnifiedRequest};
-use crate::config::AppConfig;
 
 pub struct ProxyState {
     pub db: crate::db::DbPool,
-    pub config: AppConfig,
+    /// 与 `/api/settings` 共用同一份 `Arc<RwLock<_>>`，不是启动时的快照：
+    /// 正文采集这类开关必须改完就生效——"关掉之后还在偷偷存正文"是最不能接受的方向。
+    pub config: crate::api::settings::SharedAppConfig,
     pub selector: Arc<BackendSelector>,
     pub http_client: reqwest::Client,
     pub cache: RouteCache,
@@ -34,10 +35,12 @@ pub async fn openai_chat_completions(
     state: web::Data<Arc<ProxyState>>, req: HttpRequest, body: web::Json<serde_json::Value>,
 ) -> Result<HttpResponse, AppError> {
     let auth = extract_auth(&req);
-    validate_auth_cached(&state.cache, &auth)?;
+    let auth_key = validate_auth_cached(&state.cache, &auth)?;
 
+    // 解析会吃掉这份 JSON，所以要在交给解析器之前留一份原样正文（采集开着才用得上）
+    let raw = body.0.clone();
     let unified = openai::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI, auth_key, Some(raw), None).await
 }
 
 /// Global Anthropic-compatible endpoint: POST /v1/messages
@@ -45,37 +48,167 @@ pub async fn anthropic_messages(
     state: web::Data<Arc<ProxyState>>, req: HttpRequest, body: web::Json<serde_json::Value>,
 ) -> Result<HttpResponse, AppError> {
     let auth = extract_auth(&req);
-    validate_auth_cached(&state.cache, &auth)?;
+    let auth_key = validate_auth_cached(&state.cache, &auth)?;
 
+    let raw = body.0.clone();
     let unified = anthropic::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, Some(raw), None).await
 }
 
-/// List available models (virtual model names)
+/// 正文采集上限：再长的上下文也不该让正文表无限膨胀，而且超长请求也不是
+/// "点一下重放看看"的那种。超限就不存，重放按钮对那一行保持不可用。
+pub const MAX_CAPTURED_BODY_BYTES: usize = 64 * 1024;
+
+/// 采集开着时把入站正文投进异步通道；关着时什么都不做。
+/// 默认不存正文是硬口径（§2 原则 10），所以这里只有"显式开启才写"一条路径，
+/// 且与统计一样绝不阻塞请求线程。
+fn capture_body(
+    state: &Arc<ProxyState>,
+    request_id: &str,
+    protocol: &str,
+    raw: &Option<serde_json::Value>,
+) {
+    let Some(value) = raw else { return };
+    // 读锁只在这条 if 里持有，取到 bool 就释放——后面全是 await，不能跨着拿锁
+    let capture = state.config.read().defaults.capture_request_bodies;
+    if !capture {
+        return;
+    }
+    let text = value.to_string();
+    let bytes = text.len() as i64;
+    if bytes > MAX_CAPTURED_BODY_BYTES as i64 {
+        tracing::debug!("请求正文 {} 字节超过上限，未存正文（request_id={}）", bytes, request_id);
+        return;
+    }
+    state.stats_writer.record_body(crate::models::stats::RequestBody {
+        request_id: request_id.to_string(),
+        protocol: protocol.to_string(),
+        body: text,
+        bytes,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
+/// List available models (virtual model names) with capability metadata
 pub async fn openai_list_models(
     state: web::Data<Arc<ProxyState>>, _req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
     let db = state.db.clone();
-    let proxies = web::block(move || crate::db::proxy::list(&db))
-        .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    let models: Vec<String> = proxies.iter().map(|p| p.name.clone()).collect();
+    let models = web::block(move || -> Result<Vec<openai::ModelInfo>, AppError> {
+        let proxies = crate::db::proxy::list(&db)?;
+        let mut out = Vec::new();
+        for proxy in proxies {
+            let mut intersection: Option<std::collections::HashSet<String>> = None;
+            if let Ok(Some(route)) = crate::db::route::get_by_proxy(&db, &proxy.id) {
+                let backends = crate::db::route::list_backends_by_route(&db, &route.id).unwrap_or_default();
+                for backend in &backends {
+                    let caps: std::collections::HashSet<String> =
+                        backend.capabilities.iter().cloned().collect();
+                    intersection = Some(match intersection {
+                        None => caps,
+                        Some(prev) => prev.intersection(&caps).cloned().collect(),
+                    });
+                }
+            }
+            out.push(openai::ModelInfo {
+                name: proxy.name,
+                capabilities: intersection.map(|s| s.into_iter().collect()).unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
     Ok(HttpResponse::Ok().json(openai::models_list(&models)))
 }
 
-/// 使用缓存验证 API key，不走 DB（极热路径优化）
-fn validate_auth_cached(cache: &RouteCache, auth: &Option<String>) -> Result<(), AppError> {
-    let valid = match auth.as_deref() {
-        Some(key) => cache.validate_api_key(key).map_err(|e| AppError::Internal(e.to_string()))?,
-        None => false,
+/// 使用缓存验证 API key，不走 DB（极热路径优化）。
+/// 返回匹配的 key 供后续校验 proxy 绑定；未配置任何 key 时返回 None（兼容旧行为）。
+/// 客户端的明文在这里只参与一次摘要计算，之后不再被持有。
+fn validate_auth_cached(
+    cache: &RouteCache,
+    auth: &Option<String>,
+) -> Result<Option<crate::models::api_key::StoredApiKey>, AppError> {
+    let Some(key) = auth.as_deref() else {
+        return Err(AppError::BadRequest("Missing API key".to_string()));
     };
-    if valid {
-        if let Some(key) = auth {
-            cache.touch_api_key(key);
-        }
-        Ok(())
-    } else {
-        Err(AppError::BadRequest("Invalid API key".to_string()))
+    if !cache.has_api_keys() {
+        return Ok(None);
     }
+    let api_key = match cache.find_enabled_api_key(key) {
+        Some(api_key) => api_key,
+        // 到点是硬失效，不是"缓存还没刷"：把过期与"无效/已禁用"分开报，
+        // 否则调用方只会照着禁用去排查，永远猜不到是日期过了。
+        None if cache.find_api_key(key).map(|k| k.is_expired(chrono::Utc::now())).unwrap_or(false) => {
+            return Err(AppError::Unauthorized("API key expired".to_string()));
+        }
+        None => return Err(AppError::BadRequest("Invalid or disabled API key".to_string())),
+    };
+    cache.touch_api_key(&api_key.id);
+    Ok(Some(api_key))
+}
+
+/// 配额判定：只有设了配额的 Key 才会多走这一次查询，其余 Key 的开销与改动前完全一致。
+/// 用量口径与 `/keys` 列表里显示的数字同源（同一份 `request_stats`、同一个时间窗），
+/// 所以界面显示 42/100 与第 101 次被拒不会互相矛盾。
+async fn enforce_quota(
+    state: &Arc<ProxyState>,
+    api_key: &Option<crate::models::api_key::StoredApiKey>,
+) -> Result<(), AppError> {
+    let Some(key) = api_key.as_ref() else { return Ok(()) };
+    if !key.has_quota() {
+        return Ok(());
+    }
+    let usage = usage_for(state, &key.id, key.quota_window.as_deref()).await?;
+    if key.quota_requests.map(|max| usage.requests >= max).unwrap_or(false) {
+        return Err(AppError::TooManyRequests("API key request quota exceeded".to_string()));
+    }
+    if key.quota_tokens.map(|max| usage.tokens >= max).unwrap_or(false) {
+        return Err(AppError::TooManyRequests("API key token quota exceeded".to_string()));
+    }
+    // 金额配额只认已定价的请求：没录价格的模型算不出成本，也就不会被这条闸门拒。
+    // 这是取舍，不是漏判——宁可少拒，也不要用一个猜出来的单价去断掉真实请求。
+    if let (Some(max), Some(spent)) = (key.quota_cost, usage.cost) {
+        if spent >= max {
+            return Err(AppError::TooManyRequests("API key cost quota exceeded".to_string()));
+        }
+    }
+    Ok(())
+}
+
+async fn usage_for(state: &Arc<ProxyState>, id: &str, window: Option<&str>) -> Result<crate::models::api_key::KeyUsage, AppError> {
+    let db = state.db.clone();
+    let id = id.to_string();
+    let window = window.map(str::to_string);
+    web::block(move || crate::db::api_key::usage_for_key(&db, &id, window.as_deref()))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+}
+
+/// 重放一条存过正文的请求：把当时的原始正文重新送进网关，路由、负载均衡、重试、
+/// 统计与轨迹全部按今天的配置再走一遍——不是回放上游那一份响应，上游每次都会重新生成。
+///
+/// 调用方是会话鉴权后的管理接口，所以 `auth_key` 传 None：V17 之后库里只有 Key 的哈希，
+/// 本来也还原不出当初那条明文；配额与模型绑定检查对 None 一律放行（见 enforce_quota）。
+/// 新那条统计行带 `replayed_from`，界面上能看出它是重放出来的。
+pub async fn replay_request(
+    state: &Arc<ProxyState>,
+    stat_id: i64,
+    stored: &crate::models::stats::RequestBody,
+) -> Result<HttpResponse, AppError> {
+    let value: serde_json::Value = serde_json::from_str(&stored.body)
+        .map_err(|e| AppError::Internal(format!("stored request body is not valid JSON: {}", e)))?;
+    let (unified, protocol) = match stored.protocol.as_str() {
+        "anthropic" => (
+            anthropic::parse_request(value.clone()).map_err(AppError::BadRequest)?,
+            crate::models::proxy::Protocol::Anthropic,
+        ),
+        _ => (
+            openai::parse_request(value.clone()).map_err(AppError::BadRequest)?,
+            crate::models::proxy::Protocol::OpenAI,
+        ),
+    };
+    handle_request(state, unified, protocol, None, Some(value), Some(stat_id)).await
 }
 
 /// 构造一条统计记录
@@ -89,6 +222,9 @@ fn make_stat(
     token_output: Option<i64>,
     error_type: Option<String>,
     is_stream: bool,
+    api_key_id: Option<&str>,
+    request_id: &str,
+    replayed_from: Option<i64>,
 ) -> RequestStat {
     RequestStat {
         id: 0,
@@ -105,22 +241,100 @@ fn make_stat(
         cache_read_tokens: None,
         cache_write_tokens: None,
         is_stream,
+        api_key_id: api_key_id.map(|s| s.to_string()),
+        // 成本由调用方在拿到 token 后填写；这里还不知道用量
+        cost: None,
+        request_id: Some(request_id.to_string()),
+        replayed_from,
+    }
+}
+
+/// 构造一条尝试轨迹：只带元数据（后端/平台/上游模型名/状态/错误摘要/耗时），
+/// 请求与响应正文一律不落库；错误文本由调用方先做截断与密钥脱敏
+fn make_attempt(
+    request_id: &str,
+    attempt_no: i64,
+    backend: &crate::models::route::Backend,
+    status_code: Option<i64>,
+    error_type: Option<&str>,
+    error_message: Option<String>,
+    latency_ms: i64,
+    started_at: String,
+) -> RequestAttempt {
+    RequestAttempt {
+        id: 0,
+        request_id: request_id.to_string(),
+        attempt_no,
+        backend_id: Some(backend.id.clone()),
+        platform_id: Some(backend.platform_id.clone()),
+        model_id: Some(backend.model_id.clone()),
+        status_code,
+        error_type: error_type.map(|s| s.to_string()),
+        error_message,
+        latency_ms: Some(latency_ms),
+        started_at,
+        platform_name: None,
+    }
+}
+
+/// 错误摘要：截到 300 字符，并把平台密钥替换成占位符（个别上游 401 会回显收到的 key）
+fn clip_error(text: &str, secret: &str) -> String {
+    let head: String = text.chars().take(300).collect();
+    if secret.is_empty() {
+        head
+    } else {
+        head.replace(secret, "[redacted]")
     }
 }
 
 async fn handle_request(
     state: &Arc<ProxyState>,
-    unified: UnifiedRequest, response_protocol: crate::models::proxy::Protocol,
+    unified: UnifiedRequest,
+    response_protocol: crate::models::proxy::Protocol,
+    auth_key: Option<crate::models::api_key::StoredApiKey>,
+    raw_body: Option<serde_json::Value>,
+    replayed_from: Option<i64>,
 ) -> Result<HttpResponse, AppError> {
     let virtual_model = unified.model.clone();
     let is_stream = unified.stream.unwrap_or(false);
+    // 统计归属到发起请求的密钥（未鉴权时为 None）
+    let api_key_id = auth_key.as_ref().map(|k| k.id.clone());
+    enforce_quota(state, &auth_key).await?;
 
     // 从内存缓存获取路由信息（零 DB 查询）
     let resolved_route = state.cache.get_resolved_route(&virtual_model)
         .ok_or_else(|| AppError::NotFound(format!("Model '{}' not found", virtual_model)))?;
 
+    // Key 绑定某个虚拟模型时，禁止访问其他模型。
+    if let Some(api_key) = auth_key.as_ref() {
+        if let Some(bound_proxy) = api_key.proxy_id.as_deref() {
+            if bound_proxy != resolved_route.proxy_id {
+                return Err(AppError::Unauthorized(
+                    "API key is not allowed for this model".to_string(),
+                ));
+            }
+        }
+    }
+
     let max_retries = resolved_route.retry_policy.max_retries;
     let mut last_error: Option<String> = None;
+    // 一次入站请求一个 ID：所有重试尝试共享，轨迹接口按它串起依次试过的后端
+    let request_id = uuid::Uuid::new_v4().to_string();
+    // 正文按这个 request_id 挂到那条统计行上；放在路由解析之后，是为了不给
+    // "模型不存在 / Key 不允许"这类根本没进转发的请求存正文。
+    // 重放那一笔也不存：它的正文与当初那份逐字相同，再存一遍只是把同一句话复制一份，
+    // 要看第二次就重放当初那条（重放行上的"重放自 #N"会指回去）。
+    if replayed_from.is_none() {
+        capture_body(
+            state,
+            &request_id,
+            match response_protocol {
+                crate::models::proxy::Protocol::OpenAI => "openai",
+                crate::models::proxy::Protocol::Anthropic => "anthropic",
+            },
+            &raw_body,
+        );
+    }
 
     for attempt in 0..=max_retries {
         let backends_ref: Vec<_> = resolved_route.backends.iter().map(|rb| rb.backend.clone()).collect();
@@ -134,15 +348,17 @@ async fn handle_request(
 
         state.selector.inc_connection(&resolved_route.route_id, &backend.id);
         let start = Instant::now();
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let attempt_no = attempt as i64 + 1;
 
         let (forward_body, forward_url) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
 
         let mut req_builder = state.http_client.post(&forward_url)
             // 流式长生成（推理模型/长输出）远超 request_timeout，单独放宽到 stream_timeout
             .timeout(std::time::Duration::from_secs(if is_stream {
-                state.config.defaults.stream_timeout_secs
+                state.config.read().defaults.stream_timeout_secs
             } else {
-                state.config.defaults.request_timeout_secs
+                state.config.read().defaults.request_timeout_secs
             }))
             .header("Content-Type", "application/json");
 
@@ -166,6 +382,17 @@ async fn handle_request(
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
+                    // 拿到响应头即算本次尝试成功（后续解析失败不改上游侧结论，也不额外补记）
+                    state.stats_writer.record_attempt(make_attempt(
+                        &request_id,
+                        attempt_no,
+                        &backend,
+                        Some(status.as_u16() as i64),
+                        None,
+                        None,
+                        latency_ms,
+                        started_at.clone(),
+                    ));
                     if is_stream {
                         // 流式：统计由 handle_stream / handle_stream_convert 在流结束时记录一次（含 SSE usage token）
                         let base = make_stat(
@@ -178,51 +405,60 @@ async fn handle_request(
                             None,
                             None,
                             true,
+                            api_key_id.as_deref(),
+                            &request_id,
+                            replayed_from,
                         );
                         // 协议匹配 → 透传；跨协议 → 实时转换（Anthropic 事件流 ↔ OpenAI chunk 流）
                         let client_anthropic = matches!(response_protocol, crate::models::proxy::Protocol::Anthropic);
                         let upstream_anthropic = matches!(resolved.platform.platform_type, crate::models::platform::PlatformType::Anthropic);
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, start));
+                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.price_pair(), start));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
                             if upstream_anthropic { "anthropic" } else { "openai" });
-                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, client_anthropic, &virtual_model, start));
+                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.price_pair(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start));
                     }
                     let body = resp.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
                     let raw: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-                    // 解析：按上游平台协议解析为统一格式
+                    let upstream_anthropic = matches!(resolved.platform.platform_type, crate::models::platform::PlatformType::Anthropic);
+                    let same_protocol = matches!(response_protocol, crate::models::proxy::Protocol::Anthropic) == upstream_anthropic;
+                    // 解析：按上游平台协议解析为统一格式（同时用于统计与签名缓存）
                     let parsed = match resolved.platform.platform_type {
                         crate::models::platform::PlatformType::Anthropic => match anthropic::parse_response(raw.clone()) {
                             Ok(ur) => ur,
                             Err(e) => {
-                                // 解析失败兜底：透传原始响应体，避免上游小差异导致整个网关 500
                                 tracing::warn!("解析 Anthropic 响应失败（透传原始响应）: {}", e);
-                                return Ok(HttpResponse::Ok().json(raw.clone()));
+                                if same_protocol {
+                                    return Ok(passthrough_response(raw, &virtual_model));
+                                }
+                                return Ok(HttpResponse::Ok().json(raw));
                             }
                         },
                         _ => match openai::parse_response(raw.clone()) {
                             Ok(ur) => ur,
                             Err(e) => {
                                 tracing::warn!("解析 OpenAI 响应失败（透传原始响应）: {}", e);
-                                return Ok(HttpResponse::Ok().json(raw.clone()));
+                                if same_protocol {
+                                    return Ok(passthrough_response(raw, &virtual_model));
+                                }
+                                return Ok(HttpResponse::Ok().json(raw));
                             }
                         },
                     };
                     let token_input = parsed.usage.as_ref().map(|u| u.prompt_tokens as i64);
                     let token_output = parsed.usage.as_ref().map(|u| u.completion_tokens as i64);
-                    // 缓存命中（OpenAI cached_tokens / Anthropic cache_read，已在协议层归一）
                     let cache_read = parsed.usage.as_ref().and_then(|u| u.cache_read_tokens).map(|v| v as i64);
                     let cache_write = parsed.usage.as_ref().and_then(|u| u.cache_write_tokens).map(|v| v as i64);
 
-                    // 生成：按客户端请求的协议格式输出
-                    let cr = match response_protocol {
-                        crate::models::proxy::Protocol::Anthropic => anthropic::to_response(&parsed),
-                        _ => openai::to_response(&parsed),
-                    };
+                    // Anthropic 上游 + tool_use：缓存 thinking 签名，供下一轮 OpenAI 客户端工具调用回放
+                    if upstream_anthropic {
+                        if let Some(msg) = parsed.choices.first().and_then(|c| c.message.as_ref()) {
+                            crate::proxy::reasoning_cache::cache_assistant_message(msg, &backend.id, &backend.model_id);
+                        }
+                    }
 
-                    // 成功路径：恰好记录一次
                     let mut stat = make_stat(
                         &resolved_route.proxy_id,
                         &resolved_route.route_id,
@@ -233,21 +469,45 @@ async fn handle_request(
                         token_output,
                         None,
                         false,
+                        api_key_id.as_deref(),
+                        &request_id,
+                        replayed_from,
                     );
                     stat.cache_read_tokens = cache_read;
                     stat.cache_write_tokens = cache_write;
+                    stat.cost = backend.estimate_cost(token_input, token_output);
                     state.stats_writer.record(stat);
+
+                    // 同协议非流式：原始响应体透传（仅把 model 改回虚拟模型名），避免重建丢失 thinking/未知字段
+                    if same_protocol {
+                        return Ok(passthrough_response(raw, &virtual_model));
+                    }
+                    let cr = match response_protocol {
+                        crate::models::proxy::Protocol::Anthropic => anthropic::to_response(&parsed),
+                        _ => openai::to_response(&parsed),
+                    };
                     return Ok(HttpResponse::Ok().json(cr));
                 } else {
-                    // 上游业务失败：先判断是否重试，不在此处记录（避免重试重复计数）
+                    // 上游业务失败：先落本次尝试轨迹，再判断是否重试（统计仍只在最终结果记录，避免重试重复计数）
                     let et = format!("{:?}", classify_error(status.as_u16()));
                     last_error = Some(format!("upstream {} ({})", status.as_u16(), et));
+                    let eb = resp.text().await.unwrap_or_default();
+                    state.stats_writer.record_attempt(make_attempt(
+                        &request_id,
+                        attempt_no,
+                        &backend,
+                        Some(status.as_u16() as i64),
+                        Some(&et),
+                        // 上游偶尔回空正文：没有内容就别存空串，前端按"只有错误类型"渲染
+                        (!eb.is_empty()).then(|| clip_error(&eb, &resolved.platform.api_key)),
+                        latency_ms,
+                        started_at.clone(),
+                    ));
                     if should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
                         tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
                         continue;
                     }
                     // 最终失败：记录一条统计并透传原始响应体
-                    let eb = resp.text().await.unwrap_or_default();
                     state.stats_writer.record(make_stat(
                         &resolved_route.proxy_id,
                         &resolved_route.route_id,
@@ -258,13 +518,26 @@ async fn handle_request(
                         None,
                         Some(et),
                         is_stream,
+                        api_key_id.as_deref(),
+                        &request_id,
+                        replayed_from,
                     ));
                     return Ok(HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY)).body(eb));
                 }
             }
             Err(e) => {
-                // 连接错误：不在此处记录，由循环结束后统一记录最终结果（避免重试重复计数）
+                // 连接错误：轨迹逐次记录（含被重试的那几次），统计只在最终结果落一条，避免重试重复计数
                 last_error = Some(format!("Connection: {}", e));
+                state.stats_writer.record_attempt(make_attempt(
+                    &request_id,
+                    attempt_no,
+                    &backend,
+                    None,
+                    Some("ConnectionError"),
+                    Some(clip_error(&e.to_string(), &resolved.platform.api_key)),
+                    latency_ms,
+                    started_at.clone(),
+                ));
                 if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
                     tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
                     continue;
@@ -280,6 +553,9 @@ async fn handle_request(
                     None,
                     Some("ConnectionError".to_string()),
                     is_stream,
+                    api_key_id.as_deref(),
+                    &request_id,
+                    replayed_from,
                 ));
             }
         }
@@ -293,21 +569,21 @@ fn build_forward_request(
     backend: &crate::models::route::Backend,
     default_max_tokens: Option<u32>,
 ) -> (serde_json::Value, String) {
-    use crate::models::route::UnknownParams;
-    // 未知参数策略：Auto 时按平台自动决定（Anthropic 严格校验未知字段 → 丢弃；OpenAI 兼容上游普遍忽略 → 透传）
-    let unknown = match &backend.unknown_params {
-        UnknownParams::Auto => match platform.platform_type {
-            crate::models::platform::PlatformType::Anthropic => UnknownParams::Drop,
-            _ => UnknownParams::Passthrough,
-        },
-        explicit => explicit.clone(),
-    };
+    use crate::protocol::reasoning::{resolve_style, ReasoningTarget};
+    // 思考参数风格：Auto 按目标平台解析；客户端未传思考配置时不会主动开启
+    let style = resolve_style(&backend.reasoning_style, &platform.platform_type);
+    let target = ReasoningTarget::new(
+        style,
+        backend.id.clone(),
+        backend.model_id.clone(),
+        backend.reasoning_echo.clone(),
+    );
     let (mut body, url) = match platform.platform_type {
         crate::models::platform::PlatformType::Anthropic => {
-            (anthropic::to_request(unified, &backend.model_id, default_max_tokens, unknown), format!("{}/v1/messages", platform.base_url.trim_end_matches('/')))
+            (anthropic::to_request(unified, &backend.model_id, default_max_tokens, backend.unknown_params.clone(), &target), format!("{}/v1/messages", platform.base_url.trim_end_matches('/')))
         }
         _ => {
-            (openai::to_request(unified, &backend.model_id, unknown), format!("{}/chat/completions", platform.base_url.trim_end_matches('/')))
+            (openai::to_request(unified, &backend.model_id, backend.unknown_params.clone(), &target), format!("{}/chat/completions", platform.base_url.trim_end_matches('/')))
         }
     };
     // 流式请求注入 stream_options.include_usage：OpenAI 兼容上游默认不在流内返回 usage chunk，
@@ -330,6 +606,20 @@ fn build_forward_request(
                 body_obj.insert(k.clone(), v.clone());
             }
         }
+    }
+    // 思考映射观测：只记录参数形态，不记录思考内容
+    if let Some(cfg) = &unified.reasoning {
+        tracing::debug!(
+            "思考映射：source={:?} style={:?} enabled={} effort={:?} budget={:?} out_thinking={} out_effort={} out_reasoning={}",
+            cfg.source,
+            target.style,
+            cfg.is_enabled(),
+            cfg.effective_effort(),
+            cfg.effective_budget_tokens(),
+            body.get("thinking").map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            body.get("reasoning_effort").map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            body.get("reasoning").map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+        );
     }
     // 部分上游（agnes）无法处理单通道灰度图，会返回 `mean must have 1 elements ...`，转发前转成 RGB
     let converted = crate::protocol::content::normalize_images_in_body(&mut body);
@@ -367,12 +657,14 @@ struct StreamStatCtx {
     cache_write: std::sync::atomic::AtomicI64,
     failed: std::sync::atomic::AtomicBool,
     recorded: std::sync::atomic::AtomicBool,
+    /// 单价对（每 100 万 token）：token 在流结束时才知道，所以价格先随上下文带进来
+    prices: Option<(f64, f64)>,
     writer: StatsWriter,
 }
 
 impl StreamStatCtx {
     /// start 必须是请求发出时刻（与 latency_ms 同源），首字时长以此为基准
-    fn new(base: RequestStat, writer: &StatsWriter, start: Instant) -> Self {
+    fn new(base: RequestStat, writer: &StatsWriter, start: Instant, prices: Option<(f64, f64)>) -> Self {
         Self {
             base,
             start,
@@ -383,6 +675,7 @@ impl StreamStatCtx {
             cache_write: std::sync::atomic::AtomicI64::new(0),
             failed: std::sync::atomic::AtomicBool::new(false),
             recorded: std::sync::atomic::AtomicBool::new(false),
+            prices,
             writer: writer.clone(),
         }
     }
@@ -422,6 +715,7 @@ impl StreamStatCtx {
         let mut stat = self.base.clone();
         stat.token_input = Some(self.token_in.load(Ordering::SeqCst));
         stat.token_output = Some(self.token_out.load(Ordering::SeqCst));
+        stat.cost = crate::models::route::cost_from_prices(self.prices, stat.token_input, stat.token_output);
         // 缓存命中仅在流内出现过 usage 时非 0
         let cr = self.cache_read.load(Ordering::SeqCst);
         let cw = self.cache_write.load(Ordering::SeqCst);
@@ -495,6 +789,7 @@ fn handle_stream(
     resp: reqwest::Response,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
+    prices: Option<(f64, f64)>,
     start: Instant,
 ) -> HttpResponse {
     let s = resp.status();
@@ -511,7 +806,7 @@ fn handle_stream(
         .body("upstream stream error");
     }
 
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, prices));
     let body = StreamPassthroughBody {
         inner: Box::pin(resp.bytes_stream()),
         buffer: String::new(),
@@ -588,14 +883,22 @@ fn handle_stream_convert(
     resp: reqwest::Response,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
+    prices: Option<(f64, f64)>,
     client_anthropic: bool,
     model: &str,
+    backend_id: &str,
+    upstream_model: &str,
     start: Instant,
 ) -> HttpResponse {
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, prices));
     let body = StreamConvertBody {
         inner: Box::pin(resp.bytes_stream()),
-        converter: crate::proxy::stream_convert::StreamConverter::new(client_anthropic, model),
+        converter: crate::proxy::stream_convert::StreamConverter::new(
+            client_anthropic,
+            model,
+            backend_id,
+            upstream_model,
+        ),
         stats,
     };
     HttpResponse::Ok()
@@ -646,3 +949,13 @@ fn extract_stream_usage(payload: &str) -> Option<(i64, i64, i64, i64)> {
 
 fn classify_error(c: u16) -> ErrorType { match c { 429 => ErrorType::RateLimit, 408 => ErrorType::Timeout, s if s >= 500 => ErrorType::ServerError, _ => ErrorType::ConnectionError } }
 fn should_retry(e: &ErrorType, r: &[ErrorType]) -> bool { r.contains(e) }
+
+/// 同协议非流式响应优先透传：只把 model 改回虚拟模型名，保留 thinking / 未知字段
+fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> HttpResponse {
+    if let Some(obj) = raw.as_object_mut() {
+        if obj.contains_key("model") {
+            obj.insert("model".into(), serde_json::Value::String(virtual_model.to_string()));
+        }
+    }
+    HttpResponse::Ok().content_type("application/json").body(raw.to_string())
+}

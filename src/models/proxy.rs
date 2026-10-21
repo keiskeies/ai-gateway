@@ -22,9 +22,10 @@ pub struct UpdateProxyRequest {
     pub name: Option<String>,
 }
 
-/// Internal enum for response protocol selection (not stored in DB)
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Internal enum for protocol selection (not stored in DB)
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum Protocol {
+    #[default]
     OpenAI,
     Anthropic,
 }

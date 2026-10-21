@@ -129,6 +129,20 @@ Anthropic SDK ──→ /v1/messages ───────┘
 
 **零代码改造**，把 `base_url` 换成 `http://localhost:1994/v1` 就完事了。
 
+### 🧠 思考模式 — 客户端说了算
+
+客户端传什么思考参数，网关就翻译成上游认识的格式；客户端不传，网关不主动开启。
+
+| 客户端传入 | 上游是 Claude | 上游是 OpenAI 兼容推理模型 |
+|---|---|---|
+| `reasoning_effort: high`（OpenAI） | `thinking: {type: "enabled", budget_tokens: 16384}` | `reasoning_effort: high` |
+| `thinking: {budget_tokens: 10000}`（Anthropic） | 原样保留，`max_tokens` 不足时压缩 budget | `reasoning_effort: medium` |
+
+- 后端可配置**思考参数风格**：`Auto` / OpenAI effort / Anthropic thinking / OpenRouter / Qwen / GLM / vLLM Qwen / 禁用
+- 支持 Anthropic `thinking` / `redacted_thinking` 块的完整回放与跨协议签名缓存，多轮工具调用不会因缺少签名被上游拒绝
+- `/v1/models` 额外返回 `capabilities` / `supported_parameters` / `reasoning`，读取这些字段的客户端可自动展示思考档位
+- 注意：Qoder / Trae / WorkBuddy 等客户端是否展示“思考程度”开关，仍取决于其内置的模型能力表，不读取上述扩展字段
+
 ### 🛡️ 高可用 · 不怕单点故障
 
 - 后端挂了？**自动切换**到健康的后端
@@ -168,10 +182,40 @@ Anthropic SDK ──→ /v1/messages ───────┘
 - 🏪 **15+ 平台预设**：OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / 月之暗面 / 豆包 / Ollama / NVIDIA NIM / Azure / 云硅 / Groq / 零一万物 / 百川 ··· 一键添加
 - 🔍 **远程模型获取**：选择平台后自动拉取可用模型列表，下拉选择无需手动输入
 - 🧠 **智能能力识别**：聊天/代码/视觉/函数调用等能力自动填充
-- 🔗 **reasoning_content 支持**：兼容 NVIDIA NIM 等平台思维链输出
+- 🔗 **reasoning_content 支持**：兼容 NVIDIA NIM 等平台思维链输出；OpenAI / Anthropic 思考参数双向翻译
 - 🌙 **浅色 / 深色 / 跟随系统** 三种主题
 - 🌍 **中英双语** UI
 - ⚙️ 端口可在界面内修改，默认 1994
+- 🧭 **六页控制台**：运行总览 / 流量 / 虚拟模型 / 平台 / 密钥 / 监控大屏，筛选与分页都写进地址，刷新、前进/后退都不丢
+- 🧾 **请求轨迹与正文重放**：一次请求的每次后端尝试逐条可查；正文留存默认关闭，开启后可原样重放某一笔请求
+- 🔔 **通知中心**：Key 即将过期、平台连续失败、配额超阈值、备份过期都会落库，顶栏铃铛一点就到
+- 💰 **成本估算与预算配额**：按定价表算出每次请求的成本（并给出覆盖率），配额支持滚动窗口与超额拦截
+- 🗄️ **整库备份与恢复**：一键快照、下载、删除，原地还原前自动再留一份安全快照
+- 📤 **配置导出 / 导入与 CSV**：配置脱敏导出、预览后合并导入；流量按筛选导出 CSV，平台定价 CSV 批量进出
+- ⚡ **实时刷新**：新请求与告警通过 SSE 推送，连接断开自动退回 30 秒轮询
+
+---
+
+## 🔐 登录鉴权
+
+管理后台（平台配置、虚拟大模型、API Key、设置、概览与统计）需要登录后才能访问：
+
+- **首次启动**：打开管理页面会进入「初始化管理员账号」，设置用户名和密码后自动登录。为避免局域网内被他人抢先注册，首次初始化仅允许从本机（127.0.0.1）发起。
+- **会话**：登录状态保存在 HttpOnly Cookie 中，默认 7 天有效；右上角用户菜单可退出登录。
+- **修改密码**：设置 → 账号安全。修改后其他设备上的登录会话会立即失效。
+- **忘记密码**：停止应用，删除数据库中 `users` 与 `sessions` 两张表的记录后重启，会重新进入初始化流程。
+
+访问控制范围：
+
+| 路径 | 鉴权方式 |
+|---|---|
+| `/v1/chat/completions`、`/v1/completions`、`/v1/messages` | 网关 API Key（`Authorization: Bearer ...` 或 `x-api-key`） |
+| `/v1/models` | 公开 |
+| `/health` | 公开 |
+| `/api/auth/status`、`/api/auth/login`、`/api/auth/setup` | 公开 |
+| 其余 `/api/*`（平台 / 模型 / 虚拟大模型 / API Key / 设置 / 统计） | 管理员登录会话 |
+
+> 尚未创建任何 API Key 时网关会放行 AI 请求（兼容旧配置）；创建 API Key 后必须携带有效 Key。账号密码保存在 SQLite 中（Argon2 哈希），`config.toml` 的 `admin_token` 为历史保留字段。
 
 ---
 
@@ -199,6 +243,7 @@ cargo tauri dev
 ### 三步上手
 
 ```
+0️⃣ 初始化管理员账号 → 登录管理后台
 1️⃣ 添加平台 → 选预设 + 填 API Key → 保存
 2️⃣ 创建虚拟模型 → 选策略 + 添加后端 → 启动
 3️⃣ 改 base_url → 指向 http://localhost:1994/v1 → 完事

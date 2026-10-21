@@ -67,6 +67,9 @@ pub struct DefaultsConfig {
     /// 流式请求的超时上限：长生成/推理模型常超过 request_timeout，单独放宽
     pub stream_timeout_secs: u64,
     pub test_connection_timeout_secs: u64,
+    /// 是否把入站请求正文存进 `request_bodies`。默认 false——正文里就是用户的提示词，
+    /// 存不存是隐私决定，不是调试便利，所以只有显式开启才落库（见 §2 原则 10）。
+    pub capture_request_bodies: bool,
 }
 
 /// 系统代理检测结果
@@ -330,6 +333,7 @@ impl Default for AppConfig {
                 request_timeout_secs: 120,
                 stream_timeout_secs: 1800,
                 test_connection_timeout_secs: 10,
+                capture_request_bodies: false,
             },
         }
     }
@@ -394,6 +398,9 @@ impl AppConfig {
                         if let Some(v) = def.get("test_connection_timeout_secs").and_then(|v| v.as_integer()) {
                             config.defaults.test_connection_timeout_secs = v as u64;
                         }
+                        if let Some(v) = def.get("capture_request_bodies").and_then(|v| v.as_bool()) {
+                            config.defaults.capture_request_bodies = v;
+                        }
                     }
                     config
                 }
@@ -450,6 +457,7 @@ retry_backoff_ms = {}
 request_timeout_secs = {}
 stream_timeout_secs = {}
 test_connection_timeout_secs = {}
+capture_request_bodies = {}
 "#,
             self.server.host,
             self.server.admin_port,
@@ -463,6 +471,7 @@ test_connection_timeout_secs = {}
             self.defaults.request_timeout_secs,
             self.defaults.stream_timeout_secs,
             self.defaults.test_connection_timeout_secs,
+            self.defaults.capture_request_bodies,
         ))
     }
 }

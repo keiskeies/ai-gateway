@@ -20,6 +20,65 @@ pub struct RequestStat {
     pub cache_write_tokens: Option<i64>,
     /// 是否流式请求
     pub is_stream: bool,
+    /// 发起请求的网关 API Key（未鉴权或旧数据为 None）
+    pub api_key_id: Option<String>,
+    /// 成本估算：单价齐备（入与出都按每 100 万 token 定价）且 token 数齐备时才算得出，
+    /// 否则为 None（未定价模型、只填一侧、上游没回 usage、失败请求、V15 之前的旧行）
+    pub cost: Option<f64>,
+    /// 网关侧请求 ID（V16）：同一次请求的所有尝试共享，用于关联 `request_attempts`；
+    /// 迁移前写入的旧行为 None，前端据此显示"轨迹不可用"而不是伪造链路
+    pub request_id: Option<String>,
+    /// 这条请求是不是重放出来的：存被重放那条 `request_stats.id`（V21）。
+    /// 重放会产生费用与副作用，所以新行必须能看出它是重放，而不是又一条普通流量。
+    pub replayed_from: Option<i64>,
+}
+
+/// 入站请求正文，仅在 `defaults.capture_request_bodies` 开启时落库（V21）。
+/// 存的是调用方送来的原始 JSON，不是转换后的上游请求——重放要还原的是"客户端发了什么"，
+/// 上游那一份每次重放都会按当时的路由与后端重新生成。
+#[derive(Debug, Clone)]
+pub struct RequestBody {
+    pub request_id: String,
+    /// 入站协议（`openai` / `anthropic`）：决定重放时用哪个解析器
+    pub protocol: String,
+    pub body: String,
+    /// 正文 UTF-8 字节数，用于设置页读数与上限判断（不靠 LENGTH()，那是字符数）
+    pub bytes: i64,
+    pub created_at: String,
+}
+
+/// 一次请求里"发往某个后端"的单条尝试。重试与 fallback 各占一行，
+/// 因此最终失败的请求也能看出依次试过哪些后端。
+/// 不落库：请求/响应正文、首字时长（ttft 只在最终那条 `request_stats` 上）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestAttempt {
+    pub id: i64,
+    pub request_id: String,
+    /// 第几次尝试，从 1 开始
+    pub attempt_no: i64,
+    pub backend_id: Option<String>,
+    pub platform_id: Option<String>,
+    /// 实际发往上游的模型 ID（与虚拟模型名可能不同）
+    pub model_id: Option<String>,
+    /// HTTP 状态；连接失败为 0，尝试还没拿到响应时为 None
+    pub status_code: Option<i64>,
+    pub error_type: Option<String>,
+    /// 截断后的错误摘要（上限 300 字符），不含密钥与请求正文
+    pub error_message: Option<String>,
+    pub latency_ms: Option<i64>,
+    pub started_at: String,
+    /// JOIN platforms 得到的展示名；平台已删除时为 None
+    pub platform_name: Option<String>,
+}
+
+/// 请求轨迹：某条 `request_stats` 行对应的全部尝试
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestTrace {
+    /// 明细行 ID
+    pub request_stat_id: i64,
+    /// V16 之前或未经网关的请求为 None，此时 attempts 为空
+    pub request_id: Option<String>,
+    pub attempts: Vec<RequestAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +110,10 @@ pub struct OverviewStats {
     /// 缓存命中率 %：cache_read / (cache_read + fresh_input)，与 CC Switch 口径一致；
     /// 分母（可缓存 prompt）为 0 时为 0
     pub cache_hit_rate: f64,
+    /// 成本估算合计：范围内所有已定价请求的 cost 之和；一条都没有时为 None（区别于 0）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数（cost 非 NULL 的行数）；覆盖率 = priced_requests / total_requests
+    pub priced_requests: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +126,19 @@ pub struct ProxyStats {
     pub requests_today: i64,
     pub total_token_input: i64,
     pub total_token_output: i64,
+    /// 成本估算合计（无已定价请求时为 None）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数
+    pub priced_requests: i64,
+}
+
+/// 删除虚拟模型会被一并销毁的历史数据量（不受时间范围影响，只用于删除确认的披露）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyHistoryImpact {
+    /// 该模型名下的请求统计行数
+    pub requests: i64,
+    /// 这些请求的重试轨迹行数
+    pub attempts: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +161,10 @@ pub struct PlatformStats {
     pub avg_latency_ms: f64,
     pub total_token_input: i64,
     pub total_token_output: i64,
+    /// 成本估算合计（无已定价请求时为 None）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数
+    pub priced_requests: i64,
 }
 
 /// 模型时间序列统计单点数据
@@ -142,6 +222,46 @@ pub struct ModelSummary {
     pub fresh_input_tokens: i64,
     /// 缓存命中率 %：cache_read / (cache_read + fresh_input)；分母为 0 时为 0
     pub cache_hit_rate: f64,
+    /// 成本估算合计（该模型的行全部未定价时为 None）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数
+    pub priced_requests: i64,
+}
+
+/// 请求明细筛选：`/api/stats/requests` 的查询串直接反序列化，同时作为 db 层入参。
+/// 空值（None / 空串）一律表示"不筛"。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RequestFilter {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// 后端模型 id，精确匹配
+    pub model: Option<String>,
+    /// success / fail，其余值视为全部
+    pub status: Option<String>,
+    /// 平台 id
+    pub platform: Option<String>,
+    /// 虚拟模型（proxy）id
+    pub proxy: Option<String>,
+    /// API Key id
+    pub api_key: Option<String>,
+    /// 错误类型，精确匹配
+    pub error_type: Option<String>,
+    /// 跨模型 / 平台 / 虚拟模型 / Key 名称的模糊搜索
+    pub q: Option<String>,
+    /// 延迟下限（毫秒），含
+    pub latency_min: Option<i64>,
+    /// 延迟上限（毫秒），含
+    pub latency_max: Option<i64>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    /// 排序列（前端列 id）。只有 `db::stats::requests_order` 白名单里的键会被翻译成 SQL，
+    /// 其余值一律回落到默认的时间倒序——ORDER BY 不能参数化，所以这里靠白名单而不是绑定。
+    pub sort: Option<String>,
+    /// `asc` 才是升序，其余（含缺省）都是降序
+    pub dir: Option<String>,
+    /// 导出行数上限，只有 `/api/stats/requests/export` 读它；放在同一个结构里是为了让
+    /// 列表和导出共用同一份查询串定义，否则两边筛选迟早长得不一样。
+    pub limit: Option<i64>,
 }
 
 /// 请求明细单行（概览大屏请求日志表）
@@ -167,6 +287,53 @@ pub struct RequestLogItem {
     pub fresh_input_tokens: Option<i64>,
     pub is_stream: bool,
     pub error_type: Option<String>,
+    /// 发起请求的 API Key 名称（未鉴权或旧数据为 None）
+    pub api_key_name: Option<String>,
+    /// 本条请求的成本估算（模型未定价、只填一侧、上游无 usage 或旧数据时为 None）
+    pub cost: Option<f64>,
+    /// 网关侧请求 ID；None 表示这条记录早于 V16，重试轨迹不可查
+    pub request_id: Option<String>,
+    /// 网关为这一笔请求发出的尝试次数（含重试与 fallback），至少为 1；
+    /// None 表示这条记录早于 V16，次数无从查起——不是 0 次，0 次尝试的请求不存在
+    pub attempts: Option<i64>,
+    /// 这条请求的正文是否存着（正文采集开着时为 true）——重放按钮据此决定可用与否，
+    /// 而不是点了之后才告诉用户"没存正文"
+    pub has_body: bool,
+    /// 由哪条请求重放而来（V21）；None 表示不是重放
+    pub replayed_from: Option<i64>,
+}
+
+/// 密钥维度用量汇总：时间范围内每个 API Key 的请求/成功/失败/token/延迟
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyUsage {
+    pub api_key_id: String,
+    pub requests: i64,
+    pub success_requests: i64,
+    pub failed_requests: i64,
+    pub token_input: i64,
+    pub token_output: i64,
+    pub avg_latency_ms: f64,
+    pub last_used: Option<String>,
+    /// 成本估算合计（该 Key 的请求全部未定价时为 None）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数
+    pub priced_requests: i64,
+}
+
+/// 单个密钥的模型维度拆分
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyModelUsage {
+    pub model_id: String,
+    pub requests: i64,
+    pub failed_requests: i64,
+    pub token_input: i64,
+    pub token_output: i64,
+    pub avg_latency_ms: f64,
+    pub last_used: Option<String>,
+    /// 成本估算合计（该 Key 在这个模型上的请求全部未定价时为 None）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数，小于 requests 说明窗口内改过价或模型未定价
+    pub priced_requests: i64,
 }
 
 /// 请求明细分页结果
@@ -176,6 +343,10 @@ pub struct RequestLogPage {
     pub page: i64,
     pub page_size: i64,
     pub items: Vec<RequestLogItem>,
+    /// 整个筛选集（不止当前页）的成本估算合计；一条已定价的都没有时为 None
+    pub total_cost: Option<f64>,
+    /// 筛选集中参与成本估算的请求数；覆盖率 = priced_requests / total
+    pub priced_requests: i64,
 }
 
 /// 错误类型分布单项（概览大屏错误分析面板）
@@ -215,4 +386,34 @@ pub struct LatencyPercentiles {
     pub p90: f64,
     pub p99: f64,
     pub max: f64,
+}
+
+/// 平台连通性检测的单次记录（`POST /api/platforms/test` 对已保存平台的落库行）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformHealth {
+    pub id: i64,
+    pub platform_id: String,
+    pub ok: bool,
+    pub latency_ms: i64,
+    pub model_count: i64,
+    /// 失败原因（成功时为 None）
+    pub error: Option<String>,
+    pub created_at: String,
+}
+
+/// 平台健康汇总：时间范围内每平台一行，列表页 CHECK 列直接读这份
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformHealthSummary {
+    pub platform_id: String,
+    /// 范围内检测次数
+    pub checks: i64,
+    /// 范围内失败次数
+    pub failures: i64,
+    /// 范围内最后一次检测的结果；无检测时为 None（UI 显示"未检测"）
+    pub last_ok: Option<bool>,
+    pub last_latency_ms: Option<i64>,
+    /// 最后一次检测拉到的模型数（Anthropic 这类无列表接口时为 0）
+    pub last_model_count: Option<i64>,
+    pub last_error: Option<String>,
+    pub last_checked_at: Option<String>,
 }

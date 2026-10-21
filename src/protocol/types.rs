@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use super::reasoning::{MaxTokensField, ReasoningConfig};
+
 /// 统一内部消息格式 - 所有协议转换的中间表示
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedRequest {
@@ -13,6 +15,15 @@ pub struct UnifiedRequest {
     pub stop: Option<Vec<String>>,
     pub tools: Option<Vec<UnifiedTool>>,
     pub tool_choice: Option<ToolChoice>,
+    /// 客户端入口协议，用于决定未知参数策略和同协议回放
+    #[serde(default)]
+    pub source_protocol: crate::models::proxy::Protocol,
+    /// 归一化后的思考配置
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+    /// 客户端原始 max_tokens 字段名
+    #[serde(default)]
+    pub max_tokens_field: MaxTokensField,
     /// 保留原始请求中的未知字段，确保端到端透传不丢失
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -28,6 +39,12 @@ pub struct UnifiedMessage {
     pub tool_calls: Option<Vec<UnifiedToolCall>>,
     pub tool_call_id: Option<String>,
     pub name: Option<String>,
+    /// Anthropic thinking / redacted_thinking 原始块（含 signature / data）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_blocks: Vec<serde_json::Value>,
+    /// Anthropic 入口的完整 assistant content 原始块序列，同协议时原样回放
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_blocks: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
