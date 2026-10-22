@@ -27,7 +27,6 @@ PIXEL_FLOOR = 24
 RATIO_LIMIT = 0.0005
 
 SHOTS = [
-    ("/", ".console-shell", "dark"),
     ("/traffic", ".console-shell", "dark"),
     ("/settings", ".console-shell", "light"),
     ("/wall", ".wall-root", "dark"),

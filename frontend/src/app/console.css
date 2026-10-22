@@ -2846,36 +2846,16 @@ h4,
 /* ---------- wall route ---------- */
 .wall-route {
   min-height: 100vh;
-  padding: 8px;
-  background: var(--wall-bg);
+  padding: 16px;
 }
 
 .wall-route .wall-root {
-  min-height: calc(100vh - 16px);
+  min-height: calc(100vh - 32px);
 }
 
+/* 退出按钮现在在页头动作区（不再悬浮盖住面板），类名留给 E2E 定位 */
 .wall-route-exit {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 80;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 11px;
-  border: 1px solid var(--line-strong);
-  border-radius: 7px;
-  background: var(--panel-bg);
-  color: var(--text-2);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
   cursor: pointer;
-}
-
-.wall-route-exit:hover {
-  border-color: var(--accent);
-  color: var(--text-1);
 }
 
 /* ---------- responsive ---------- */

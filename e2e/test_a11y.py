@@ -10,7 +10,6 @@ axe 只覆盖机器能判定的那部分（可访问名、对比度、landmark�
 import json
 
 PAGES = [
-    ("/", ".console-shell"),
     ("/traffic", ".console-shell"),
     ("/models", ".console-shell"),
     ("/providers", ".console-shell"),

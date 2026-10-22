@@ -4,7 +4,6 @@ import {
   IconCloudShare,
   IconDeviceDesktop,
   IconKey,
-  IconLayoutDashboard,
   IconSettings,
   IconStack2,
   IconTerminal2,
@@ -23,7 +22,6 @@ export const NAV_GROUPS: { label: TranslationKey; items: NavItem[] }[] = [
   {
     label: 'navRun',
     items: [
-      { path: '/', label: 'overview', icon: IconLayoutDashboard },
       { path: '/traffic', label: 'traffic', icon: IconActivity },
       { path: '/wall', label: 'wall', icon: IconDeviceDesktop },
     ],

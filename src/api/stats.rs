@@ -156,10 +156,18 @@ pub async fn model_timeseries(
     Ok(HttpResponse::Ok().json(stats))
 }
 
-pub async fn error_stats(db: web::Data<DbPool>, query: web::Query<RangeQuery>) -> AppResult<HttpResponse> {
+#[derive(Debug, Deserialize)]
+pub struct ErrorQuery {
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// 可选：只看某个后端模型的错误，供大屏矩阵的失败数下钻
+    pub model: Option<String>,
+}
+
+pub async fn error_stats(db: web::Data<DbPool>, query: web::Query<ErrorQuery>) -> AppResult<HttpResponse> {
     let db = db.into_inner();
     let q = query.into_inner();
-    let stats = web::block(move || crate::db::stats::error_stats(&db, q.from.as_deref(), q.to.as_deref()))
+    let stats = web::block(move || crate::db::stats::error_stats(&db, q.from.as_deref(), q.to.as_deref(), q.model.as_deref()))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
     Ok(HttpResponse::Ok().json(stats))
 }

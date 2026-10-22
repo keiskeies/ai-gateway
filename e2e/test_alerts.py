@@ -18,7 +18,7 @@ def test_alert_bell_deep_link_and_auto_resolve(console, page, api, errors):
     assert any(item["dedupe_key"] == dedupe for item in alerts["items"]), alerts["items"]
 
     try:
-        console.goto(page, "/")
+        console.goto(page, "/traffic")
         page.wait_for_selector(".console-bell-badge", timeout=20000)
         console.click(page, ".console-bell")
         page.wait_for_selector(".console-alerts-dropdown", timeout=10000)

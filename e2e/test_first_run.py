@@ -66,7 +66,7 @@ def test_setup_then_wizard(instances, browser_factory, mock_upstream):
 
     # 跳过向导：写 localStorage，之后不再自动弹出（第一个按钮是"退出到总览"，只写 seen）
     console.click_text(page, "跳过向导")
-    page.wait_for_function("() => location.hash === '#/'", timeout=10000)
+    page.wait_for_function("() => location.hash === '#/traffic'", timeout=10000)
     assert page.evaluate("() => localStorage.getItem('wizard')") == "skipped"
     page.goto(f"{api.base}/?v=2#/", wait_until="domcontentloaded")
     page.wait_for_selector(".console-live", timeout=15000)

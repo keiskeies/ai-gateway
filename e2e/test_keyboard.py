@@ -11,7 +11,6 @@ axe 只管"有没有可访问名"，管不了"键盘能不能走通"。这条钉
 import pytest
 
 PAGES = [
-    ("/", ".console-shell"),
     ("/traffic", ".console-shell"),
     ("/models", ".console-shell"),
     ("/providers", ".console-shell"),

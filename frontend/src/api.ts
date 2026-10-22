@@ -241,7 +241,7 @@ export const getModelTimeSeries = (
   opts?: { from?: string; to?: string; limit?: number }
 ) =>
   api.get('/stats/model-timeseries', { params: { granularity, ...opts } }).then(r => r.data)
-export const getErrorStats = (opts?: RangeOpts) => api.get('/stats/errors', { params: opts }).then(r => r.data)
+export const getErrorStats = (opts?: RangeOpts & { model?: string }) => api.get('/stats/errors', { params: opts }).then(r => r.data)
 export const getHeatmap = (opts?: RangeOpts) => api.get('/stats/heatmap', { params: opts }).then(r => r.data)
 export const getLatencyPercentiles = (opts?: RangeOpts) => api.get('/stats/latency', { params: opts }).then(r => r.data)
 // 模型维度汇总（时间范围内每模型全量统计：请求/失败/token/延时/首字/速度）

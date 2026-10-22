@@ -312,6 +312,23 @@ export default function Traffic() {
     staleTime: 60_000,
   })
 
+  // 总览并进流量页：状态带 / 待处理 / 首次配置都复用这里已有的查询，不再额外请求
+  const summaries = modelsQuery.data ?? []
+  const options = optionsQuery.data
+  const topError = options?.kinds?.[0]
+  const failedModel = summaries.find(row => row.requests > 0 && row.failed_requests > 0)
+  const idleKey = options?.keys?.find(key => !key.last_used)
+  const issueCount = (topError ? 1 : 0) + (failedModel ? 1 : 0) + (idleKey ? 1 : 0)
+  const missingSetup = !!options && options.platforms.length === 0 && options.proxies.length === 0 && options.keys.length === 0
+
+  // 全新安装第一次进控制台直接接入向导；跳过或完成后不再打断
+  useEffect(() => {
+    if (!options || localStorage.getItem('wizard')) return
+    if (!missingSetup || (data?.total ?? 0) > 0) return
+    localStorage.setItem('wizard', 'seen')
+    navigate('/setup', { replace: true })
+  }, [options, missingSetup, data?.total, navigate])
+
   const filterOptions = useMemo(() => {
     const withAll = (allLabel: string, items: { id: string; name: string }[]) => [
       { value: '__all__', label: allLabel },
@@ -459,6 +476,18 @@ export default function Traffic() {
 
   return (
     <div className="console-page">
+      {/* 运行状态带：实例 / 运行中 / 有没有事，一眼看完 */}
+      <div className="console-status-strip">
+        <span className="console-dot ok" />
+        <strong>{t(locale, 'localInstance')}</strong>
+        <span>{t(locale, 'running')}</span>
+        <span className="console-status-sep">·</span>
+        <span className={`console-issue${issueCount > 0 ? ' warn' : ''}`}>
+          <span className={`console-dot ${issueCount > 0 ? 'warn' : 'ok'}`} />
+          {issueCount > 0 ? t(locale, 'needsAttention', String(issueCount)) : t(locale, 'allHealthy')}
+        </span>
+      </div>
+
       <PageHeader
         kicker={<>{t(locale, 'kickerRun')} <span className="console-kicker-sep" /> {t(locale, 'kickerTraffic')}</>}
         title={t(locale, 'traffic')}
@@ -481,6 +510,77 @@ export default function Traffic() {
           </>
         }
       />
+
+      {missingSetup && (
+        <section className="console-panel console-setup">
+          <div className="console-setup-copy">
+            <div className="console-kicker">{t(locale, 'kickerGetStarted')}</div>
+            <h2>{t(locale, 'gettingStartedTitle')}</h2>
+            <p>{t(locale, 'setupDesc')}</p>
+            <Button size="xs" mt="sm" onClick={() => navigate('/setup')}>{t(locale, 'wizardOpen')}</Button>
+          </div>
+          <div className="console-setup-steps">
+            {[
+              { done: (options?.platforms.length ?? 0) > 0, title: t(locale, 'stepPlatforms'), path: '/providers' },
+              { done: (options?.proxies.length ?? 0) > 0, title: t(locale, 'stepModels'), path: '/models' },
+              { done: (options?.keys.length ?? 0) > 0, title: t(locale, 'stepKeys'), path: '/keys' },
+              { done: (data?.total ?? 0) > 0, title: t(locale, 'stepRequests'), path: '/playground' },
+            ].map((step, index) => (
+              <button
+                key={step.path}
+                type="button"
+                className={`console-setup-step${step.done ? ' done' : ''}`}
+                onClick={() => navigate(step.path)}
+              >
+                <span className="console-setup-index">0{index + 1}</span>
+                <span>{step.title}</span>
+                <span className={`console-dot ${step.done ? 'ok' : 'idle'}`} />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {issueCount > 0 && (
+        <section className="console-panel">
+          <div className="console-panel-head">
+            <div className="console-panel-title">{t(locale, 'attentionTitle')}</div>
+            <StatusPill tone="warn">{t(locale, 'needsAttention', String(issueCount))}</StatusPill>
+          </div>
+          <div className="console-attention-list">
+            {topError && (
+              <button type="button" className="console-attention-item err" onClick={() => applyParams({ error: topError.kind })}>
+                <span className="console-attention-bar" />
+                <span className="console-attention-main">
+                  <span className="console-attention-title">{topError.kind} · {topError.count}</span>
+                  <span className="console-attention-meta">{t(locale, 'failures')} · {range.toUpperCase()}</span>
+                </span>
+                <span className="console-attention-chev">›</span>
+              </button>
+            )}
+            {failedModel && (
+              <button type="button" className="console-attention-item warn" onClick={() => applyParams({ model: failedModel.model_id })}>
+                <span className="console-attention-bar" />
+                <span className="console-attention-main">
+                  <span className="console-attention-title">{failedModel.model_id} · {failedModel.failed_requests} {t(locale, 'failures')}</span>
+                  <span className="console-attention-meta">{t(locale, 'successShort')} {((failedModel.success_requests / Math.max(1, failedModel.requests)) * 100).toFixed(1)}%</span>
+                </span>
+                <span className="console-attention-chev">›</span>
+              </button>
+            )}
+            {idleKey && (
+              <button type="button" className="console-attention-item idle" onClick={() => navigate('/keys')}>
+                <span className="console-attention-bar" />
+                <span className="console-attention-main">
+                  <span className="console-attention-title">Key {idleKey.name} · {t(locale, 'noTraffic')}</span>
+                  <span className="console-attention-meta">{new Date(idleKey.created_at).toLocaleDateString()}</span>
+                </span>
+                <span className="console-attention-chev">›</span>
+              </button>
+            )}
+          </div>
+        </section>
+      )}
 
       <div className="console-panel console-filterbar">
         <Menu shadow="md" width={280}>

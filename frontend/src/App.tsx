@@ -9,7 +9,6 @@ import { getAuthStatus, type AuthStatus } from './api'
 import { useAppContext } from './ThemeContext'
 import { t } from './i18n'
 
-const Overview = lazy(() => import('./pages/Overview'))
 const Traffic = lazy(() => import('./pages/Traffic'))
 const Models = lazy(() => import('./pages/Models'))
 const ModelDetail = lazy(() => import('./pages/ModelDetail'))
@@ -102,7 +101,7 @@ export default function App() {
           </LiveProvider>
         )}
       >
-        <Route path="/" element={<Overview />} />
+        <Route path="/" element={<Navigate to="/traffic" replace />} />
         <Route path="/traffic" element={<Traffic />} />
         <Route path="/models" element={<Models />} />
         <Route path="/models/:id" element={<ModelDetail />} />

@@ -199,8 +199,7 @@
 
 ```
 运行
-  总览        /
-  流量        /traffic
+  流量        /traffic   （默认首页；原"运行总览"已并入，`/` 重定向到这里）
   监控墙      /wall
 配置
   虚拟模型    /models
@@ -213,15 +212,16 @@
 ```
 
 - 导航分组固定为“运行 / 配置 / 工具 / 系统”；不再出现“导航/NAVIGATION”标签。
-- 每组内按使用频率排序；`总览`和`流量`是最高频。
+- 每组内按使用频率排序；`流量`是最高频，也是默认首页。
 - `监控墙`是运行组里的一个入口，不再占用默认首页。
+- 2026-10-22 修订：`运行总览` 与监控墙的数据大面积重叠（KPI / 趋势 / 矩阵 / 最近失败），已并入 `流量` 页顶部（状态带、待处理、首次配置），导航只保留 `流量` 与 `监控墙` 两个入口。
 - `设置`保持在系统组；账号/主题/语言仍可从顶栏用户菜单进入。
 
 ### 5.2 路由表
 
 | 路径 | 页面 | 说明 |
 | --- | --- | --- |
-| `/` | 运行总览 | 默认首页；健康、待处理、KPI、实时流量、最近失败 |
+| `/` | → `/traffic` | 运行总览已并入流量页；`/` 直接重定向 |
 | `/traffic` | 流量 | 请求列表、错误聚合、慢请求、详情 Inspector |
 | `/wall` | 监控墙 | 全屏只读；隐藏外壳；Esc 退出 |
 | `/models` | 虚拟模型列表 | 搜索、筛选、健康/用量列、创建 |
@@ -240,7 +240,7 @@
 
 | 旧路径 | 新行为 |
 | --- | --- |
-| `/` | 新运行总览 |
+| `/` | 重定向到 `/traffic`（原运行总览已并入） |
 | `/platforms` | 重定向到 `/providers` |
 | `/proxies` | 重定向到 `/models` |
 | `/api-keys` | 重定向到 `/keys` |
@@ -422,7 +422,9 @@
 
 ## 7. 页面规格
 
-### 7.1 运行总览 `/`
+### 7.1 运行总览 `/`（已并入 `/traffic`，2026-10-22）
+
+> 本节保留为设计记录。状态带、待处理事项与首次配置清单已搬到流量页顶部；KPI / 趋势 / 模型矩阵 / 最近失败不再在控制台重复，统一由 `/wall` 承担。
 
 **目标**：3 秒内回答“网关是否健康、哪里需要处理、下一步去哪”。
 
@@ -899,6 +901,31 @@
 - 预览实测（1995）：中文"今日"`成本 0.000173 · 覆盖 18%`，切"全部"→ `覆盖 <1%`；明细列中英文表头 `成本` / `Cost`，同一列同时出现 `—`、`0.000096`、`0.000077`。1920（7 列、卡宽 252px）与 1440（4 列）各量一遍：每卡 `scrollWidth − clientWidth = 0`、脚注都是单行；明细表 `clientWidth == scrollWidth`（1337 / 1802）。全屏模式不放大 `.wall-kpi-sub`，没有额外折行风险。`npx tsc --noEmit` 干净，页面 0 error。
 - 新踩的坑：重新构建后浏览器仍在用缓存的旧 `index.html`，它引用的 `Wall-mapf8WDF.js` 已不存在，结果是整页白屏 + 3 条 404，看起来像应用挂了。验证时要给文档 URL 带 `?v=N` 重新打开（只改 hash 不会重取 HTML，`location.reload()` 也可能命中缓存）。
 
+**实现进度（大屏与控制台设计语言对齐，已完成）**
+
+问题：`/wall` 当时是另一套皮肤——外层再套一张带描边和发光的圆角卡、56px 自绘页头、7 张带水印图标和强调竖条的 KPI 卡、面板头没有 44px 分隔带，退出按钮还悬浮在右下角盖住健康看板。远看是"大屏"，近看像另一个产品。
+
+改成与控制台其余页面共用同一套骨架，只保留"远看"该保留的东西：
+
+- **去掉外层卡**：`.wall-root` 不再有边框/圆角/内边距/发光，页面直接坐在应用底色上，栅格间距 12 → 14px，与 `.console-page` 一致。
+- **页头复用 `.console-page-head`**：kicker（实时信号）+ `.console-page-title`（监控大屏，28px）+ `.console-page-sub`（时段 · 时钟），右侧 `.console-page-actions` 放时段分段控件与自动刷新 / 暂停 / 全屏 / 退出四颗图标；退出按钮从右下角悬浮改到动作区，不再遮挡任何面板。
+- **KPI 复用 `.console-readouts`**：7 张独立卡换成一条 7 格读数条（`Readout` 组件：11px mono 标签 / 25px 大数 / 11px 脚注），删掉水印图标、每卡强调竖条、环形仪表与迷你走势——趋势图已经承担走势，环形与成功率数字重复。断点与主栅格同一处：≥1280 七格、<1280 四格、<768 两格，换行时补 1px 横分隔。
+- **面板头对齐**：`.wall-panel` 内边距改为 `0 14px 12px`，新增 `.wall-panel-head`（44px + 底部 1px 分隔线，负外边距铺满），标题字号 13 → 12px、竖条 3×14 → 2×11，与 `.console-panel-title` 一致。
+- 随之删掉 `KpiCard` / `RingGauge` / `Sparkline` 三个只服务旧皮肤的组件，以及 `.wall-kpi*`、`.wall-header*`、`.wall-token-bar`、`.wall-capsule` 约 120 行死 CSS。
+- 测试：`test_wall.py` 的选择器从 `.wall-kpi*` 迁到 `.readout*`，布局探针的列数期望改为 1280 断点；像素基线重生成。1080p 与 1280 下七格读数不折行、面板头不挤压，深浅两套截图复核通过。
+
+**实现进度（大屏去重：错误分析并入矩阵，健康看板下线，已完成）**
+
+问题：大屏上同一份数据出现两次——"虚拟模型健康看板"的每模型成功率 / 平均延迟，矩阵里本来就有；"错误分析"占一整块面板，却只在大屏角落提供全局错误分布，点不到具体模型。于是删掉两块面板，把错误分析变成矩阵失败数的下钻：
+
+- **矩阵失败数可点**：`failed_requests > 0` 时该单元格是按钮（虚线下划线 + `aria-expanded`），点开在该行下方就地展开"错误明细 · 模型名"，按错误类型列出条形与条数；再点一次或点关闭收起。切时段 / 重试时自动收起，避免旧明细挂在新数据下。没有用弹窗：大屏上弹窗会盖住上下文，行内展开更接近"在矩阵里继续看"。
+- **接口**：`GET /api/stats/errors` 增加可选 `model` 参数（按 `backends.model_id` 过滤，与矩阵同一 JOIN 口径），`total` / `success` 也随该过滤收敛。`request_stats` 本身不存 `model_id`，所以过滤必须走 `LEFT JOIN backends`；已补单测 `error_stats_filters_by_backend_model`。
+- **布局重排**：趋势图改为整行宽（给时间轴更多空间），热力图 + 平台分布同一行 7/5，矩阵与请求明细各自整行。KPI 仍是 7 格读数条。
+- **删除**：健康看板（含 `.wall-tile*` 整套样式与 `proxies` 的瓦片渲染）、错误分析面板；`healthBoard` 词条改名为"活跃代理"（KPI 仍依赖它），`errorAnalysis` 改名为"错误明细"（失败告警条与下钻面板共用）。
+- **活跃热力图自带时段**：热力图读的是"星期 × 小时"的长期作息，跟着页头"今日 / 24h"走只剩一两条星期行，等于没信息。面板头放了独立控件（默认 7 天，可选 30 天 / 12 个月 / 全部），与页头时段互不影响；悬停给出"此面板的时段独立于页头"的说明。`loadHeatmap` 从 `loadData` 的批量块里拆出来单独维护 `heatmapTitle` 失败标记，否则两个并发加载会互相把对方的失败标记清掉。E2E `test_heatmap_has_its_own_range` 断言默认窗口 7 天、切到 30 天后重新请求且窗口变长。
+- **请求明细不设内层滚动**：50 行的限高滚动和外层页面滚动叠在一起，滚轮到底该滚谁全靠鼠标位置，很难用。改成整表撑开、只保留横向滚动兜住窄屏，纵向滚动全部交给页面；`test_logs_table_expands_without_inner_scroll` 用 60 行钉住"内层 scrollHeight ≤ clientHeight"。
+- **测试**：新增 `test_matrix_failure_drilldown`（劫持 model-summaries 制造失败、劫持 errors 返回限流，断言展开行出现且请求带 `model=`）；`test_wall.py` 布局探针迁到 `.wall-pair`；像素基线重生成。21 条 E2E 全绿。
+
 **实现进度（已同步模型批量编辑，已完成）**
 
 §7.4 规格里"批量编辑（多选行改价格 / 能力）"的落地。动机很具体：ModelScope 这类公开列表一次同步进 37 行，逐点开 Modal 定价要点 37 次，而同一平台的模型常常就是同一档价格。
@@ -1161,7 +1188,7 @@
 - 监听地址非回环时显示"暴露到局域网"警告（新增 i18n `hostExposedWarning`）；改动端口/地址时额外显示"需重启"提示，保存后再用 toast 提醒一次。
 - 数据维护改为二次确认 Modal（说明删除悬挂统计行），完成后 toast 报告删除行数，并失效 overview/traffic 查询。
 - 设置读取改为 `useQuery(['settings'])`（与模型详情/试验台共用同一查询），保存后 invalidate。
-- 版本号不再硬编码：`vite.config.ts` 从 `../Cargo.toml` 读取版本并注入 `__APP_VERSION__`，侧栏 footer 显示 `v1.3.1 · LOCAL`（与后端/桌面壳同一来源）。
+- 版本号不再硬编码：`vite.config.ts` 从 `../Cargo.toml` 读取版本并注入 `__APP_VERSION__`，侧栏 footer 显示 `v1.3.2 · LOCAL`（与后端/桌面壳同一来源）。
 - 仍待办：保留期自动清理（刻意不做，见下）。
 
 **实现进度（设置页收尾：锚点导航 / DB 体积 / 按年龄清理 / 关于，已完成）**
@@ -1847,7 +1874,7 @@ frontend/src/
 
 - **单元**：纯函数（筛选、格式化、路由映射、成本计算、状态推导）。
 - **组件**：DataTable、FilterBar、TraceWaterfall、SecretField。
-- **E2E（`e2e/`，pytest + Playwright，20 条）**：夹具现起隔离实例——动态端口 + 独立 `config.toml`/`data/`，跑完整个目录删掉，并显式拒绝 1994（装好的实例）与 1995（手工预览）。上游是夹具自带的假服务，不接外部服务、不花真钱。前置产物只有 `cargo build` 与 `npm --prefix frontend run build`，运行 `python -m pytest e2e -q`（约 85s）。夹具要点：真实鼠标点击到不了 React，点击走 `element.click()`；Mantine 弹窗是 `[role=dialog]`；hash 路由要换 query 才是真的整页加载；统计要等 StatsWriter 的 500ms 批量落库，所以响应回来后先 `wait_stats()`；`Console.goto(page, route, mount)` 的挂载信号按外壳给——`/wall` 是 `.wall-root`，没有 `.console-shell`。
+- **E2E（`e2e/`，pytest + Playwright，22 条）**：夹具现起隔离实例——动态端口 + 独立 `config.toml`/`data/`，跑完整个目录删掉，并显式拒绝 1994（装好的实例）与 1995（手工预览）。上游是夹具自带的假服务，不接外部服务、不花真钱。前置产物只有 `cargo build` 与 `npm --prefix frontend run build`，运行 `python -m pytest e2e -q`（约 85s）。夹具要点：真实鼠标点击到不了 React，点击走 `element.click()`；Mantine 弹窗是 `[role=dialog]`；hash 路由要换 query 才是真的整页加载；统计要等 StatsWriter 的 500ms 批量落库，所以响应回来后先 `wait_stats()`；`Console.goto(page, route, mount)` 的挂载信号按外壳给——`/wall` 是 `.wall-root`，没有 `.console-shell`。
   - 登录 / 初始化 → 首次向导：`test_first_run.py`（全新实例，UI 建管理员 → 自动进向导 → 四步改用接口做完 → "4 / 4 步已完成" → 跳过向导后不再自动弹出）。
   - 添加平台 → 测试 → 创建虚拟模型 → 创建 Key → 试验台成功请求：`test_provider_to_request.py`（平台走 UI 弹窗与免落库的测试连接，并断言接口回传的是掩码；终点是试验台拿到 200 且明细行落库）。
   - 流量筛选 → 打开详情 → 重放：`test_traffic_replay.py`（开采集 → 明细行 → 确认框写明"会产生真实费用" → 重放面板与 toast → 重放行靠提示条进列表，带 ↻ 与"重放自 #N" → 重放行自身不存正文、再重放它 409 → 清空正文后明细与轨迹仍在）。
@@ -1856,23 +1883,23 @@ frontend/src/
   - 设置改端口警告 / 清理确认：`test_settings_guards.py`（只改表单值不保存：非回环地址出现暴露警告、改回即消失；按年龄清理走预览后取消，`/api/stats/db` 前后一致）。
   - 通知中心：`test_alerts.py`（过期 Key 触发 `key_expiry` → 铃铛徽标 → 面板 → 深链到 `/keys/:id` → 删除对象后 `?resolved=true` 里出现 `resolved_at`）。检测器阈值仍由 `cargo test --lib` 的三个单测钉住；`platform_streak` 与 zh/en 双语那条分支仍只有 1995 手工实测（§6.7）。
   - 数据库备份：`test_backup_restore.py`（立即备份 → 列表 1 份 → 快照之后建的 Key 在还原后消失、还原前自动多留一份安全快照 → 还原后会话立即失效并退回登录页）。下载 / 删除快照与 `alertBackupNone` 的出现—自动 resolve 仍只有手工实测（§7.7）。
-  - 无障碍走查：`test_a11y.py`（七个页面——六个主页面加 `/wall`——× 深浅两套配色，注入仓库里的 `frontend/node_modules/axe-core` 跑 WCAG 2.x A/AA，不联网、不装扩展；断言 0 violations 且 console 无 error）。第一次跑就找出五类真问题：两个 Burger 与主题/语言菜单没有可访问名、铃铛的可见徽标数字不在可访问名里、列宽手柄 `role="separator"` 缺 `aria-valuenow/min/max`、填充按钮白字压在 `brand[4]` 上只有 2.7:1、`.console-field` 的 label 只是控件的兄弟节点（`/settings` 上 10 个输入框没绑定）。两条要记住的：Mantine 的 `autoContrast` 按 **light** 方案的 `brand[6]` 判深浅，暗色方案真正铺的底是 `brand[4]`，所以"亮蓝底自动配深字"的意图从未生效——现在 `variantColorResolver` 把 brand 填充面的文字交给 CSS token `--accent-ink`（暗色深墨 6:1，浅色白字 5.8:1）；axe 的 `label-content-name-mismatch` 会先 `normalize('NFKD')` 再删括号内容（全角括号也算），所以可访问名里写"（未读 1 条）"等于把数字丢掉，必须写成"通知中心，未读 1 条"。结构性改动：新增 `components/Field.tsx`（label 与控件用 `useId()` 绑定），58 处手写 `.console-field` 迁过去，剩下 10 处是纯说明、Checkbox 自带 label 或多控件行组，不适用。
+  - 无障碍走查：`test_a11y.py`（六个页面——五个主页面加 `/wall`——× 深浅两套配色，注入仓库里的 `frontend/node_modules/axe-core` 跑 WCAG 2.x A/AA，不联网、不装扩展；断言 0 violations 且 console 无 error）。第一次跑就找出五类真问题：两个 Burger 与主题/语言菜单没有可访问名、铃铛的可见徽标数字不在可访问名里、列宽手柄 `role="separator"` 缺 `aria-valuenow/min/max`、填充按钮白字压在 `brand[4]` 上只有 2.7:1、`.console-field` 的 label 只是控件的兄弟节点（`/settings` 上 10 个输入框没绑定）。两条要记住的：Mantine 的 `autoContrast` 按 **light** 方案的 `brand[6]` 判深浅，暗色方案真正铺的底是 `brand[4]`，所以"亮蓝底自动配深字"的意图从未生效——现在 `variantColorResolver` 把 brand 填充面的文字交给 CSS token `--accent-ink`（暗色深墨 6:1，浅色白字 5.8:1）；axe 的 `label-content-name-mismatch` 会先 `normalize('NFKD')` 再删括号内容（全角括号也算），所以可访问名里写"（未读 1 条）"等于把数字丢掉，必须写成"通知中心，未读 1 条"。结构性改动：新增 `components/Field.tsx`（label 与控件用 `useId()` 绑定），58 处手写 `.console-field` 迁过去，剩下 10 处是纯说明、Checkbox 自带 label 或多控件行组，不适用。
   - 监控大屏与三宽度走查：`test_wall.py`。① `/wall` 上 7 张 KPI 卡都有读数、热力格 7×24 在、那一笔请求出现在模型矩阵里（矩阵按**后端 model_id** 聚合，网关名只在健康看板与明细的"网关"列）、退出按钮把 AppShell 换回来。② 1280×800 / 1440×900 / 1920×1080 × 深浅共 6 组，每组断言：整页不横向溢出、顶层容器不越出视口、读数不被裁（声明了 `text-overflow: ellipsis` 的算有意截断，不算事故）、KPI 与主/次栅格的列数等于期望、热力格没被压到 6px 以下、退出按钮留在视口内；整页截图落在 `.dsh-tmp/wall/` 供人眼复核。断点期望用页面里的 `matchMedia` 反推，不写死宽度边界——1280 正好压在 `.wall-main-grid` 的 `max-width: 1279px` 上，视口宽度算不算滚动条会决定走哪个分支。这条找出两个真问题：大屏页头与矩阵面板的 5 个图标按钮（自动刷新 / 暂停 / 全屏 / 堆叠切换 / 刷新）没有可访问名，明细分页与"全部模型"下拉也没有名字；趋势图 Y 轴在只有 1 笔请求时刻出 `1 / 1 / 1 / 0 / 0`——recharts 按小数分档、`tickFormatter` 再取整，`allowDecimals={false}` 修掉（大屏与概览两处），并把"Y 轴刻度不得重复"写进探针钉住。
   - 大屏局部取数失败：`test_wall.py::test_wall_names_what_failed_and_recovers`（深浅两套配色各跑一遍）。`page.route` 掐掉 `/api/stats/heatmap` 与 `/api/stats/errors` 两条，断言：页头下方出现 `.wall-failbar`，文案点名"活跃热力图 / 错误分析"，且**不**点名取到了的三块（模型性能矩阵 / 平台分布 / 健康看板）——点名不能退化成"整页都坏了"；KPI 7 张与矩阵行仍在，局部失败不塌成整页；放开路由点重试，告警条消失、热力格 7×24 回来、`—` 全部退回真读数。掐接口必然留下 `net::ERR_FAILED` 资源日志，所以只听 `pageerror`，不断 `errors == []`。实现侧：`loadData`/`loadTs`/`loadLogs` 各自把失败模块写进同一份清单（三组并发写，用 `useRef` + 一次 tick 收口，避免互相覆盖），成功一轮整批摘掉，重试按钮点一次拉全部。光有告警条还不够——面板那头的"暂无统计数据 / 暂无错误 / 0 总计 / 成功 0 · 失败 0"是把"没取到"说成"确实没有"，跟告警条当面矛盾，所以七块面板各自按失败清单渲染"这一块的数取不到，点上方重试"，`KpiCard` 加 `missing` 把大数换成 `—`（灰、不抢视线，但绝不是 0），面板副行的计数与明细的"共 N 条"同样换成 `—`。
-  - 键盘走查：`test_keyboard.py`（七个页面 × 深浅两套配色，每页连按 Tab：落点必须每次真的换元素——按 `data-e2e-tab` 标记比对，不看名字，两个同名"删除"按钮本来都该是合法落点；必须是可交互元素；必须带可见焦点环，`outline` 或 `box-shadow` 之一即可。Tab 序走完时焦点交给浏览器（`activeElement` 回到 body），那是终点不是缺陷，所以断言改成"走完之前每个落点合格 + 每页至少 6 个落点"。实测七个页面各 14 个落点全部有焦点环，落点类型只有 `button` 与 `input`（侧栏导航是 Mantine `UnstyledButton`）。弹窗那半：先 `focus()` 再合成 `click()` 打开"添加平台"——合成点击不带焦点，否则验不了"关闭后焦点回到触发元素"——断言焦点进 `[role=dialog]`、连按 12 次 Tab 出不去、Esc 后焦点回到那颗按钮。
-  - 像素级视觉回归：`test_visual.py`（四屏：`/` 暗、`/traffic` 暗、`/settings` 亮、`/wall` 暗，1440×900 整页）。基线落在 `.dsh-tmp/visual/`（gitignore 里，不进仓库），首次跑自动生成并跳过断言，之后逐像素比对；`UPDATE_BASELINES=1 python -m pytest e2e/test_visual.py` 重新生成。判定：单像素三通道差 > 24 才算不同，不同的像素占比上限 0.05%（1440×900 上约 65 个像素）；整页尺寸变了直接判定失败，不去逐像素比。
+  - 键盘走查：`test_keyboard.py`（六个页面 × 深浅两套配色，每页连按 Tab：落点必须每次真的换元素——按 `data-e2e-tab` 标记比对，不看名字，两个同名"删除"按钮本来都该是合法落点；必须是可交互元素；必须带可见焦点环，`outline` 或 `box-shadow` 之一即可。Tab 序走完时焦点交给浏览器（`activeElement` 回到 body），那是终点不是缺陷，所以断言改成"走完之前每个落点合格 + 每页至少 6 个落点"。实测六个页面各 14 个落点全部有焦点环，落点类型只有 `button` 与 `input`（侧栏导航是 Mantine `UnstyledButton`）。弹窗那半：先 `focus()` 再合成 `click()` 打开"添加平台"——合成点击不带焦点，否则验不了"关闭后焦点回到触发元素"——断言焦点进 `[role=dialog]`、连按 12 次 Tab 出不去、Esc 后焦点回到那颗按钮。
+  - 像素级视觉回归：`test_visual.py`（三屏：`/traffic` 暗、`/settings` 亮、`/wall` 暗，1440×900 整页）。基线落在 `.dsh-tmp/visual/`（gitignore 里，不进仓库），首次跑自动生成并跳过断言，之后逐像素比对；`UPDATE_BASELINES=1 python -m pytest e2e/test_visual.py` 重新生成。判定：单像素三通道差 > 24 才算不同，不同的像素占比上限 0.05%（1440×900 上约 65 个像素）；整页尺寸变了直接判定失败，不去逐像素比。
     这条最难的不是 diff，是**让屏上每次画的是同一张图**，两处非确定性各咬过一次：① 夹具的实例端口是随机端口，而端口会印在侧栏页脚、设置页的"管理端口"和数据库路径上——于是每次跑文字都在变（实测噪声 0.005%–0.055%，settings 最重）。解法是把视觉实例的端口写死（1996，不在禁用的 1994/1995 里；`Instance(name, port)` 现在收得到固定端口，占用则退回随机端口并让用例 skip）。② `/wall` 页头的时钟每秒在走，用 `page.clock.set_fixed_time()` 把页面时间钉死。加上"空库种子"（另起实例，只建一个平台 / 虚拟模型 / Key，不打任何网关请求，对象名写死不带时间戳 tag），同一份构建连跑两次实测噪声 **0.00%**，阈值才敢卡到 0.05%。
-    阈值不是设完就算数——用临时 CSS 反向验过四屏都活着：`.console-shell { padding-top: 9px }` 让 `/` 与 `/settings` 因整页高度变化被判"尺寸变了"、`/traffic` 差 2.69%；`.wall-panel-title { color: #FF0000 }` 让 `/wall` 差 0.29%。踩过的坑：探针写在 `.wall-panel-title` 原规则之前，同特异性被后面的规则盖掉，`/wall` 一度"通过"，看着像阈值太松，其实是探针根本没生效——反向验证的改动必须落在能生效的位置。
+    阈值不是设完就算数——用临时 CSS 反向验过三屏都活着：`.console-shell { padding-top: 9px }` 让 `/settings` 因整页高度变化被判"尺寸变了"、`/traffic` 差 2.69%；`.wall-panel-title { color: #FF0000 }` 让 `/wall` 差 0.29%。踩过的坑：探针写在 `.wall-panel-title` 原规则之前，同特异性被后面的规则盖掉，`/wall` 一度"通过"，看着像阈值太松，其实是探针根本没生效——反向验证的改动必须落在能生效的位置。
   - 尚未自动化：Tab 顺序合不合逻辑、读屏念起来的实际体验。CI 里也没有这一步——`release.yml` 只做构建与发布，把 E2E 接进 CI 要先得到明确同意。
-- **视觉回归**：1280×800、1440×900、1920×1080 × 深/亮主题 × `/wall` 已由 `test_wall.py` 的布局探针钉住（见上），并留整页截图供人眼比对；像素级 diff 也已进套件（`test_visual.py`，见上）——基线在 `.dsh-tmp/visual/`，容忍阈值 0.05% 像素占比，四屏都用临时 CSS 反向验过确实会失败。
-- **无障碍**：axe 已进 E2E（见上，七个页面 × 两套配色）；键盘链路的可达性与焦点环也已自动化（见上）；Tab 顺序与读屏体验仍要人看。
+- **视觉回归**：1280×800、1440×900、1920×1080 × 深/亮主题 × `/wall` 已由 `test_wall.py` 的布局探针钉住（见上），并留整页截图供人眼比对；像素级 diff 也已进套件（`test_visual.py`，见上）——基线在 `.dsh-tmp/visual/`，容忍阈值 0.05% 像素占比，三屏都用临时 CSS 反向验过确实会失败。
+- **无障碍**：axe 已进 E2E（见上，六个页面 × 两套配色）；键盘链路的可达性与焦点环也已自动化（见上）；Tab 顺序与读屏体验仍要人看。
 - **API 契约**：Rust 单测 + 前端 mock；新增字段/接口时同步。
 
 ### 11.9 质量门禁
 
 - 保留 `tsc` strict；新增 ESLint/Prettier 或 Biome（推荐 Biome，零配置快）。
 - CI：typecheck + lint + unit + E2E（至少核心流程）。
-- 本地闸门已经齐了：`cargo test --lib`（107 个）+ `python -m pytest e2e -q`（20 条，见 §11.8）。接进 CI 仍没做——改 `.github/workflows` 要先点头。
+- 本地闸门已经齐了：`cargo test --lib`（108 个）+ `python -m pytest e2e -q`（22 条，见 §11.8）。接进 CI 仍没做——改 `.github/workflows` 要先点头。
 - 提交前 `pnpm build`（或 npm）确保静态产物能生成到 `../static/`。
 - 变更 UI 时附截图（1280/1440 + 深色）。
 

@@ -84,26 +84,18 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   --line: rgba(140, 180, 255, 0.11);
 }
 
-/* ---- 页底容器：三阶明度的第一阶；至少一屏高，内容放不下时整页滚动 ---- */
+/* ---- 页底容器：与控制台其他页面同底同距，不再额外套一层卡片 ---- */
 .wall-root {
-  background:
-    radial-gradient(1200px 480px at 50% -10%, var(--wall-glow), transparent 70%),
-    var(--wall-bg);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px;
   box-sizing: border-box;
   min-height: calc(100vh - 52px - 2 * var(--app-shell-padding, 16px));
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
-/* 概览页所在的主区背景与页底一致（其他页面不受影响） */
-.mantine-AppShell-main:has(.wall-root) {
-  background:
-    radial-gradient(1200px 480px at 50% -10%, var(--wall-glow), transparent 70%),
-    var(--wall-bg);
+/* 页头复用 .console-page-head，只补一个不参与压缩的约束 */
+.wall-page-head {
+  flex-shrink: 0;
 }
 
 /* 全屏模式：隐藏 AppShell 侧栏与顶部 logo 行，主区弹性拉满 */
@@ -117,33 +109,7 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
 }
 
 .wall-fullscreen .wall-root {
-  border: none;
-  border-radius: 0;
   min-height: calc(100vh - 20px);
-}
-
-/* ---- 页头（56px） ---- */
-.wall-header {
-  height: 56px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid var(--line);
-}
-
-.wall-header-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-1);
-  letter-spacing: 0.02em;
-}
-
-.wall-clock {
-  font-size: 13px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  margin-left: 12px;
 }
 
 /* ---- 取数失败告警条：大屏是远看的，"读数停在 0"和"这块没取到"必须一眼分得开 ---- */
@@ -166,117 +132,54 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   min-width: 0;
 }
 
-/* ---- KPI 行：7 张卡（新增首字/性能/缓存卡），响应式 7 / 4+3 / 2×4 ---- */
-.wall-kpi-grid {
-  display: grid;
+/* ---- KPI 行：复用控制台的 readouts 条，7 格 ---- */
+.console-readouts.wall-readouts {
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 12px;
   flex-shrink: 0;
 }
 
-@media (max-width: 1599px) {
-  .wall-kpi-grid {
+.wall-readouts .console-readout {
+  padding: 12px 12px 10px;
+}
+
+.wall-readouts .console-readout-value {
+  font-size: 25px;
+}
+
+@media (max-width: 1279px) {
+  .console-readouts.wall-readouts {
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .wall-readouts .console-readout:nth-child(4n) {
+    border-right: 0;
+  }
+
+  .wall-readouts .console-readout:nth-child(n + 5) {
+    border-top: 1px solid var(--line);
   }
 }
 
 @media (max-width: 767px) {
-  .wall-kpi-grid {
+  .console-readouts.wall-readouts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wall-readouts .console-readout:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .wall-readouts .console-readout:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
   }
 }
 
-.wall-kpi {
-  position: relative;
-  background: var(--panel-bg);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 14px 9px;
-  overflow: hidden;
-  cursor: default;
-  transition: border-color 0.2s ease, transform 0.2s ease;
-}
-
-/* 左上 3px 强调竖条（单一强调色，不做每卡一色） */
-.wall-kpi::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 12px;
-  width: 3px;
-  height: 16px;
-  border-radius: 0 2px 2px 0;
-  background: var(--accent);
-}
-
-/* hover：边框提亮 + 上移 1px（无投影、无发光） */
-.wall-kpi:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  transform: translateY(-1px);
-}
-
-/* 右上 40px 强调色水印图标（低透明度，暗色下靠色相而非明度区分） */
-.wall-kpi-watermark {
-  position: absolute;
-  top: 10px;
-  right: 12px;
-  color: var(--accent);
-  opacity: 0.16;
-  pointer-events: none;
-}
-
-.wall-kpi-label {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-2);
-  letter-spacing: 0.05em;
-}
-
-.wall-kpi-value {
-  font-size: 26px;
-  font-weight: 700;
-  line-height: 1.3;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.01em;
-}
-
-/* 取不到时的大数：灰一点、不抢视线，但绝不写成 0 */
-.wall-kpi-missing {
-  color: var(--text-3);
-}
-
-.wall-kpi-unit {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--text-2);
-  margin-left: 4px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* KPI 副行：成功/失败、分位数、输入输出等补充信息（统一 11px） */
-.wall-kpi-sub {
-  margin-top: 5px;
-  font-size: 12px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-}
-
-/* 全屏模式：KPI 字号放大一档（大屏远看） */
-html.wall-fullscreen .wall-kpi-value {
-  font-size: 34px;
-}
-
-html.wall-fullscreen .wall-kpi-label {
-  font-size: 13px;
-}
-
-/* delta 徽章：与上一周期比（↑绿 / ↓红，语义按指标方向）；紧凑卡内随数字同行排列 */
+/* KPI 脚注里的同比 / 环比胶囊（与 readout 脚注同字号） */
 .wall-delta {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 4px;
   white-space: nowrap;
 }
@@ -291,30 +194,8 @@ html.wall-fullscreen .wall-kpi-label {
   background: color-mix(in srgb, var(--err) 12%, transparent);
 }
 
-/* Token 双色堆叠条：纯灰底 + 实色，不发光 */
-.wall-token-bar {
-  display: flex;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--panel-bg-2);
-  overflow: hidden;
-  margin-top: 10px;
-}
-
-.wall-token-bar > div {
-  height: 100%;
-  transition: width 0.5s ease;
-}
-
-/* 灰底小胶囊（活跃代理 KPI） */
-.wall-capsule {
-  display: inline-block;
-  font-size: 12px;
-  color: var(--text-2);
-  background: var(--panel-bg-2);
-  border-radius: 10px;
-  padding: 2px 8px;
-  font-variant-numeric: tabular-nums;
+html.wall-fullscreen .wall-readouts .console-readout-value {
+  font-size: 30px;
 }
 
 /* 状态色点 + 呼吸灯（active_connections > 0 时 2s 呼吸） */
@@ -340,46 +221,24 @@ html.wall-fullscreen .wall-kpi-label {
   }
 }
 
-/* ---- 主区：左 7 右 5（左：趋势+热力，右：错误+平台环），缝隙居中，吃剩余高度 ---- */
-.wall-main-grid {
-  display: grid;
-  grid-template-columns: 7fr 5fr;
-  gap: 12px;
-  align-items: stretch;
-  flex: 1 1 auto;
-  min-height: 0;
+/* 趋势图：整行宽后需要一个确定高度，ResponsiveContainer 才有尺寸可算 */
+html.wall-fullscreen .wall-trend-panel {
+  height: 400px !important;
 }
 
-/* ---- 实体汇总行：左 7 模型矩阵 / 右 5 网关健康，自然高度随内容 ---- */
-.wall-sub-grid {
+/* ---- 热力图 + 平台分布：同一行 7 / 5，够宽也不留大片空白 ---- */
+.wall-pair {
   display: grid;
   grid-template-columns: 7fr 5fr;
-  gap: 12px;
+  gap: 14px;
   align-items: stretch;
   flex-shrink: 0;
 }
 
 @media (max-width: 1279px) {
-  .wall-main-grid,
-  .wall-sub-grid {
+  .wall-pair {
     grid-template-columns: 1fr;
   }
-}
-
-/* 左列：趋势图吃剩余高度，热力图自然高 */
-.wall-left-col {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
-
-/* 主区右列：错误分析 + 平台分布叠放 */
-.wall-side {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-height: 0;
 }
 
 /* ---- 面板（三阶明度第二阶） ---- */
@@ -387,7 +246,7 @@ html.wall-fullscreen .wall-kpi-label {
   background: var(--panel-bg);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 0 14px 12px;
   transition: border-color 0.2s ease;
   min-height: 0;
 }
@@ -396,22 +255,33 @@ html.wall-fullscreen .wall-kpi-label {
   border-color: var(--line-strong);
 }
 
-/* 面板标题：13/600 + 字距 + 左侧 3px 强调竖条 */
+/* 面板头：与控制台 .console-panel-head 同一条 44px 带 + 分隔线 */
+.wall-panel-head {
+  min-height: 44px;
+  margin: 0 -14px 12px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* 面板标题：12/600 + 左侧 2px 强调竖条，与控制台一致 */
 .wall-panel-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.08em;
   color: var(--text-1);
 }
 
 .wall-panel-title::before {
   content: '';
-  width: 3px;
-  height: 14px;
-  border-radius: 2px;
+  width: 2px;
+  height: 11px;
+  border-radius: 1px;
   background: var(--accent);
   flex-shrink: 0;
 }
@@ -471,88 +341,6 @@ html.wall-fullscreen .wall-kpi-label {
   font-variant-numeric: tabular-nums;
 }
 
-/* ---- 网关健康瓦片：竖排列表（实体汇总行右列），超高滚动 ---- */
-.wall-tiles-col {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-height: 0;
-  max-height: 460px;
-  overflow-y: auto;
-}
-
-.wall-tile {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 12px;
-  background: var(--panel-bg);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 14px;
-  transition: border-color 0.2s ease, transform 0.2s ease;
-}
-
-.wall-tile:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  transform: translateY(-1px);
-}
-
-/* 无流量瓦片：整体降为 60% 灰度（不用彩色竖条） */
-.wall-tile.idle {
-  opacity: 0.6;
-  filter: grayscale(1);
-}
-
-.wall-tile-name {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.wall-tile-count {
-  margin-left: auto;
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-1);
-  font-variant-numeric: tabular-nums;
-}
-
-.wall-tile-meta {
-  flex: 1 1 100%;
-  font-size: 12px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  margin-top: 2px;
-}
-
-/* 瓦片内嵌成功率微进度条 */
-.wall-tile-meter {
-  flex: 1 1 100%;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--panel-bg-2);
-  overflow: hidden;
-  margin-top: 6px;
-}
-
-.wall-tile-meter-fill {
-  height: 100%;
-  border-radius: 2px;
-  transition: width 0.5s ease;
-}
-
-/* 热力图：accent 单色明度阶梯（层级靠明度，不引入新色） */
 .wall-heatmap {
   display: grid;
   grid-template-columns: 26px repeat(24, minmax(0, 1fr));
@@ -581,13 +369,6 @@ html.wall-fullscreen .wall-kpi-label {
   height: 15px;
 }
 
-.wall-heat-hours {
-  display: grid;
-  grid-template-columns: 26px repeat(24, minmax(0, 1fr));
-  gap: 2px;
-  margin-top: 3px;
-}
-
 .wall-heat-hour {
   font-size: 11px;
   color: var(--text-3);
@@ -595,12 +376,13 @@ html.wall-fullscreen .wall-kpi-label {
   font-variant-numeric: tabular-nums;
 }
 
-/* 错误分析条：复用排行条样式，颜色用状态语义色 */
-.wall-err-summary {
-  font-size: 12px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
+.wall-heat-hours {
+  display: grid;
+  grid-template-columns: 26px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: 3px;
 }
+
 
 /* ---- 图表通用：等宽数字 ---- */
 .wall-chart-num {
@@ -1455,6 +1237,78 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 /* ---- 概览大屏：模型性能矩阵 + 请求明细表（紧凑、tabular-nums、明暗自适应） ---- */
+/* 失败数按钮：点开该模型的错误明细（行内展开，不弹窗） */
+.wall-mx-failed {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  text-decoration: underline dotted color-mix(in srgb, var(--err) 60%, transparent);
+  text-underline-offset: 3px;
+}
+
+.wall-mx-failed:hover {
+  text-decoration-style: solid;
+}
+
+.wall-mx-failed:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.wall-mx-err-row td {
+  padding: 0 !important;
+  background: color-mix(in srgb, var(--panel-bg-2) 80%, transparent);
+}
+
+.wall-mx-err {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 15px 12px;
+  border-top: 1px solid var(--line);
+}
+
+.wall-mx-err-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.wall-mx-err-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.wall-mx-err-close:hover {
+  color: var(--text-1);
+  border-color: var(--line-strong);
+}
+
+.wall-mx-err-close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wall-mx-err-empty {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
 .wall-matrix,
 .wall-logs {
   font-size: 12px;
@@ -1565,17 +1419,9 @@ html.wall-fullscreen .wall-kpi-label {
 }
 
 /* 明细表：超高时纵向滚动（整页仍可滚动，表格自身限高避免过长） */
+/* 请求明细：不设内层滚动，整表撑开交给页面滚动；只保留横向滚动兜住窄屏 */
 .wall-logs-scroll {
-  max-height: 420px;
-  overflow-y: auto;
   overflow-x: auto;
-}
-
-.wall-logs-scroll thead th {
-  position: sticky;
-  top: 0;
-  background: var(--panel-bg);
-  z-index: 1;
 }
 
 /* 模型矩阵：限高滚动 + sticky 表头（与请求明细同模式） */

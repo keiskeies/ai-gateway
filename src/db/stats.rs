@@ -259,31 +259,47 @@ pub fn model_timeseries(
     })
 }
 
-/// 错误分析：非 2xx 请求按 error_type 聚合（历史悬挂/缺失归入 Unknown）
-pub fn error_stats(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> AppResult<ErrorStats> {
+/// 错误分析：非 2xx 请求按 error_type 聚合（历史悬挂/缺失归入 Unknown）。
+/// `model` 可选：按 `backends.model_id` 过滤（与性能矩阵同一口径），供大屏失败数下钻。
+pub fn error_stats(pool: &DbPool, from: Option<&str>, to: Option<&str>, model: Option<&str>) -> AppResult<ErrorStats> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let range = TimeRange::parse(from, to)?;
 
+    // 参数顺序与 SQL 片段一致：range 的 from/to 在前，model 在最后
+    let mut params: Vec<String> = range.params().into_iter().map(|s| s.to_string()).collect();
+    let model_clause = match model {
+        Some(model) => {
+            params.push(model.to_string());
+            " AND COALESCE(b.model_id, 'unknown') = ?"
+        }
+        None => "",
+    };
+    // request_stats 不存 model_id，模型名挂在 backends 上；矩阵也是这么 JOIN 的
+    let from_join = "FROM request_stats rs LEFT JOIN backends b ON rs.backend_id = b.id";
+
     let count_in_range = |extra: &str| -> i64 {
-        let sql = format!("SELECT COUNT(*) FROM request_stats WHERE 1=1{extra}{}", range.and("created_at"));
-        conn.query_row(&sql, rusqlite::params_from_iter(range.params()), |r| r.get(0)).unwrap_or(0)
+        let sql = format!(
+            "SELECT COUNT(*) {from_join} WHERE 1=1{extra}{}{model_clause}",
+            range.and("rs.created_at")
+        );
+        conn.query_row(&sql, rusqlite::params_from_iter(params.clone()), |r| r.get(0)).unwrap_or(0)
     };
 
     let total = count_in_range("");
-    let success = count_in_range(" AND status_code >= 200 AND status_code < 300");
+    let success = count_in_range(" AND rs.status_code >= 200 AND rs.status_code < 300");
 
     let sql = format!(
-        "SELECT COALESCE(error_type, 'Unknown') AS kind, COUNT(*) AS cnt
-         FROM request_stats
-         WHERE NOT (status_code >= 200 AND status_code < 300)
-         {}
+        "SELECT COALESCE(rs.error_type, 'Unknown') AS kind, COUNT(*) AS cnt
+         {from_join}
+         WHERE NOT (rs.status_code >= 200 AND rs.status_code < 300)
+         {}{model_clause}
          GROUP BY kind
          ORDER BY cnt DESC",
-        range.and("created_at")
+        range.and("rs.created_at")
     );
     let mut stmt = conn.prepare(&sql)?;
     let errors = stmt
-        .query_map(rusqlite::params_from_iter(range.params()), |r| {
+        .query_map(rusqlite::params_from_iter(params), |r| {
             Ok(ErrorBreakdown { kind: r.get(0)?, count: r.get(1)? })
         })?
         .filter_map(|x| x.ok())
@@ -1722,6 +1738,56 @@ mod tests {
             is_stream: false, api_key_id: Some(api_key_id.into()), cost,
             request_id: None, replayed_from: None,
         }
+    }
+
+    /// 大屏矩阵的失败数下钻：按 backends.model_id 过滤，且 total/success 同口径
+    #[test]
+    fn error_stats_filters_by_backend_model() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id,name,type,base_url,api_key,created_at,updated_at) VALUES ('pl','p','openai','http://x','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platform");
+            conn.execute("INSERT INTO proxies (id,name,created_at) VALUES ('px','px','2026-01-01T00:00:00Z')", []).expect("proxy");
+            conn.execute("INSERT INTO routes (id,proxy_id) VALUES ('rt','px')", []).expect("route");
+            conn.execute(
+                "INSERT INTO backends (id,route_id,platform_id,model_id,weight,priority) VALUES ('b-a','rt','pl','model-a',1,0),('b-b','rt','pl','model-b',1,0)",
+                [],
+            ).expect("backends");
+        }
+
+        let mut rate_limited = stat("k", None);
+        rate_limited.backend_id = "b-a".into();
+        rate_limited.status_code = 429;
+        rate_limited.error_type = Some("RateLimit".into());
+        record(&pool, &rate_limited).expect("record a");
+
+        let mut server_error = stat("k", None);
+        server_error.backend_id = "b-a".into();
+        server_error.status_code = 500;
+        server_error.error_type = Some("ServerError".into());
+        record(&pool, &server_error).expect("record a2");
+
+        let mut timeout = stat("k", None);
+        timeout.backend_id = "b-b".into();
+        timeout.status_code = 504;
+        timeout.error_type = Some("Timeout".into());
+        record(&pool, &timeout).expect("record b");
+
+        let only_a = error_stats(&pool, None, None, Some("model-a")).expect("model-a");
+        assert_eq!(only_a.total, 2);
+        assert_eq!(only_a.success, 0);
+        let mut kinds: Vec<(&str, i64)> = only_a.errors.iter().map(|e| (e.kind.as_str(), e.count)).collect();
+        kinds.sort();
+        assert_eq!(kinds, vec![("RateLimit", 1), ("ServerError", 1)]);
+
+        let all = error_stats(&pool, None, None, None).expect("all");
+        assert_eq!(all.total, 3);
+        assert_eq!(all.errors.iter().map(|e| e.count).sum::<i64>(), 3);
+
+        cleanup_db(&path);
     }
 
     /// 上界截断到秒会把这一秒内写入的行全部排除：`created_at` 带纳秒，字典序里

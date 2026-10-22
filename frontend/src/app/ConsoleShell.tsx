@@ -59,8 +59,7 @@ export function ConsoleShell({
     isNavItemActive(location.pathname, item.path),
   ) || activeGroup.items[0]
 
-  const showDataControls = location.pathname === '/'
-    || location.pathname.startsWith('/traffic')
+  const showDataControls = location.pathname.startsWith('/traffic')
     || location.pathname.startsWith('/models')
     || location.pathname.startsWith('/providers/')
     || location.pathname === '/keys'
