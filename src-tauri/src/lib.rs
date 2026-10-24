@@ -143,6 +143,8 @@ fn create_or_focus_window(handle: &tauri::AppHandle) {
 
     #[cfg(debug_assertions)]
     window.open_devtools();
+    #[cfg(not(debug_assertions))]
+    let _ = &window;
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
