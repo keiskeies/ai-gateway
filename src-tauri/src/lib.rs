@@ -8,6 +8,9 @@ use ai_gateway::cache::{RouteCache, StatsWriter};
 /// Port the backend will listen on (determined at runtime)
 static BACKEND_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
 static BACKEND_READY: AtomicBool = AtomicBool::new(false);
+/// 关窗前记下的页面地址。窗口是真实销毁的，重建后若不指定地址就会落到路由默认页，
+/// 而旧行为（隐藏）是连着页面状态一起留住的——这里把"回到原来那页"补回来。
+static LAST_URL: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -108,7 +111,7 @@ fn create_or_focus_window(handle: &tauri::AppHandle) {
         tracing::error!("后端端口未就绪，无法打开窗口");
         return;
     }
-    let url = match url::Url::parse(&format!("http://127.0.0.1:{}", port)) {
+    let url = match resume_url(port) {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("Failed to parse URL {}: {}", port, e);
@@ -117,6 +120,7 @@ fn create_or_focus_window(handle: &tauri::AppHandle) {
     };
 
     // 尺寸/标题/最小尺寸原先由 tauri.conf.json 的 windows 声明，现在改由这里等价给出。
+    let target = url.to_string();
     let window = match WebviewWindowBuilder::new(handle, "main", WebviewUrl::External(url))
         .title("AI Gateway")
         .inner_size(1280., 800.)
@@ -139,12 +143,44 @@ fn create_or_focus_window(handle: &tauri::AppHandle) {
         }
     };
 
-    tracing::info!("主窗口已创建: http://127.0.0.1:{}", port);
+    // 关窗前把当前地址留下：CloseRequested 只给事件本身，所以要握住窗口句柄才能读到 url
+    let handle_for_url = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { .. } = event {
+            if let Ok(u) = handle_for_url.url() {
+                if let Ok(mut guard) = LAST_URL.lock() {
+                    *guard = Some(u.as_str().to_string());
+                }
+            }
+        }
+    });
+
+    tracing::info!("主窗口已创建: {}", target);
 
     #[cfg(debug_assertions)]
     window.open_devtools();
     #[cfg(not(debug_assertions))]
     let _ = &window;
+}
+
+/// 重建窗口时优先回到关窗前那一页。旧行为是隐藏窗口、连着页面状态一起留住，
+/// 现在窗口真的销毁了，不指定地址就会落到路由默认页，对常驻大屏的人是回退。
+/// 只接受与后端同源的地址——用户在窗口里点开过的外部链接不能被当成首页恢复。
+fn resume_url(port: u16) -> Result<url::Url, url::ParseError> {
+    let origin = url::Url::parse(&format!("http://127.0.0.1:{}", port))?;
+    let last = LAST_URL.lock().ok().and_then(|g| g.clone());
+    if let Some(raw) = last {
+        if let Ok(u) = url::Url::parse(&raw) {
+            let same_origin = u.scheme() == origin.scheme()
+                && u.host_str() == origin.host_str()
+                && u.port() == origin.port();
+            if same_origin {
+                tracing::info!("重建回到上次页面: {}", u);
+                return Ok(u);
+            }
+        }
+    }
+    Ok(origin)
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
