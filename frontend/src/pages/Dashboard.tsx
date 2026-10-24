@@ -471,6 +471,21 @@ function DeltaBadge({ cur, prev, higherIsBetter }: {
   )
 }
 
+// 页头副标题（时段 + 秒级时钟）。单独成组件是为了把每秒一次的 setState 关在叶子里：
+// 挂在墙上常驻时，页面级 now 会让整棵树（两张 recharts 图 + 168 格热力图）每秒重建一次。
+function PageSub({ locale, label }: { locale: Locale; label: string }) {
+  const [now, setNow] = useState(() => new Date())
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  return (
+    <div className="console-page-sub">
+      {label} · {now.toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })}
+    </div>
+  )
+}
+
 // KPI 卡：左上 3px 强调竖条（CSS ::before）+ 右上水印图标；widget 为右侧微件（走势线/环形），与文字列垂直居中
 
 // 面板取数失败时不能退回"暂无数据"——那是把"没取到"说成"确实没有"
@@ -521,7 +536,6 @@ export default function Dashboard() {
 
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [paused, setPaused] = useState(false)
-  const [now, setNow] = useState(() => new Date())
 
   const [fsOn, setFsOn] = useState(false)
   const [fsManual, setFsManual] = useState(false)
@@ -685,12 +699,6 @@ export default function Dashboard() {
     }, 30_000)
     return () => clearInterval(id)
   }, [autoRefresh, paused, rangeKey, granularity, logsPage, logsModel, logsStatus, loadData, loadTs, loadLogs])
-
-  // 页头时钟
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000)
-    return () => clearInterval(id)
-  }, [])
 
   // 全屏模式：documentElement 加 .wall-fullscreen；Esc / 再点按钮退出。
   // requestFullscreen 不可用（如部分 webview）时退化为仅切换 class 的伪全屏。
@@ -856,7 +864,6 @@ export default function Dashboard() {
 
   const cc = chartTokens(isDark)
   const axisTick = { fontSize: 12, fill: cc.axis, style: { fontVariantNumeric: 'tabular-nums' } }
-  const clockStr = now.toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
 
   // 趋势图共用子元素：分组折线 / 堆叠柱状两种形态复用。
   // 注意：必须是数组而不是 Fragment——recharts 2.x 依赖的 react-is 无法识别 React 19
@@ -911,7 +918,7 @@ export default function Dashboard() {
             {t(locale, 'kickerLive')}
           </div>
           <h1 className="console-page-title">{t(locale, 'wallTitle')}</h1>
-          <div className="console-page-sub">{t(locale, RANGE_LABEL_KEYS[rangeKey])} · {clockStr}</div>
+          <PageSub locale={locale} label={t(locale, RANGE_LABEL_KEYS[rangeKey])} />
         </div>
         <div className="console-page-actions">
           {/* 全局时段筛选：页面所有统计（KPI/趋势/排行/错误/热力图/平台/健康看板）共用 */}
