@@ -402,3 +402,39 @@ fn start_backend_server() {
         server.run().await.expect("Server error");
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set_last(v: Option<&str>) {
+        let mut guard = LAST_URL.lock().unwrap();
+        *guard = v.map(|s| s.to_string());
+    }
+
+    // 一个测试跑完所有分支：LAST_URL 是进程级全局，拆成多个 #[test] 会并行互踩。
+    #[test]
+    fn resume_url_restores_only_same_origin() {
+        // 没有记录：落回后端首页
+        set_last(None);
+        assert_eq!(resume_url(1994).unwrap().as_str(), "http://127.0.0.1:1994/");
+
+        // 同源深链（hash 路由带 query）原样恢复
+        set_last(Some("http://127.0.0.1:1994/#/wall?v=3"));
+        assert_eq!(resume_url(1994).unwrap().as_str(), "http://127.0.0.1:1994/#/wall?v=3");
+
+        // 外部站点必须拒绝：否则重开的窗口会带着 shell:allow-open 的权限去加载别人的页面
+        set_last(Some("https://example.com/#/wall"));
+        assert_eq!(resume_url(1994).unwrap().as_str(), "http://127.0.0.1:1994/");
+
+        // 同 host 不同端口也拒绝——换过端口的旧地址不算"上次那一页"
+        set_last(Some("http://127.0.0.1:1995/#/traffic"));
+        assert_eq!(resume_url(1994).unwrap().as_str(), "http://127.0.0.1:1994/");
+
+        // 解析不了的串不能拖垮建窗
+        set_last(Some("not a url"));
+        assert_eq!(resume_url(1994).unwrap().as_str(), "http://127.0.0.1:1994/");
+
+        set_last(None);
+    }
+}
