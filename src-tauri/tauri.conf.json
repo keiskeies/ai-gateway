@@ -10,19 +10,7 @@
     "beforeBuildCommand": ""
   },
   "app": {
-    "windows": [
-      {
-        "title": "AI Gateway",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "center": true,
-        "visible": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:* https://127.0.0.1:* https://localhost:* ws://127.0.0.1:* ws://localhost:*; img-src 'self' data: asset: https://asset.localhost http://127.0.0.1:* http://localhost:*; style-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data: http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:* http://localhost:*"
     }

@@ -11,7 +11,7 @@ static BACKEND_READY: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
@@ -29,6 +29,7 @@ pub fn run() {
             // - Windows: ../config.toml -> installed dir structure
             // - Linux: appropriate data directory
             use tauri::path::BaseDirectory;
+            use tauri::Manager;
             let config_resource = app.path().resolve("../config.toml", BaseDirectory::Resource)
                 .expect("Failed to resolve config.toml resource path");
             // The app directory is where config.toml lives
@@ -59,52 +60,93 @@ pub fn run() {
                 return Ok(());
             }
 
-            let url = format!("http://127.0.0.1:{}", port);
-            tracing::info!("Loading frontend from: {}", url);
-
-            // Navigate the main window to the backend URL using Tauri's navigate API
-            use tauri::Manager;
-            if let Some(window) = app.get_webview_window("main") {
-                // On close requested, hide to tray instead of closing
-                let window_clone = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        window_clone.hide().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to hide window: {}", e);
-                        });
-                    }
-                });
-
-                match url::Url::parse(&url) {
-                    Ok(parsed_url) => {
-                        if let Err(e) = window.navigate(parsed_url) {
-                            tracing::error!("Failed to navigate window: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to parse URL {}: {}", url, e);
-                    }
-                }
-            }
-
-            #[cfg(debug_assertions)]
-            {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
-                }
-            }
+            open_main_window(app.handle());
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        // 用 build + run 回调而不是 Builder::run：需要在 RunEvent 里拦住"最后一个窗口被关闭"
+        // 触发的自发退出，否则关掉控制台就等于杀掉整个网关。
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_handle, event| {
+        if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+            // code == None 是"没有窗口了所以想退"，这里拦住：托盘与后端要继续跑。
+            // 带退出码的退出（app.exit / restart）不受影响，托盘 Quit 走 process::exit。
+            if code.is_none() {
+                api.prevent_exit();
+            }
+        }
+    });
+}
+
+/// 唤起主窗口：窗口在则前置，窗口已销毁则重建并直接指向后端地址。
+///
+/// 关窗走 WebView 的真实销毁（而不是 hide），这样 renderer 与 gpu 子进程会退出——
+/// 常驻托盘时这一档能省下整个 WebView2 的量级。重建代价是一次页面加载。
+fn open_main_window(handle: &tauri::AppHandle) {
+    // Windows 上在事件回调里同步建窗会死锁（tauri WebviewWindowBuilder 文档），
+    // 所以托盘点击与启动都走这一条投递到主线程的路径。
+    let app = handle.clone();
+    if let Err(e) = handle.run_on_main_thread(move || create_or_focus_window(&app)) {
+        tracing::error!("投递窗口创建任务失败: {}", e);
+    }
+}
+
+fn create_or_focus_window(handle: &tauri::AppHandle) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(window) = handle.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    let port = BACKEND_PORT.load(Ordering::Relaxed);
+    if port == 0 {
+        tracing::error!("后端端口未就绪，无法打开窗口");
+        return;
+    }
+    let url = match url::Url::parse(&format!("http://127.0.0.1:{}", port)) {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("Failed to parse URL {}: {}", port, e);
+            return;
+        }
+    };
+
+    // 尺寸/标题/最小尺寸原先由 tauri.conf.json 的 windows 声明，现在改由这里等价给出。
+    let window = match WebviewWindowBuilder::new(handle, "main", WebviewUrl::External(url))
+        .title("AI Gateway")
+        .inner_size(1280., 800.)
+        .min_inner_size(960., 600.)
+        .resizable(true)
+        .center()
+        .visible(true)
+        .build()
+    {
+        Ok(w) => w,
+        Err(e) => {
+            // 上一次关闭还在事件循环里排队时标签可能未释放；此时窗口对象仍在，直接唤起
+            tracing::error!("窗口创建失败: {}", e);
+            if let Some(window) = handle.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            return;
+        }
+    };
+
+    tracing::info!("主窗口已创建: http://127.0.0.1:{}", port);
+
+    #[cfg(debug_assertions)]
+    window.open_devtools();
 }
 
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-    use tauri::Manager;
 
     let show = app.handle().clone();
     let quit = app.handle().clone();
@@ -123,15 +165,8 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     button_state: MouseButtonState::Up,
                     ..
                 } => {
-                    // Left click: show main window
-                    if let Some(window) = show.get_webview_window("main") {
-                        window.show().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to show window: {}", e);
-                        });
-                        window.set_focus().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to focus window: {}", e);
-                        });
-                    }
+                    // Left click: show main window（窗口已销毁时重建）
+                    open_main_window(&show);
                 }
                 _ => {}
             }
@@ -140,14 +175,7 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             let id = event.id().as_ref().to_string();
             match id.as_str() {
                 "show" => {
-                    if let Some(window) = quit.get_webview_window("main") {
-                        window.show().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to show window: {}", e);
-                        });
-                        window.set_focus().unwrap_or_else(|e| {
-                            tracing::warn!("Failed to focus window: {}", e);
-                        });
-                    }
+                    open_main_window(&quit);
                 }
                 "quit" => {
                     std::process::exit(0);
@@ -275,9 +303,6 @@ fn start_backend_server() {
         tracing::info!("Static dir: {:?}", static_dir);
         tracing::info!("Will serve frontend + API on port {}", admin_port);
 
-        // Store the port so the main thread can find it
-        BACKEND_PORT.store(admin_port, Ordering::Relaxed);
-
         let server = HttpServer::new(move || {
             let cors = Cors::permissive();
 
@@ -330,7 +355,10 @@ fn start_backend_server() {
         .bind(format!("{}:{}", host, admin_port))
         .expect("Failed to bind server");
 
-        // bind 成功后才标记就绪，避免主线程在服务未就绪时导航
+        // bind 成功后才公布端口与就绪标记：端口被占时这里会 panic，
+        // 全局仍保持 0，主线程就不会把一个"其实没起来"的服务当成可用后端去建窗口
+        // （否则控制台会连到同端口的另一个实例上，读写到另一份库）。
+        BACKEND_PORT.store(admin_port, Ordering::Relaxed);
         BACKEND_READY.store(true, Ordering::Relaxed);
 
         server.run().await.expect("Server error");
