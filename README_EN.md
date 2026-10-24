@@ -45,46 +45,60 @@
 
 ## 📸 Screenshots
 
+All screenshots below are from **v1.3.2** (dark theme).
+
 <p align="center">
-  <img src="doc/dashboard-wall.png" width="90%" alt="AI Gateway Monitoring Wall" />
+  <img src="doc/console-wall.png" width="92%" alt="Monitoring Wall" />
 </p>
-<p align="center"><em>Monitoring Wall — per-model requests / latency / TTFT / output speed / cache hit rate across hour / day / month / year</em></p>
+<p align="center"><em>Monitoring Wall — KPI strip plus per-model trends across eight metrics (requests / failures / input / output / latency / TTFT / speed / cache) at hour, day, month and year granularity, an activity heatmap with its own 7d/30d/12m/All window, platform share, performance matrix and request log. Fullscreen and refresh pause supported</em></p>
 
 <details>
-<summary>📱 Click to see more screenshots</summary>
+<summary>📱 Click to see the remaining pages</summary>
 
 <p align="center">
-  <img src="doc/request-logs.png" width="90%" alt="Request Log" />
+  <img src="doc/console-traffic.png" width="92%" alt="Traffic" />
 </p>
-<p align="center"><em>Request Log — per-request input / fresh input / output / cache / duration / TTFT / speed, with model & status filters</em></p>
+<p align="center"><em>Traffic — a "needs attention" summary for rate limits, failures and idle keys; the request table filters by model, platform, key, status, error type and latency band with paging; the detail pane shows the attempt chain (status and duration of every backend try), TTFT / generation bars, cache read vs fresh input, estimated cost, and lets you copy the ID or replay the request</em></p>
 
 <p align="center">
-  <img src="doc/virtual-models.png" width="90%" alt="Virtual Models" />
+  <img src="doc/console-models.png" width="92%" alt="Virtual Models" />
 </p>
-<p align="center"><em>Virtual Models — multi-backend aggregation & load balancing strategies</em></p>
+<p align="center"><em>Virtual Models — health status, backend count, strategy, request volume, success rate, average latency and cost right in the list</em></p>
 
 <p align="center">
-  <img src="doc/platforms.png" width="90%" alt="Platform Management" />
+  <img src="doc/console-model-routing.png" width="92%" alt="Model Routing" />
 </p>
-<p align="center"><em>Platform Management — 15+ platform presets, one-click add</em></p>
-
-<details>
-<summary>🕰️ Legacy UI screenshots (v1.2.x)</summary>
+<p align="center"><em>Model detail · Routing — edit strategy, retry attempts, backoff, default max_tokens and weight distribution on the left; the route spine draws backends as a weighted, priority-ordered graph in the middle; inspect a single backend's provider, capability badges and reasoning-parameter handling on the right</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway1.jpg" width="80%" alt="Legacy main interface" />
+  <img src="doc/console-platforms.png" width="92%" alt="Platforms" />
 </p>
-<p align="center">
-  <img src="doc/ai-gateway2.jpg" width="80%" alt="Legacy platform management" />
-</p>
-<p align="center">
-  <img src="doc/ai-gateway21.jpg" width="80%" alt="Legacy statistics overview" />
-</p>
-<p align="center">
-  <img src="doc/ai-gateway3.jpg" width="80%" alt="Legacy settings page" />
-</p>
+<p align="center"><em>Platforms — connectivity check result, synced model count, how many virtual models reference it, request volume and success rate; degraded platforms are counted in the header</em></p>
 
-</details>
+<p align="center">
+  <img src="doc/console-platform-detail.png" width="92%" alt="Platform Detail" />
+</p>
+<p align="center"><em>Platform detail — credentials and forwarded headers (keys stay masked, revealed once on demand), remote model pull via Test connection, bulk model and price CSV import/export, and which virtual models depend on this platform</em></p>
+
+<p align="center">
+  <img src="doc/console-keys.png" width="92%" alt="API Keys" />
+</p>
+<p align="center"><em>API Keys — requests, tokens, average latency, cost and last-used time per key; a key can be bound to a single virtual model</em></p>
+
+<p align="center">
+  <img src="doc/console-key-quota.png" width="92%" alt="Key Quota" />
+</p>
+<p align="center"><em>Key quota — expiry, request limit, token limit, cost budget and quota window (lifetime / day / week / month). Hitting any limit returns 429; the cost budget only applies to priced models</em></p>
+
+<p align="center">
+  <img src="doc/console-playground.png" width="92%" alt="Playground" />
+</p>
+<p align="center"><em>Playground — pick a virtual model and protocol (OpenAI / Anthropic) and send a real request to verify routing and the upstream; mint a throwaway key in place, or copy the equivalent cURL</em></p>
+
+<p align="center">
+  <img src="doc/console-settings.png" width="92%" alt="Settings" />
+</p>
+<p align="center"><em>Settings — port and bind address, request-policy defaults, account security, data statistics (rows / attempt traces / alerts / dangling rows / body retention), config export & import, whole-database backup and restore</em></p>
 
 </details>
 
@@ -165,19 +179,29 @@ A complete performance profile for every model, across every time granularity (h
 
 ## ✨ More Features
 
-- 🏪 **15+ platform presets**: OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / Moonshot / Doubao / Ollama / NVIDIA NIM / Azure / SiliconFlow / Groq / Yi / Baichuan ··· one-click add
-- 🔍 **Remote model fetching**: Auto-fetch available models from platform APIs — pick from dropdown, no manual input
+- 🏪 **15 platform presets**: OpenAI · Anthropic · DeepSeek · Qwen · Google Gemini · Groq · SiliconFlow · ZhipuAI · Moonshot · Doubao · NVIDIA · Together AI · OpenRouter · Ollama · Azure OpenAI ··· one-click add, or point at any OpenAI / Anthropic compatible endpoint by hand
+- 🔍 **Remote model fetching**: Test connection pulls the upstream model list; tick the ones you want into the local model table, with capability badges (reasoning / vision / tool-calling) maintained per model
 - 🧠 **Smart capability detection**: Chat/code/vision/function-calling capabilities auto-filled from presets
-- 🔗 **reasoning_content support**: Compatible with chain-of-thought output from NVIDIA NIM etc.
+- 🔗 **reasoning_content support**: Compatible with chain-of-thought output from NVIDIA NIM etc.; OpenAI / Anthropic thinking parameters translated both ways
+- 📡 **Custom forwarded headers**: append arbitrary request headers per platform (vendor-specific switches), with name-level override of Authorization / x-api-key
+- 🎛️ **Playground**: pick a virtual model and protocol and send a real request from the UI to verify routing and upstream behaviour, or copy the equivalent cURL
 - 🌙 **Light / Dark / System** theme modes
 - 🌍 **Chinese & English** bilingual UI
 - ⚙️ Configurable port from the UI, default 1994
+- 🧭 **Seven pages**: Traffic · Monitoring Wall · Virtual Models · Platforms · API Keys · Playground · Settings. Filters, paging and time range live in the URL, so refresh and back/forward never lose state
+- 🧾 **Attempt traces & replay**: every backend try of a request is listed; body retention is off by default, and once enabled a stored request can be replayed verbatim
+- 🔔 **Notification centre**: expiring keys, repeated platform failures, quota breaches and stale backups are persisted and reachable from the header bell
+- 💰 **Cost estimation & budgets**: per-request cost from the price table (with coverage ratio), quotas supporting rolling windows with over-limit rejection
+- 🔑 **Per-key quotas**: expiry, request limit, token limit, cost budget and window (lifetime / day / week / month) per key, optionally bound to one virtual model
+- 🗄️ **Whole-database backup & restore**: snapshot, download, delete; restoring in place keeps an extra safety snapshot first
+- 📤 **Config export / import & CSV**: redacted config export with preview-then-merge; traffic exported to CSV honouring the active filters; platform prices bulk import/export
+- ⚡ **Live updates**: new requests and alerts arrive over SSE, falling back to 30 s polling when the connection drops
 
 ---
 
 ## 🔐 Authentication
 
-The dashboard (platforms, virtual models, API keys, settings, overview and stats) requires signing in:
+The dashboard (traffic & statistics, virtual models, platforms, API keys, Playground, settings) requires signing in:
 
 - **First launch**: the dashboard opens the "Create admin account" screen. For safety, initial setup is only accepted from localhost (127.0.0.1) so a LAN peer cannot claim the admin account first.
 - **Sessions**: stored in an HttpOnly cookie, valid for 7 days. Sign out from the user menu in the top-right corner.
@@ -364,9 +388,9 @@ request_timeout_secs = 120
 ## 🗺️ Roadmap
 
 - [x] 📊 Richer statistics dashboard (monitoring wall: per-model trends / request log / cache hit rate)
-- [ ] 🔑 Fine-grained API key permissions (per-model / per-quota rate limiting)
+- [x] 🔑 Fine-grained API key permissions (bind to a virtual model · expiry · request / token / cost quotas · rolling-window rejection)
+- [x] 🔔 Backend health checks & anomaly alerting (platform connectivity check + persisted notification centre)
 - [ ] 🌐 Multi-modal gateway (translation / TTS / embedding unified endpoints)
-- [ ] 🔔 Backend health checks & anomaly alerting
 - [ ] 🐳 Docker one-click deployment
 - [ ] ☁️ Cloud config sync
 
