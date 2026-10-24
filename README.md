@@ -45,46 +45,60 @@
 
 ## 📸 效果展示
 
+以下截图均为 **v1.3.2** 实际运行界面（深色主题）。
+
 <p align="center">
-  <img src="doc/dashboard-wall.png" width="90%" alt="AI Gateway 监控大屏" />
+  <img src="doc/console-wall.png" width="92%" alt="监控大屏" />
 </p>
-<p align="center"><em>监控大屏 — 每模型请求/延时/首字/输出速度/缓存命中率，时/日/月/年全时段趋势</em></p>
+<p align="center"><em>监控大屏 — KPI 条 + 每模型趋势（请求/失败/输入/输出/延时/首字/速度/缓存 八个指标，时·日·月·年四档粒度）、活跃度热力图（自带 7d/30d/12m/All 窗口）、平台占比、模型性能矩阵、请求日志。支持全屏与暂停刷新</em></p>
 
 <details>
-<summary>📱 点击查看更多截图</summary>
+<summary>📱 点击展开其余页面截图</summary>
 
 <p align="center">
-  <img src="doc/request-logs.png" width="90%" alt="请求明细" />
+  <img src="doc/console-traffic.png" width="92%" alt="流量" />
 </p>
-<p align="center"><em>请求明细 — 逐条输入/新增输入/输出/缓存/耗时/首字/速度，支持模型与状态筛选</em></p>
+<p align="center"><em>流量 — 顶部「需要关注」汇总限流/失败/无流量三类异常；请求表可按模型、平台、密钥、状态、错误类型、延时区间筛选并分页回溯；右侧单笔详情含尝试链（每次后端尝试的状态与耗时）、TTFT / 生成耗时条、缓存读与新增输入、预估成本，并可复制 ID、重放请求</em></p>
 
 <p align="center">
-  <img src="doc/virtual-models.png" width="90%" alt="虚拟大模型管理" />
+  <img src="doc/console-models.png" width="92%" alt="虚拟模型" />
 </p>
-<p align="center"><em>虚拟大模型 — 多后端聚合与负载均衡策略</em></p>
+<p align="center"><em>虚拟模型 — 列表直接给出健康状态、后端数、负载策略、请求量、成功率、平均延时与成本</em></p>
 
 <p align="center">
-  <img src="doc/platforms.png" width="90%" alt="平台管理" />
+  <img src="doc/console-model-routing.png" width="92%" alt="虚拟模型路由" />
 </p>
-<p align="center"><em>平台管理 — 15+ 平台预设，一键添加</em></p>
-
-<details>
-<summary>🕰️ 旧版界面截图（v1.2.x）</summary>
+<p align="center"><em>模型详情 · 路由 — 左侧改策略 / 重试次数 / 退避 / 默认 max_tokens / 权重分布，中间「路由脊柱」把后端按权重与优先级画成连线图，右侧看单个后端的供应商、能力标记与思考参数处理方式</em></p>
 
 <p align="center">
-  <img src="doc/ai-gateway1.jpg" width="80%" alt="旧版主界面" />
+  <img src="doc/console-platforms.png" width="92%" alt="平台" />
 </p>
-<p align="center">
-  <img src="doc/ai-gateway2.jpg" width="80%" alt="旧版平台管理" />
-</p>
-<p align="center">
-  <img src="doc/ai-gateway21.jpg" width="80%" alt="旧版统计概览" />
-</p>
-<p align="center">
-  <img src="doc/ai-gateway3.jpg" width="80%" alt="旧版设置页面" />
-</p>
+<p align="center"><em>平台 — 连通性检测结果、已同步模型数、被多少虚拟模型引用、请求量与成功率；顶栏会汇总「N degraded」</em></p>
 
-</details>
+<p align="center">
+  <img src="doc/console-platform-detail.png" width="92%" alt="平台详情" />
+</p>
+<p align="center"><em>平台详情 — 凭据与转发头（Key 默认打码，点击才显一次）、测试连接即拉取远程模型、模型行与定价 CSV 批量导入导出、以及「哪些虚拟模型在用这个平台」</em></p>
+
+<p align="center">
+  <img src="doc/console-keys.png" width="92%" alt="API 密钥" />
+</p>
+<p align="center"><em>API 密钥 — 每把 Key 的请求数、Token 数、平均延时、成本与最后使用时间；可绑定到单个虚拟模型</em></p>
+
+<p align="center">
+  <img src="doc/console-key-quota.png" width="92%" alt="密钥配额" />
+</p>
+<p align="center"><em>密钥配额 — 到期时间、请求数上限、Token 上限、成本预算、配额窗口（终身 / 日 / 周 / 月）。触达任一上限返回 429；成本预算只对已定价模型生效</em></p>
+
+<p align="center">
+  <img src="doc/console-playground.png" width="92%" alt="Playground" />
+</p>
+<p align="center"><em>Playground — 选虚拟模型 + 协议（OpenAI / Anthropic）发一笔真实请求，用来验证路由与上游；可就地生成一次性密钥并填好，或复制等价 cURL</em></p>
+
+<p align="center">
+  <img src="doc/console-settings.png" width="92%" alt="设置" />
+</p>
+<p align="center"><em>设置 — 服务端口与监听地址、请求策略默认值、账号安全、数据统计（行数 / 尝试轨迹 / 告警 / 悬空行 / 正文留存）、配置导出导入、整库备份与恢复</em></p>
 
 </details>
 
@@ -179,17 +193,20 @@ Anthropic SDK ──→ /v1/messages ───────┘
 
 ## ✨ 更多特性
 
-- 🏪 **15+ 平台预设**：OpenAI / Anthropic / DeepSeek / Qwen / Gemini / GLM / 月之暗面 / 豆包 / Ollama / NVIDIA NIM / Azure / 云硅 / Groq / 零一万物 / 百川 ··· 一键添加
-- 🔍 **远程模型获取**：选择平台后自动拉取可用模型列表，下拉选择无需手动输入
+- 🏪 **15 个平台预设**：OpenAI · Anthropic · DeepSeek · Qwen · Google Gemini · Groq · SiliconFlow · 智谱 GLM · 月之暗面 · 豆包 · NVIDIA · Together AI · OpenRouter · Ollama · Azure OpenAI ··· 一键添加，也可手工填任意 OpenAI / Anthropic 兼容端点
+- 🔍 **远程模型获取**：测试连接即拉取上游模型列表，勾选同步进本地模型表；能力标记（推理 / 视觉 / 函数调用等）随模型维护
 - 🧠 **智能能力识别**：聊天/代码/视觉/函数调用等能力自动填充
 - 🔗 **reasoning_content 支持**：兼容 NVIDIA NIM 等平台思维链输出；OpenAI / Anthropic 思考参数双向翻译
+- 📡 **自定义转发头**：在平台级追加任意请求头（如供应商私有开关），同名可覆盖 Authorization / x-api-key
+- 🎛️ **Playground**：界内选模型、选协议、发真实请求，验证路由与上游是否如预期，并可复制等价 cURL
 - 🌙 **浅色 / 深色 / 跟随系统** 三种主题
 - 🌍 **中英双语** UI
 - ⚙️ 端口可在界面内修改，默认 1994
-- 🧭 **六页控制台**：运行总览 / 流量 / 虚拟模型 / 平台 / 密钥 / 监控大屏，筛选与分页都写进地址，刷新、前进/后退都不丢
+- 🧭 **七个页面**：流量 · 监控大屏 · 虚拟模型 · 平台 · API 密钥 · Playground · 设置。筛选、分页与时段都写进地址，刷新、前进/后退都不丢
 - 🧾 **请求轨迹与正文重放**：一次请求的每次后端尝试逐条可查；正文留存默认关闭，开启后可原样重放某一笔请求
 - 🔔 **通知中心**：Key 即将过期、平台连续失败、配额超阈值、备份过期都会落库，顶栏铃铛一点就到
 - 💰 **成本估算与预算配额**：按定价表算出每次请求的成本（并给出覆盖率），配额支持滚动窗口与超额拦截
+- 🔑 **密钥级配额**：每把 Key 可设到期时间、请求数上限、Token 上限、成本预算与配额窗口（终身 / 日 / 周 / 月），并可绑定到单个虚拟模型
 - 🗄️ **整库备份与恢复**：一键快照、下载、删除，原地还原前自动再留一份安全快照
 - 📤 **配置导出 / 导入与 CSV**：配置脱敏导出、预览后合并导入；流量按筛选导出 CSV，平台定价 CSV 批量进出
 - ⚡ **实时刷新**：新请求与告警通过 SSE 推送，连接断开自动退回 30 秒轮询
@@ -384,9 +401,9 @@ request_timeout_secs = 120
 ## 🗺️ Roadmap
 
 - [x] 📊 更丰富的统计面板（监控大屏：每模型全时段趋势 / 请求明细 / 缓存命中率）
-- [ ] 🔑 API Key 细粒度权限控制（按模型/按额度限流）
+- [x] 🔑 API Key 细粒度权限控制（绑定虚拟模型 · 到期时间 · 请求/Token/成本三类配额 · 滚动窗口拦截）
+- [x] 🔔 后端健康检查 & 异常告警通知（平台连通性检测 + 通知中心落库）
 - [ ] 🌐 多语言网关（翻译 / TTS / Embedding 统一端点）
-- [ ] 🔔 后端健康检查 & 异常告警通知
 - [ ] 🐳 Docker 一键部署
 - [ ] ☁️ 云端配置同步
 
