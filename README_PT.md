@@ -197,6 +197,20 @@ Um perfil completo de desempenho para cada modelo em granularidade de hora / dia
 
 ---
 
+### 🧾 Detalhes das requisições e retenção
+
+- **Uma linha por requisição**: caminho de entrada, URL de encaminhamento e modelo upstream por tentativa, cabeçalhos, corpo da requisição/resposta, tokens, TTFT, cache, custo e créditos; retries e trocas de backend aparecem um a um
+- **Nenhum valor sensível no banco**: os cabeçalhos são capturados por uma lista de permissões; `Authorization` / `x-api-key` / `Cookie` são sempre excluídos; credenciais nos parâmetros da URL de encaminhamento (`key` / `token` / `sig`, ...) são mascaradas
+- **A captura de corpos é opt-in**: requisição e resposta têm chaves separadas, com limite de 64 KB por registro; streams guardam o SSE upstream bruto, e requisições entre protocolos guardam a resposta upstream bruta, não o resultado convertido
+- **Retenção**: desligada ou 30/90/180/365 dias; roda na inicialização e uma vez por dia. O mínimo é 30 dias — menos apagaria uso que as cotas mensais das chaves ainda contam
+
+### 🎟️ Orçamentos de créditos upstream
+
+- **Orçamento da plataforma + preço em créditos por modelo**: a plataforma pode definir um orçamento natural diário/semanal/mensal (por exemplo, ModelScope 250 créditos/dia), e o modelo um preço por requisição (1 ou 2 créditos)
+- **Roteamento ciente de créditos**: plataformas com saldo insuficiente são ignoradas; quando todas esgotam, o gateway retorna 429 com o próximo horário de reset em vez de usar silenciosamente uma conta acima do limite
+- **Livro-razão separado**: cobranças, liberações, ajustes e resets têm linha própria; limpar o histórico de requisições nunca “devolve” créditos já consumidos
+- **Visível e ajustável**: o log de requisições mostra os créditos de cada uma; a lista/detalhe da plataforma mostra restante/total e modelos sem preço; créditos baixos/esgotados vão para a central de notificações e podem ser ajustados manualmente
+
 ## 🧱 Limitações conhecidas
 
 Estes são limites de implementação fáceis de superestimar:
@@ -207,6 +221,9 @@ Estes são limites de implementação fáceis de superestimar:
 4. **Erros de conexão não são repetidos por padrão**: apenas 429 / 5xx / 408; timeouts de rede e falhas de conexão contam como `ConnectionError` e não estão na lista.
 5. **Uma chave ainda é necessária mesmo sem chaves configuradas**: sem nenhuma chave de API, o gateway não valida o valor, mas a requisição ainda precisa levar um cabeçalho `Authorization` ou `x-api-key` (o valor não é validado); assim que uma chave existe, uma chave válida é exigida.
 6. **«Menos conexões» termina nos cabeçalhos de resposta**: o contador é liberado assim que os cabeçalhos do upstream chegam, então não cobre a duração de um corpo em streaming e não é uma contagem real de concorrência de streaming.
+7. **Os corpos de requisição/resposta vêm desligados**: dois interruptores separados com limite de 64 KB por registro; os detalhes de resposta guardam a resposta upstream bruta, streams apenas os primeiros 64 KB, e requisições entre protocolos não são o resultado convertido que o cliente viu.
+8. **O auto-purge dura pelo menos 30 dias**: desligado, a limpeza é manual; apagar só libera páginas do SQLite e não reduz o arquivo (execute `VACUUM` separadamente).
+9. **Créditos são um livro-razão local**: reservados/confirmados em caso de sucesso e liberados em caso de falha, com ajuste manual; as janelas usam o dia/semana/mês natural local do servidor e podem divergir da fatura upstream.
 
 ---
 

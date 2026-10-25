@@ -197,6 +197,20 @@ Un profil de performance complet pour chaque modèle en granularité heure / jou
 
 ---
 
+### 🧾 Détails des requêtes et rétention
+
+- **Une ligne par requête** : chemin entrant, URL de transfert et modèle amont par tentative, en-têtes, corps de requête/réponse, tokens, TTFT, cache, coût et crédits ; les retries et changements de backend sont visibles un par un
+- **Aucune valeur sensible en base** : les en-têtes sont capturés via une liste blanche ; `Authorization` / `x-api-key` / `Cookie` sont toujours exclus ; les identifiants dans les paramètres de l'URL de transfert (`key` / `token` / `sig`, ...) sont masqués
+- **La capture des corps est opt-in** : les corps de requête et de réponse ont des interrupteurs séparés, avec une limite de 64 Ko par entrée ; les flux stockent le SSE amont brut, et les requêtes inter-protocoles stockent la réponse amont brute plutôt que le résultat converti
+- **Rétention** : désactivée ou 30/90/180/365 jours ; s'exécute au démarrage et une fois par jour. Le minimum est de 30 jours — moins supprimerait de l'usage encore compté par les quotas mensuels des clés
+
+### 🎟️ Budgets de crédits amont
+
+- **Budget de plateforme + prix en crédits par modèle** : une plateforme peut définir un budget naturel jour/semaine/mois (par exemple ModelScope 250 crédits/jour), et un modèle un prix par requête (1 ou 2 crédits)
+- **Routage conscient des crédits** : les plateformes sans solde suffisant sont ignorées ; quand toutes sont épuisées, la passerelle renvoie 429 avec la prochaine date de réinitialisation au lieu d'utiliser silencieusement un compte dépassé
+- **Registre séparé** : débits, libérations, ajustements et réinitialisations ont chacun une ligne ; purger l'historique des requêtes ne « rembourse » jamais les crédits déjà consommés
+- **Visible et ajustable** : le journal des requêtes affiche les crédits par requête ; la liste/fiche plateforme affiche restant/total et le nombre de modèles non tarifés ; les crédits faibles/épuisés vont au centre de notifications et peuvent être ajustés manuellement
+
 ## 🧱 Limites connues
 
 Voici les limites d'implémentation qu'il est facile de surestimer :
@@ -207,6 +221,9 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 4. **Les erreurs de connexion ne sont pas réessayées par défaut** : seuls 429 / 5xx / 408 le sont ; les timeouts réseau et les échecs de connexion relèvent de `ConnectionError` et ne figurent pas dans la liste.
 5. **Une clé reste requise même sans clé configurée** : sans aucune clé API, la passerelle ne valide pas la valeur, mais la requête doit tout de même porter un en-tête `Authorization` ou `x-api-key` (la valeur n'est pas validée) ; dès qu'une clé existe, une clé valide est requise.
 6. **« Moins de connexions » s'arrête aux en-têtes de réponse** : le compteur est libéré dès l'arrivée des en-têtes upstream ; il ne couvre pas la durée d'un corps en streaming et ne représente donc pas la concurrence réelle du streaming.
+7. **Les corps de requête/réponse sont désactivés par défaut** : deux interrupteurs séparés avec une limite de 64 Ko par entrée ; les détails de réponse stockent la réponse amont brute, les flux seulement les 64 premiers Ko, et les requêtes inter-protocoles ne sont pas le résultat converti vu par le client.
+8. **L'auto-purge dure au moins 30 jours** : désactivé, la purge est manuelle ; la suppression ne libère que des pages SQLite et ne réduit pas le fichier (exécuter `VACUUM` séparément).
+9. **Les crédits sont un registre local** : réservés/confirmés en cas de succès et libérés en cas d'échec, avec ajustement manuel ; les fenêtres utilisent le jour/semaine/mois naturel local du serveur et peuvent différer de la facture amont.
 
 ---
 

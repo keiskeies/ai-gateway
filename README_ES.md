@@ -197,6 +197,20 @@ Un perfil de rendimiento completo para cada modelo en granularidad de hora / dí
 
 ---
 
+### 🧾 Detalles de solicitudes y retención
+
+- **Una fila por solicitud**: ruta de entrada, URL de reenvío y modelo upstream por intento, cabeceras, cuerpo de solicitud/respuesta, tokens, TTFT, caché, coste y créditos; los reintentos y cambios de backend se ven uno a uno
+- **Sin valores sensibles en la base de datos**: las cabeceras se capturan mediante una lista blanca; `Authorization` / `x-api-key` / `Cookie` siempre se excluyen; las credenciales en los parámetros de la URL de reenvío (`key` / `token` / `sig`, ...) se enmascaran
+- **La captura de cuerpos es opt-in**: solicitud y respuesta tienen interruptores separados, con un límite de 64 KB por registro; los streams guardan el SSE upstream en bruto y las solicitudes entre protocolos guardan la respuesta upstream en bruto, no el resultado convertido
+- **Retención**: desactivada o 30/90/180/365 días; se ejecuta al arrancar y una vez al día. El mínimo es 30 días — menos borraría uso que las cuotas mensuales de las claves todavía cuentan
+
+### 🎟️ Presupuestos de créditos upstream
+
+- **Presupuesto de plataforma + precio en créditos por modelo**: la plataforma puede definir un presupuesto natural diario/semanal/mensual (por ejemplo, ModelScope 250 créditos/día) y el modelo un precio por solicitud (1 o 2 créditos)
+- **Enrutado consciente de créditos**: las plataformas con saldo insuficiente se omiten; cuando todas se agotan, la puerta de enlace devuelve 429 con la próxima hora de reinicio en lugar de usar en silencio una cuenta por encima del límite
+- **Libro mayor separado**: cargos, liberaciones, ajustes y reinicios tienen su fila; purgar el historial de solicitudes nunca “devuelve” créditos ya consumidos
+- **Visible y ajustable**: el registro de solicitudes muestra los créditos de cada una; la lista/detalle de plataforma muestra restante/total y modelos sin precio; los créditos bajos/agotados llegan al centro de notificaciones y se pueden ajustar manualmente
+
 ## 🧱 Limitaciones conocidas
 
 Estos son límites de implementación fáciles de sobreestimar:
@@ -207,6 +221,9 @@ Estos son límites de implementación fáciles de sobreestimar:
 4. **Los errores de conexión no se reintentan por defecto**: solo 429 / 5xx / 408; los timeouts de red y los fallos de conexión cuentan como `ConnectionError` y no están en la lista.
 5. **Se sigue necesitando una clave aunque no haya ninguna configurada**: sin claves API, la pasarela no valida el valor, pero la petición debe llevar igualmente una cabecera `Authorization` o `x-api-key` (el valor no se valida); en cuanto existe una clave, se exige una clave válida.
 6. **«Menos conexiones» termina en las cabeceras de respuesta**: el contador se libera en cuanto llegan las cabeceras del upstream, así que no cubre la duración de un cuerpo en streaming y no es un recuento real de concurrencia de streaming.
+7. **Los cuerpos de solicitud/respuesta están desactivados por defecto**: dos interruptores separados con un límite de 64 KB por registro; los detalles de respuesta guardan la respuesta upstream en bruto, los streams solo los primeros 64 KB, y las solicitudes entre protocolos no son el resultado convertido que vio el cliente.
+8. **El auto-purge dura al menos 30 días**: desactivado, la purga es manual; borrar solo libera páginas de SQLite y no reduce el archivo (ejecuta `VACUUM` aparte).
+9. **Los créditos son un libro mayor local**: se reservan/confirman al tener éxito y se liberan al fallar, con ajuste manual; las ventanas usan el día/semana/mes natural local del servidor y pueden diferir de la factura upstream.
 
 ---
 

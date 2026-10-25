@@ -197,6 +197,20 @@ Ein vollständiges Leistungsprofil für jedes Modell in Stunden-, Tages-, Monats
 
 ---
 
+### 🧾 Anfragedetails und Aufbewahrung
+
+- **Eine Zeile pro Anfrage**: eingehender Pfad, Forward-URL und Upstream-Modell je Versuch, Request-Header, Request-/Response-Body, Token, TTFT, Cache, Kosten und Credits; Retries und Backend-Wechsel sind einzeln sichtbar
+- **Keine sensiblen Werte in der Datenbank**: Header werden nur über eine Allowlist erfasst; `Authorization` / `x-api-key` / `Cookie` sind immer ausgeschlossen; Zugangsdaten in Query-Parametern der Forward-URL (`key` / `token` / `sig`, ...) werden maskiert
+- **Body-Erfassung ist opt-in**: Request- und Response-Body haben getrennte Schalter mit 64-KB-Limit pro Eintrag; Streams speichern rohes Upstream-SSE, und Cross-Protocol-Anfragen speichern die rohe Upstream-Antwort statt des konvertierten Ergebnisses
+- **Aufbewahrung**: aus oder 30/90/180/365 Tage; läuft beim Start und einmal täglich. Minimum 30 Tage — kürzer würde Nutzung löschen, die monatliche Key-Quotas noch zählen
+
+### 🎟️ Upstream-Credit-Budgets
+
+- **Plattform-Budget + Credit-Preis pro Modell**: Plattformen können ein natürliches Tages-/Wochen-/Monatsbudget setzen (z. B. ModelScope 250 Credits/Tag), Modelle einen Preis pro Anfrage (1 oder 2 Credits)
+- **Credit-bewusstes Routing**: Plattformen mit zu wenig Guthaben werden übersprungen; sind alle erschöpft, antwortet der Gateway mit 429 und der nächsten Reset-Zeit, statt still ein Konto über dem Limit zu nutzen
+- **Getrenntes Ledger**: Aufladungen, Freigaben, Anpassungen und Resets haben Ledger-Zeilen; das Löschen der Anfragehistorie „erstattet“ bereits verbrauchte Credits nicht
+- **Sichtbar und anpassbar**: Die Anfragehistorie zeigt die Credits pro Anfrage; Plattformliste/-detail zeigt Rest/Gesamt und ungepreiste Modelle; niedrige/erschöpfte Credits landen im Benachrichtigungszentrum und lassen sich manuell anpassen
+
 ## 🧱 Bekannte Einschränkungen
 
 Das sind Implementierungsgrenzen, bei denen man leicht zu viel annimmt:
@@ -207,6 +221,9 @@ Das sind Implementierungsgrenzen, bei denen man leicht zu viel annimmt:
 4. **Verbindungsfehler werden standardmäßig nicht wiederholt**: Standardmäßig werden nur 429 / 5xx / 408 wiederholt; Netzwerk-Timeouts und Dial-Fehler zählen als `ConnectionError` und stehen nicht auf der Retry-Liste.
 5. **Auch ohne konfigurierte Schlüssel muss ein Schlüssel mitgeschickt werden**: Sind keine API-Schlüssel vorhanden, prüft das Gateway den Wert nicht, aber die Anfrage muss trotzdem einen `Authorization`- oder `x-api-key`-Header tragen (der Wert wird nicht geprüft); sobald ein Schlüssel existiert, ist ein gültiger Schlüssel erforderlich.
 6. **„Least Connections" endet mit den Antwortheadern**: Der Zähler wird freigegeben, sobald die Antwortheader des Upstreams eintreffen; er deckt nicht die Laufzeit eines Streaming-Bodys ab und ist kein vollständiger Streaming-Nebenläufigkeitszähler.
+7. **Request-/Response-Bodys sind standardmäßig aus**: zwei getrennte Schalter mit 64-KB-Limit pro Eintrag; Response-Details speichern die rohe Upstream-Antwort, Streams nur die ersten 64 KB, und Cross-Protocol-Anfragen sind nicht das konvertierte Ergebnis des Clients.
+8. **Auto-Purge dauert mindestens 30 Tage**: ist er aus, wird manuell gelöscht; Löschen gibt nur SQLite-Seiten frei und verkleinert die Datei nicht (separat `VACUUM` ausführen).
+9. **Credits sind ein lokales Ledger**: bei Erfolg reserviert/bestätigt, bei Fehler freigegeben, manuell anpassbar; Fenster nutzen den lokalen natürlichen Tag/Woche/Monat des Servers und können von der Upstream-Rechnung abweichen.
 
 ---
 

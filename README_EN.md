@@ -197,6 +197,20 @@ A complete performance profile for every model at hour / day / month / year gran
 
 ---
 
+### 🧾 Request details and retention
+
+- **One row per request**: inbound path, per-attempt forward URL and upstream model, request headers, request/response bodies, tokens, TTFT, cache, cost and credits; retries and backend rotation are visible one by one
+- **No sensitive values in the database**: headers are captured from an allowlist; `Authorization` / `x-api-key` / `Cookie` are always excluded; credentials in forward-URL query parameters (`key` / `token` / `sig`, ...) are redacted
+- **Body capture is opt-in**: request and response bodies have separate switches with a 64 KB cap per record; streams store the raw upstream SSE, and cross-protocol requests store the raw upstream response rather than pretending to be the converted result
+- **Retention**: off or 30/90/180/365 days; runs at startup and once a day. The minimum is 30 days — anything shorter would delete usage that monthly key quotas still count
+
+### 🎟️ Upstream credit budgets
+
+- **Platform budget + per-model credit price**: platforms can set a natural day/week/month budget (for example ModelScope 250 credits/day), and models can set a per-request price (1 or 2 credits)
+- **Credit-aware routing**: platforms with insufficient balance are skipped; when all are exhausted the gateway returns 429 with the next reset time instead of silently using an over-quota account
+- **Separate ledger**: charges, releases, adjustments and resets all have ledger rows; purging request history never “refunds” credits already spent
+- **Visible and adjustable**: the request log shows credits for each request; platform list/detail shows remaining/total and unpriced model count; low/exhausted credits go to the notification center and can be adjusted manually
+
 ## 🧱 Known limitations
 
 These are implementation boundaries that are easy to over-assume:
@@ -207,6 +221,9 @@ These are implementation boundaries that are easy to over-assume:
 4. **Connection failures are not retried by default**: only 429 / 5xx / 408 are retried; network-level timeouts and dial failures count as `ConnectionError` and are not in the retry list.
 5. **A key is still required when no keys exist**: with zero API keys configured the gateway does not validate the value, but the request must still carry an `Authorization` or `x-api-key` header (its value is not validated); once a key exists, a valid key is required.
 6. **"Least connections" stops at the response headers**: the counter is released as soon as upstream response headers arrive, so it does not cover the lifetime of a streaming body and is not a full streaming-concurrency count.
+7. **Request/response bodies are off by default**: two independent switches with a 64 KB cap per record; response details store the raw upstream response, streams keep only the first 64 KB, and cross-protocol requests are not the converted result the client saw.
+8. **Auto purge is at least 30 days**: when off, purge is manual; deletion only frees SQLite pages and does not shrink the file (run `VACUUM` separately).
+9. **Credits are a local ledger**: reserved/confirmed on success and released on failure, with manual adjustment; windows use the server's local natural day/week/month and may differ from the upstream bill.
 
 ---
 
