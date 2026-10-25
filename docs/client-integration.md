@@ -94,6 +94,30 @@ AI Gateway 已经是本地网关，不需要再起第二个代理。客户端直
 
 ---
 
+### 2.5 Claude Code 的附加参数：抄了什么、为什么不抄剩下的
+
+cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类，只有第一类适合进 `/clients`。
+
+**写进 `settings.json` 的（已实现）**
+
+| 面板字段 | 落点 |
+|---|---|
+| 档位显示名称 | `ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU,FABLE}_MODEL_NAME`，与实际请求的 `_MODEL` 分开 |
+| 禁用自动升级 | `DISABLE_AUTOUPDATER=1` |
+| 启用 Tool Search | `ENABLE_TOOL_SEARCH=true` |
+| 禁用 Artifact 工具 | `CLAUDE_CODE_DISABLE_ARTIFACT=1` |
+| 关闭 auto mode 服务端检查 | `CLAUDE_CODE_AUTO_MODE_SERVER=0` |
+| 隐藏 AI 署名 | `CLAUDE_CODE_ATTRIBUTION_HEADER=0` |
+| 超时 / 最大输出 / 上下文窗口 | `API_TIMEOUT_MS`、`CLAUDE_CODE_MAX_OUTPUT_TOKENS`、`CLAUDE_CODE_MAX_CONTEXT_TOKENS` |
+| 后台小模型 | `ANTHROPIC_SMALL_FAST_MODEL`（选虚拟模型） |
+| 自定义 Header | `ANTHROPIC_CUSTOM_HEADERS`，每行一个「名称: 值」 |
+
+约束：只有 `CLAUDE_ENV_KEYS` 白名单里的键可写，传别的按名字拒绝——这一页不是通用环境变量编辑器。取消勾选会把键从文件里删掉，所以 `preview` 必须回读文件当前值给表单播种，否则"没勾"分不清是"没开"还是"没读到"。反复接入时托管记录里保留的始终是**用户最初的值**，不是上一次 AI Gateway 写的值。
+
+**由 cc-switch 自己的代理消费，不进配置文件（不抄）**：上游格式（OpenAI Chat ↔ Anthropic 转换）、完整 URL 开关、User-Agent、Header/Body 覆盖。这些在我们的架构里对应「平台/后端」的协议转换与 `param_overrides`；搬到客户端页等于同一件事摆两个地方，两边都能改就没人知道哪边生效。
+
+**需要网关侧先配合（暂缓）**：「声明支持 1M」。cc-switch 的做法是给模型 id 加 `[1m]` 后缀，Claude Code 原样发出；我们的虚拟模型按名字精确匹配，直接写后缀会让请求打不到模型。要做，得先在解析时剥掉 `[1m]` 并把它当成上下文窗口标记——属于后端改动，先只开放 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 这个全局窗口值。
+
 ## 3. 代码落点
 
 - `src/clients/mod.rs`：客户端 id、路径解析、Adapter 契约、公共类型。

@@ -111,6 +111,17 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
 
     _click_in(claude, "更多设置")
     claude.locator(".console-client-tiers").wait_for(state="visible", timeout=10000)
+
+    # 档位显示名、开关、请求参数：都写进 Claude Code 自己的环境变量
+    # 按 label 定位：Mantine Select 会多带一个隐藏 input，按序号取会打进下拉的搜索框
+    claude.get_by_label("显示名称").nth(1).fill("Opus 4.5")
+    claude.locator(".mantine-Checkbox-root", has_text="禁用自动升级").locator("input").evaluate("el => el.click()")
+    claude.get_by_label("请求超时 (ms)").fill("300000")
+    diff = _wait_diff_ready(claude)
+    assert "禁用自动升级" in diff and "请求超时" in diff
+    # 档位显示名与其余同值键不再同值，折叠项要能展开看明细（且用中文行名）
+    _click_in(claude, "另外")
+    assert "Opus 档 显示名称" in claude.locator(".console-client-diff.muted").inner_text()
     page.screenshot(path=str(SHOTS / "clients-more.png"), full_page=True)
 
     _click_in(claude, "接入 AI Gateway")
@@ -125,6 +136,10 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     assert applied["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{instance.port}"
     assert applied["env"]["ANTHROPIC_MODEL"] == "agnes"
     assert applied["env"]["ANTHROPIC_AUTH_TOKEN"].startswith("sk-aigw-")
+    assert applied["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "agnes", "显示名不该改动实际请求模型"
+    assert applied["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] == "Opus 4.5"
+    assert applied["env"]["DISABLE_AUTOUPDATER"] == "1"
+    assert applied["env"]["API_TIMEOUT_MS"] == "300000"
     assert "正在走 AI Gateway" in claude.locator(".console-client-state").inner_text()
     page.screenshot(path=str(SHOTS / "clients-applied.png"), full_page=True)
 
@@ -155,6 +170,9 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     assert restored["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:15721"
     assert restored["env"]["ANTHROPIC_MODEL"] == "old-model"
     assert "ANTHROPIC_AUTH_TOKEN" not in restored["env"], "旧凭据只存在于备份里"
+    # 附加开关与参数是这次新写的，撤销后必须一起消失
+    for key in ("DISABLE_AUTOUPDATER", "API_TIMEOUT_MS", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"):
+        assert key not in restored["env"], f"{key} survived the disconnect"
     with sqlite3.connect(instance.dir / "data" / "ai-gateway.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM client_configs").fetchone()[0] == 0
         assert conn.execute("SELECT enabled FROM api_keys").fetchone()[0] == 0

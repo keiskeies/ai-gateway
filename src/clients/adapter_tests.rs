@@ -40,8 +40,17 @@ fn with_hash(managed: &Value, token: &str) -> Value {
 }
 
 fn apply_plan(adapter: &dyn Adapter, paths: &ClientPaths, token: &str) -> ClientPlan {
+    apply_plan_with(adapter, paths, token, &ClientExtras::default())
+}
+
+fn apply_plan_with(
+    adapter: &dyn Adapter,
+    paths: &ClientPaths,
+    token: &str,
+    extras: &ClientExtras,
+) -> ClientPlan {
     let plan = adapter
-        .plan(paths, &models(), "http://127.0.0.1:1994", token, false)
+        .plan(paths, &models(), "http://127.0.0.1:1994", token, false, extras)
         .expect("plan");
     assert!(plan.original.is_some(), "test config must exist");
     fs::write(adapter.path(paths), &plan.content).expect("apply plan");
@@ -118,7 +127,14 @@ fn claude_code_created_file_is_removed_on_restore() {
     let path = adapter.path(&paths);
     let token = "sk-aigw-unit-test-token-0123456789";
     let plan = adapter
-        .plan(&paths, &models(), "http://127.0.0.1:1994", token, false)
+        .plan(
+            &paths,
+            &models(),
+            "http://127.0.0.1:1994",
+            token,
+            false,
+            &ClientExtras::default(),
+        )
         .expect("plan");
     assert_eq!(plan.managed["created_file"], true);
     write(&path, std::str::from_utf8(&plan.content).unwrap());
@@ -342,6 +358,7 @@ fn additive_adapters_refuse_an_unmanaged_ai_gateway_provider() {
             "http://127.0.0.1:1994",
             "sk-aigw-unit-test-token-0123456789",
             false,
+            &ClientExtras::default(),
         );
         assert!(
             matches!(result, Err(AppError::Conflict(_))),
@@ -350,4 +367,118 @@ fn additive_adapters_refuse_an_unmanaged_ai_gateway_provider() {
         );
         let _ = fs::remove_dir_all(&home);
     }
+}
+
+
+fn claude_env(root: &Value) -> &serde_json::Map<String, Value> {
+    root.get("env").and_then(Value::as_object).expect("env object")
+}
+
+#[test]
+fn claude_code_writes_display_names_separately_from_requested_models() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &claude::ClaudeCodeAdapter;
+    write(&adapter.path(&paths), "{\"env\":{}}");
+
+    let mut names = std::collections::BTreeMap::new();
+    names.insert("opus".to_string(), "Opus 4.5".to_string());
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("DISABLE_AUTOUPDATER".to_string(), "1".to_string());
+    env.insert("API_TIMEOUT_MS".to_string(), "300000".to_string());
+    let extras = ClientExtras {
+        tier_names: names,
+        env,
+        managed: None,
+    };
+
+    let plan = apply_plan_with(adapter, &paths, "sk-aigw-unit-test-token-0123456789", &extras);
+    let root: Value = serde_json::from_slice(&plan.content).expect("written json");
+    let env = claude_env(&root);
+    // 菜单里读起来友好，发出去的仍是虚拟模型名
+    assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL"], json!("agnes"));
+    assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"], json!("Opus 4.5"));
+    assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"], json!("agnes"));
+    assert_eq!(env["DISABLE_AUTOUPDATER"], json!("1"));
+    assert_eq!(env["API_TIMEOUT_MS"], json!("300000"));
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn claude_code_drops_optional_env_when_the_switch_goes_off() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &claude::ClaudeCodeAdapter;
+    write(&adapter.path(&paths), "{\"env\":{\"API_TIMEOUT_MS\":\"60000\"}}");
+
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("API_TIMEOUT_MS".to_string(), "300000".to_string());
+    let first = apply_plan_with(
+        adapter,
+        &paths,
+        "sk-aigw-unit-test-token-0123456789",
+        &ClientExtras {
+            tier_names: Default::default(),
+            env: env.clone(),
+            managed: None,
+        },
+    );
+
+    // 第二次把开关关掉：附加键要消失，且变更里能看到"删掉"这一条
+    let second = adapter
+        .plan(
+            &paths,
+            &models(),
+            "http://127.0.0.1:1994",
+            "sk-aigw-unit-test-token-0123456789",
+            true,
+            &ClientExtras {
+                tier_names: Default::default(),
+                env: Default::default(),
+                managed: Some(first.managed.clone()),
+            },
+        )
+        .expect("second plan");
+    assert!(second
+        .changes
+        .iter()
+        .any(|change| change.path == "env.API_TIMEOUT_MS" && change.after.is_empty()));
+    fs::write(adapter.path(&paths), &second.content).expect("apply second");
+    let root: Value = serde_json::from_slice(&second.content).expect("written json");
+    assert!(
+        !claude_env(&root).contains_key("API_TIMEOUT_MS"),
+        "a switch turned off must not leave its env key behind"
+    );
+
+    // 撤销要把它恢复成用户原来的值，而不是删掉
+    let restored = adapter
+        .restore(&paths, &with_hash(&second.managed, "sk-aigw-unit-test-token-0123456789"))
+        .expect("restore");
+    let root: Value = serde_json::from_slice(&restored.content).expect("restored json");
+    assert_eq!(claude_env(&root)["API_TIMEOUT_MS"], json!("60000"));
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn only_allowlisted_env_keys_are_accepted() {
+    let request = ClientApplyRequest {
+        default_model: "agnes".to_string(),
+        env: Some(std::collections::HashMap::from([(
+            "ANTHROPIC_API_KEY".to_string(),
+            "sk-ant-paste".to_string(),
+        )])),
+        ..Default::default()
+    };
+    let error = request.extras(None).expect_err("unknown key must be refused");
+    assert!(matches!(error, AppError::BadRequest(_)), "{error}");
+
+    let numeric = ClientApplyRequest {
+        default_model: "agnes".to_string(),
+        env: Some(std::collections::HashMap::from([(
+            "API_TIMEOUT_MS".to_string(),
+            "soon".to_string(),
+        )])),
+        ..Default::default()
+    };
+    assert!(numeric.extras(None).is_err(), "a numeric knob must be a number");
 }

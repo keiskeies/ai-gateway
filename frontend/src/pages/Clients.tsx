@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Button, Group, Modal, Select, TextInput } from '@mantine/core'
+import { Button, Checkbox, Group, Modal, Select, Textarea, TextInput } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
   IconCheck,
@@ -63,6 +63,78 @@ const CLIENT_NEXT: Record<ClientId, TranslationKey> = {
   hermes: 'clientNextGeneric',
 }
 
+/** Claude Code 的附加开关：勾选即写入这个值，取消勾选会把键从文件里撤掉 */
+const CLAUDE_FLAGS: { key: string; value: string; label: TranslationKey; desc: TranslationKey }[] = [
+  {
+    key: 'DISABLE_AUTOUPDATER',
+    value: '1',
+    label: 'clientFlagNoUpdate',
+    desc: 'clientFlagNoUpdateDesc',
+  },
+  {
+    key: 'ENABLE_TOOL_SEARCH',
+    value: 'true',
+    label: 'clientFlagToolSearch',
+    desc: 'clientFlagToolSearchDesc',
+  },
+  {
+    key: 'CLAUDE_CODE_DISABLE_ARTIFACT',
+    value: '1',
+    label: 'clientFlagNoArtifact',
+    desc: 'clientFlagNoArtifactDesc',
+  },
+  {
+    key: 'CLAUDE_CODE_AUTO_MODE_SERVER',
+    value: '0',
+    label: 'clientFlagNoAutoMode',
+    desc: 'clientFlagNoAutoModeDesc',
+  },
+  {
+    key: 'CLAUDE_CODE_ATTRIBUTION_HEADER',
+    value: '0',
+    label: 'clientFlagNoAttribution',
+    desc: 'clientFlagNoAttributionDesc',
+  },
+]
+
+/** 允许代写的附加键 → 界面文案；也是「会改这些」里的行名 */
+const FRIENDLY_ENV: Record<string, TranslationKey> = {
+  'env.ANTHROPIC_SMALL_FAST_MODEL': 'clientSmallFast',
+  'env.ANTHROPIC_CUSTOM_HEADERS': 'clientEnvHeaders',
+  'env.API_TIMEOUT_MS': 'clientEnvTimeout',
+  'env.CLAUDE_CODE_MAX_OUTPUT_TOKENS': 'clientEnvMaxOutput',
+  'env.CLAUDE_CODE_MAX_CONTEXT_TOKENS': 'clientEnvMaxContext',
+  ...Object.fromEntries(CLAUDE_FLAGS.map(flag => ['env.' + flag.key, flag.label])),
+}
+
+/** 档位键在「另外 N 项」明细里的读法：Sonnet 档 / Opus 档 显示名称 */
+const TIER_PATHS: Record<string, { tier: TranslationKey; name: boolean }> = {
+  'env.ANTHROPIC_DEFAULT_SONNET_MODEL': { tier: 'clientSonnet', name: false },
+  'env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME': { tier: 'clientSonnet', name: true },
+  'env.ANTHROPIC_DEFAULT_OPUS_MODEL': { tier: 'clientOpus', name: false },
+  'env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME': { tier: 'clientOpus', name: true },
+  'env.ANTHROPIC_DEFAULT_HAIKU_MODEL': { tier: 'clientHaiku', name: false },
+  'env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME': { tier: 'clientHaiku', name: true },
+  'env.ANTHROPIC_DEFAULT_FABLE_MODEL': { tier: 'clientFable', name: false },
+  'env.ANTHROPIC_DEFAULT_FABLE_MODEL_NAME': { tier: 'clientFable', name: true },
+  'env.CLAUDE_CODE_SUBAGENT_MODEL': { tier: 'clientSubagent', name: false },
+}
+
+function changeLabel(locale: Locale, path: string, kind: ChangeKind): string {
+  const friendly = FRIENDLY_ENV[path]
+  if (friendly) return t(locale, friendly)
+  const tier = TIER_PATHS[path]
+  if (tier) return t(locale, tier.tier) + (tier.name ? ` ${t(locale, 'clientTierDisplayName')}` : '')
+  if (kind === 'detail') return path
+  return t(locale, CHANGE_LABEL[kind])
+}
+
+const CLAUDE_NUMBERS: { key: string; label: TranslationKey; placeholder: string }[] = [
+  { key: 'API_TIMEOUT_MS', label: 'clientEnvTimeout', placeholder: '300000' },
+  { key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', label: 'clientEnvMaxOutput', placeholder: '8192' },
+  { key: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', label: 'clientEnvMaxContext', placeholder: '200000' },
+]
+
 const CLAUDE_TIERS: [string, TranslationKey][] = [
   ['sonnet', 'clientSonnet'],
   ['opus', 'clientOpus'],
@@ -81,18 +153,20 @@ interface ResultNotice {
 }
 
 /** 一条变更在界面上的归法：主行说人话，档位与协议细节折进「另外 N 项」 */
-type ChangeKind = 'url' | 'key' | 'model' | 'provider' | 'tier' | 'detail'
+type ChangeKind = 'url' | 'key' | 'model' | 'provider' | 'flag' | 'tier' | 'detail'
 
 const CHANGE_LABEL: Record<ChangeKind, TranslationKey> = {
   url: 'clientChangeUrl',
   key: 'clientChangeKey',
   model: 'clientChangeModel',
   provider: 'clientChangeProvider',
+  flag: 'clientChangeFlag',
   tier: 'clientChangeTier',
   detail: 'clientChangeDetail',
 }
 
 function classifyChange(path: string): ChangeKind {
+  if (FRIENDLY_ENV[path]) return 'flag'
   const key = path.toUpperCase()
   if (/TOKEN|API_KEY|APIKEY|BEARER/.test(key)) return 'key'
   if (/BASE_URL|BASEURL/.test(key)) return 'url'
@@ -125,7 +199,7 @@ function splitChanges(changes: ClientChange[]) {
   const seen = new Set<ChangeKind>()
   const primary = rows.filter(row => {
     if (row.kind === 'tier' || row.kind === 'detail') return false
-    if (seen.has(row.kind)) return false
+    if (row.kind !== 'flag' && seen.has(row.kind)) return false
     seen.add(row.kind)
     return true
   })
@@ -223,12 +297,15 @@ export default function Clients() {
   const [baseUrl, setBaseUrl] = useState(gatewayUrl)
   const [defaultModel, setDefaultModel] = useState('')
   const [tiers, setTiers] = useState<Record<string, string | null>>({})
+  const [tierNames, setTierNames] = useState<Record<string, string>>({})
+  const [env, setEnv] = useState<Record<string, string>>({})
   const [preview, setPreview] = useState<ClientPreview | null>(null)
   const [computing, setComputing] = useState(false)
   const [busy, setBusy] = useState<Busy>(null)
   const [confirmKind, setConfirmKind] = useState<'restore' | 'restore-backup' | null>(null)
   const [notice, setNotice] = useState<ResultNotice | null>(null)
   const previewSeq = useRef(0)
+  const seededFor = useRef<ClientId | null>(null)
 
   const active = clients.find(client => client.id === expanded) ?? null
 
@@ -258,19 +335,50 @@ export default function Clients() {
     await clientsQuery.refetch()
   }, [clientsQuery])
 
-  const body = (): ClientApplyBody => ({
-    base_url: baseUrl.trim() || undefined,
-    default_model: defaultModel,
-    ...(expanded === 'claude_code'
-      ? {
-          sonnet_model: tiers.sonnet || undefined,
-          opus_model: tiers.opus || undefined,
-          haiku_model: tiers.haiku || undefined,
-          fable_model: tiers.fable || undefined,
-          subagent_model: tiers.subagent || undefined,
-        }
-      : {}),
-  })
+  const setEnvKey = (key: string, value: string | null | undefined) => {
+    setEnv(current => {
+      const next = { ...current }
+      const trimmed = (value ?? '').trim()
+      if (trimmed) {
+        next[key] = trimmed
+      } else {
+        delete next[key]
+      }
+      return next
+    })
+  }
+
+  const body = (): ClientApplyBody => {
+    const kept = Object.fromEntries(
+      Object.entries(env).filter(([, value]) => value && value.trim()),
+    )
+    const names = Object.fromEntries(
+      Object.entries(tierNames).filter(([, value]) => value && value.trim()),
+    )
+    return {
+      base_url: baseUrl.trim() || undefined,
+      default_model: defaultModel,
+      ...(expanded === 'claude_code'
+        ? {
+            sonnet_model: tiers.sonnet || undefined,
+            opus_model: tiers.opus || undefined,
+            haiku_model: tiers.haiku || undefined,
+            fable_model: tiers.fable || undefined,
+            subagent_model: tiers.subagent || undefined,
+            tier_names: Object.keys(names).length > 0 ? names : undefined,
+            env: Object.keys(kept).length > 0 ? kept : undefined,
+          }
+        : {}),
+    }
+  }
+
+  // 第一次拿到预览时用文件里的真实值回填：不然「没勾」到底是「没开」还是「没读到」，用户无从判断
+  useEffect(() => {
+    if (!preview || !expanded || seededFor.current === expanded) return
+    seededFor.current = expanded
+    setEnv(preview.env)
+    setTierNames(preview.tier_names)
+  }, [preview, expanded])
 
   // 展开即算 diff：不必先点「预览」才能看见要改什么
   useEffect(() => {
@@ -295,9 +403,10 @@ export default function Clients() {
         })
     }, 300)
     return () => clearTimeout(timer)
-  }, [expanded, baseUrl, defaultModel, tiers, modelNames, active])
+  }, [expanded, baseUrl, defaultModel, tiers, tierNames, env, modelNames, active])
 
   const openCard = (id: ClientId) => {
+    seededFor.current = null
     setNotice(null)
     setShowExtra(false)
     setShowMore(false)
@@ -476,25 +585,108 @@ export default function Clients() {
                             />
                           </Field>
                           <div className="console-client-tier-note">{t(locale, 'clientGatewayUrlDesc')}</div>
+
                           {client.id === 'claude_code' && (
-                            <div className="console-client-tiers">
-                              {CLAUDE_TIERS.map(([field, label]) => (
-                                <Field key={field} label={t(locale, label)}>
+                            <>
+                              <div className="console-client-subhead">{t(locale, 'clientTiersTitle')}</div>
+                              <div className="console-client-tiers">
+                                {CLAUDE_TIERS.map(([field, label]) => (
+                                  <div className="console-client-tier" key={field}>
+                                    <Field label={t(locale, label)}>
+                                      <Select
+                                        size="xs"
+                                        data={modelNames.map(model => ({ value: model, label: model }))}
+                                        value={tiers[field] ?? null}
+                                        onChange={value => setTiers(current => ({ ...current, [field]: value }))}
+                                        placeholder={t(locale, 'clientFollowDefault')}
+                                        clearable
+                                        clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
+                                        searchable
+                                        disabled={busy !== null}
+                                      />
+                                    </Field>
+                                    {field !== 'subagent' && (
+                                      <Field label={t(locale, 'clientTierDisplayName')}>
+                                        <TextInput
+                                          size="xs"
+                                          value={tierNames[field] ?? ''}
+                                          onChange={event =>
+                                            setTierNames(current => ({
+                                              ...current,
+                                              [field]: event.currentTarget.value,
+                                            }))
+                                          }
+                                          placeholder={tiers[field] || defaultModel}
+                                          disabled={busy !== null}
+                                        />
+                                      </Field>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="console-client-tier-note">{t(locale, 'clientTierNote')}</div>
+
+                              <div className="console-client-subhead">{t(locale, 'clientFlagsTitle')}</div>
+                              <div className="console-client-flags">
+                                {CLAUDE_FLAGS.map(flag => (
+                                  <Checkbox
+                                    key={flag.key}
+                                    size="xs"
+                                    label={t(locale, flag.label)}
+                                    description={t(locale, flag.desc)}
+                                    checked={env[flag.key] === flag.value}
+                                    onChange={event =>
+                                      setEnvKey(flag.key, event.currentTarget.checked ? flag.value : null)
+                                    }
+                                  />
+                                ))}
+                              </div>
+
+                              <div className="console-client-subhead">{t(locale, 'clientNumbersTitle')}</div>
+                              <div className="console-client-numbers">
+                                {CLAUDE_NUMBERS.map(item => (
+                                  <Field key={item.key} label={t(locale, item.label)}>
+                                    <TextInput
+                                      size="xs"
+                                      inputMode="numeric"
+                                      value={env[item.key] ?? ''}
+                                      onChange={event => setEnvKey(item.key, event.currentTarget.value)}
+                                      placeholder={item.placeholder}
+                                      disabled={busy !== null}
+                                    />
+                                  </Field>
+                                ))}
+                                <Field label={t(locale, 'clientSmallFast')}>
                                   <Select
                                     size="xs"
                                     data={modelNames.map(model => ({ value: model, label: model }))}
-                                    value={tiers[field] ?? null}
-                                    onChange={value => setTiers(current => ({ ...current, [field]: value }))}
-                                    placeholder={t(locale, 'clientFollowDefault')}
+                                    value={env.ANTHROPIC_SMALL_FAST_MODEL ?? null}
+                                    onChange={value => setEnvKey('ANTHROPIC_SMALL_FAST_MODEL', value)}
+                                    placeholder={t(locale, 'clientNone')}
                                     clearable
                                     clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
                                     searchable
                                     disabled={busy !== null}
                                   />
                                 </Field>
-                              ))}
-                              <div className="console-client-tier-note">{t(locale, 'clientTierNote')}</div>
-                            </div>
+                              </div>
+                              <div className="console-client-tier-note">{t(locale, 'clientNumbersDesc')}</div>
+
+                              <Field full label={t(locale, 'clientEnvHeaders')}>
+                                <Textarea
+                                  size="xs"
+                                  autosize
+                                  minRows={2}
+                                  value={env.ANTHROPIC_CUSTOM_HEADERS ?? ''}
+                                  onChange={event =>
+                                    setEnvKey('ANTHROPIC_CUSTOM_HEADERS', event.currentTarget.value)
+                                  }
+                                  placeholder={'X-Client: ai-gateway'}
+                                  disabled={busy !== null}
+                                />
+                              </Field>
+                              <div className="console-client-tier-note">{t(locale, 'clientHeadersDesc')}</div>
+                            </>
                           )}
                         </div>
                       )}
@@ -683,7 +875,9 @@ function ClientDiff({
           <ul className="console-client-diff">
             {changes.primary.map(row => (
               <li key={row.path}>
-                <span className="console-client-diff-label">{t(locale, CHANGE_LABEL[row.kind])}</span>
+                <span className="console-client-diff-label">
+                  {changeLabel(locale, row.path, row.kind)}
+                </span>
                 <span className="console-client-diff-value">
                   {row.before && !row.secret && <span className="console-client-diff-before">{row.before}</span>}
                   {row.secret
@@ -714,7 +908,7 @@ function ClientDiff({
                   <ul className="console-client-diff muted">
                     {changes.extra.map(row => (
                       <li key={row.path}>
-                        <span className="console-client-diff-label console-mono">{row.path}</span>
+                        <span className="console-client-diff-label">{changeLabel(locale, row.path, row.kind)}</span>
                         <span className="console-client-diff-value console-mono">
                           {row.secret ? t(locale, 'clientSecretNew') : row.after}
                         </span>

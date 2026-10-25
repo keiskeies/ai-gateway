@@ -21,6 +21,7 @@ mod adapter_tests;
 mod service_tests;
 
 use crate::error::{AppError, AppResult};
+use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -243,6 +244,12 @@ pub struct ClientPreview {
     pub changes: Vec<ClientChange>,
     pub warnings: Vec<String>,
     pub current: ClientCurrent,
+    /// 附加项的当前值，用于表单回填：关掉一个开关必须等于"文件里那个键没了"，
+    /// 而不是"表单默认没勾"。只有 Claude Code 会返回内容。
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tier_names: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -285,6 +292,12 @@ pub struct ClientApplyRequest {
     pub fable_model: Option<String>,
     #[serde(default)]
     pub subagent_model: Option<String>,
+    /// 档位显示名（Claude Code 的 `/model` 菜单里显示什么，实际请求仍是 `_MODEL`）。
+    #[serde(default)]
+    pub tier_names: Option<HashMap<String, String>>,
+    /// 允许清单内的附加环境变量；没列在这里的键一律拒绝，避免把 settings.json 写成任意键值编辑器。
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -297,7 +310,93 @@ pub struct ResolvedModels {
     pub subagent: String,
 }
 
+/// 除「地址 + Key + 模型」之外，一次写入还带着什么。
+#[derive(Debug, Clone, Default)]
+pub struct ClientExtras {
+    /// 档位 → 显示名，键是 sonnet / opus / haiku / fable
+    pub tier_names: BTreeMap<String, String>,
+    /// 允许清单内的附加环境变量
+    pub env: BTreeMap<String, String>,
+    /// 上一次接入写过的托管状态；这次不再要的可选键据此撤掉
+    pub managed: Option<Value>,
+}
+
+/// 客户端配置里允许由 AI Gateway 代写的附加键。
+///
+/// 只放 Claude Code 自己认的环境变量：数值型（超时、输出/上下文上限）与开关型
+/// （Tool Search、自动升级、Artifact、auto mode 服务端检查、AI 署名）。
+/// 想加新键先想清楚它是不是"客户端配置"的事——上游协议、UA、Body 覆盖属于网关侧。
+pub const CLAUDE_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "ENABLE_TOOL_SEARCH",
+    "DISABLE_AUTOUPDATER",
+    "CLAUDE_CODE_DISABLE_ARTIFACT",
+    "CLAUDE_CODE_AUTO_MODE_SERVER",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER",
+];
+
+const NUMERIC_CLAUDE_ENV_KEYS: &[&str] = &[
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+];
+
+const TIER_KEYS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
+
+fn validate_env(env: &HashMap<String, String>) -> AppResult<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (key, value) in env {
+        if !CLAUDE_ENV_KEYS.contains(&key.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "env key {key} is not managed by AI Gateway; allowed: {}",
+                CLAUDE_ENV_KEYS.join(", ")
+            )));
+        }
+        let value = value.trim();
+        if value.is_empty() || value.len() > 2000 {
+            return Err(AppError::BadRequest(format!("env {key} must be 1–2000 characters")));
+        }
+        if key != "ANTHROPIC_CUSTOM_HEADERS" && value.chars().any(|c| c == '\n' || c == '\r') {
+            return Err(AppError::BadRequest(format!("env {key} must be a single line")));
+        }
+        if NUMERIC_CLAUDE_ENV_KEYS.contains(&key.as_str()) && value.parse::<u64>().is_err() {
+            return Err(AppError::BadRequest(format!("env {key} must be a number")));
+        }
+        out.insert(key.clone(), value.to_string());
+    }
+    Ok(out)
+}
+
+fn validate_tier_names(names: &HashMap<String, String>) -> AppResult<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (tier, name) in names {
+        if !TIER_KEYS.contains(&tier.as_str()) {
+            return Err(AppError::BadRequest(format!("unknown model tier {tier}")));
+        }
+        let name = name.trim();
+        if name.is_empty() || name.len() > 120 || name.chars().any(|c| c == '\n' || c == '\r') {
+            return Err(AppError::BadRequest(format!(
+                "{tier} display name must be 1–120 characters without newlines"
+            )));
+        }
+        out.insert(tier.clone(), name.to_string());
+    }
+    Ok(out)
+}
+
 impl ClientApplyRequest {
+    pub fn extras(&self, managed: Option<Value>) -> AppResult<ClientExtras> {
+        Ok(ClientExtras {
+            tier_names: validate_tier_names(self.tier_names.as_ref().unwrap_or(&HashMap::new()))?,
+            env: validate_env(self.env.as_ref().unwrap_or(&HashMap::new()))?,
+            managed,
+        })
+    }
+
     pub fn resolved(&self) -> AppResult<ResolvedModels> {
         let default = self.default_model.trim();
         if default.is_empty() {
@@ -376,8 +475,17 @@ pub trait Adapter: Send + Sync {
         base_url: &str,
         token: &str,
         allow_existing: bool,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan>;
     fn restore(&self, paths: &ClientPaths, managed: &Value) -> AppResult<RestorePlan>;
+
+    /// 读回附加项当前值（附加环境变量、档位显示名）；除 Claude Code 外都是空的。
+    fn read_extras(
+        &self,
+        _paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        (BTreeMap::new(), BTreeMap::new())
+    }
 }
 
 pub fn adapter(id: ClientId) -> &'static dyn Adapter {

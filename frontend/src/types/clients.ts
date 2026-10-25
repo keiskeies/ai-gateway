@@ -37,6 +37,9 @@ export interface ClientPreview {
   changes: ClientChange[]
   warnings: string[]
   current: ClientCurrent
+  /** 附加项当前值（Claude Code 才有），用于表单回填 */
+  env: Record<string, string>
+  tier_names: Record<string, string>
 }
 
 export interface ClientApplyBody {
@@ -47,6 +50,8 @@ export interface ClientApplyBody {
   haiku_model?: string
   fable_model?: string
   subagent_model?: string
+  tier_names?: Record<string, string>
+  env?: Record<string, string>
 }
 
 export interface ClientApplyResult {

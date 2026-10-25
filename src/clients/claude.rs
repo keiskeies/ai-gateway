@@ -121,6 +121,48 @@ impl Adapter for ClaudeCodeAdapter {
         })
     }
 
+    fn read_extras(
+        &self,
+        paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let empty = (BTreeMap::new(), BTreeMap::new());
+        let Ok(text) = read_text(&self.path(paths)) else {
+            return empty;
+        };
+        let Some(text) = text else {
+            return empty;
+        };
+        let Ok(root) = serde_json::from_str::<Value>(&text) else {
+            return empty;
+        };
+        let Ok(Some(env)) = env_object(&root) else {
+            return empty;
+        };
+        let read = |key: &str| {
+            env.get(key)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty())
+        };
+        let extras = CLAUDE_ENV_KEYS
+            .iter()
+            .filter_map(|key| read(key).map(|value| ((*key).to_string(), value)))
+            .collect();
+        let names = [
+            ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"),
+            ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"),
+            ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"),
+            ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME"),
+        ]
+        .into_iter()
+        .filter_map(|(tier, key)| {
+            // 显示名等于实际模型时不算"自定义过"，表单里留空即可
+            read(key).map(|value| (tier.to_string(), value))
+        })
+        .collect();
+        (extras, names)
+    }
+
     fn current_token(&self, paths: &ClientPaths) -> AppResult<Option<String>> {
         let path = self.path(paths);
         let Some(text) = read_text(&path)? else {
@@ -139,6 +181,7 @@ impl Adapter for ClaudeCodeAdapter {
         base_url: &str,
         token: &str,
         _allow_existing: bool,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut root, original) = load(&path)?;
@@ -146,25 +189,67 @@ impl Adapter for ClaudeCodeAdapter {
         let before_token = env_object(&root).ok().and_then(token_from_env);
         let env = ensure_env(&mut root)?;
 
-        let values = [
-            (BASE_KEY, base_url.to_string(), false),
-            (TOKEN_KEY, token.to_string(), true),
-            ("ANTHROPIC_MODEL", models.default.clone(), false),
-            ("ANTHROPIC_DEFAULT_SONNET_MODEL", models.sonnet.clone(), false),
-            ("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", models.sonnet.clone(), false),
-            ("ANTHROPIC_DEFAULT_OPUS_MODEL", models.opus.clone(), false),
-            ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", models.opus.clone(), false),
-            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", models.haiku.clone(), false),
-            ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", models.haiku.clone(), false),
-            ("ANTHROPIC_DEFAULT_FABLE_MODEL", models.fable.clone(), false),
-            ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", models.fable.clone(), false),
-            ("CLAUDE_CODE_SUBAGENT_MODEL", models.subagent.clone(), false),
+        let mut desired: Vec<(String, String, bool)> = vec![
+            (BASE_KEY.to_string(), base_url.to_string(), false),
+            (TOKEN_KEY.to_string(), token.to_string(), true),
+            ("ANTHROPIC_MODEL".to_string(), models.default.clone(), false),
         ];
+        for (tier, actual) in [
+            ("sonnet", &models.sonnet),
+            ("opus", &models.opus),
+            ("haiku", &models.haiku),
+            ("fable", &models.fable),
+        ] {
+            let prefix = format!("ANTHROPIC_DEFAULT_{}", tier.to_uppercase());
+            // 显示名与实际请求模型可以不同：菜单里读起来友好，发出去的仍是虚拟模型名
+            let name = extras
+                .tier_names
+                .get(tier)
+                .cloned()
+                .unwrap_or_else(|| actual.clone());
+            desired.push((format!("{prefix}_MODEL"), actual.clone(), false));
+            desired.push((format!("{prefix}_MODEL_NAME"), name, false));
+        }
+        desired.push((
+            "CLAUDE_CODE_SUBAGENT_MODEL".to_string(),
+            models.subagent.clone(),
+            false,
+        ));
+        for (key, value) in &extras.env {
+            desired.push((key.clone(), value.clone(), false));
+        }
+
+        // 上次代写、这次不再要的附加键要撤掉，否则关掉一个开关却留着旧值
+        let wanted: std::collections::BTreeSet<&str> = desired
+            .iter()
+            .map(|(key, _, _)| key.as_str())
+            .collect();
+        let previous = extras
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.get("env"))
+            .and_then(Value::as_object);
+        let removals: Vec<String> = previous
+            .map(|entries| {
+                entries
+                    .keys()
+                    .filter(|key| CLAUDE_ENV_KEYS.contains(&key.as_str()) && !wanted.contains(key.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut changes = Vec::new();
         let mut managed_env = Map::new();
-        for (key, value, secret) in &values {
-            let before = env.get(*key).cloned();
+        for (key, value, secret) in &desired {
+            let current = env.get(key.as_str()).cloned();
+            // 同一个键被反复代写时，托管记录里要一直是用户最初的那个值
+            let before = previous
+                .and_then(|entries| entries.get(key.as_str()))
+                .and_then(|entry| entry.get("before"))
+                .cloned()
+                .filter(|value| !value.is_null())
+                .or(current);
             changes.push(change(
                 format!("env.{key}"),
                 before.clone(),
@@ -173,14 +258,34 @@ impl Adapter for ClaudeCodeAdapter {
             ));
             if !secret {
                 managed_env.insert(
-                    (*key).to_string(),
+                    key.clone(),
                     json!({
                         "before": before.unwrap_or(Value::Null),
                         "after": value,
                     }),
                 );
             }
-            env.insert((*key).to_string(), json!(value));
+            env.insert(key.clone(), json!(value));
+        }
+        for key in &removals {
+            let current = env.remove(key.as_str());
+            // 记住的是"用户原来的值"，不是上一次代写留下的值——否则撤销会把我们的值当原件还回去
+            let before = previous
+                .and_then(|entries| entries.get(key.as_str()))
+                .and_then(|entry| entry.get("before"))
+                .cloned()
+                .filter(|value| !value.is_null())
+                .or(current);
+            changes.push(ClientChange {
+                path: format!("env.{key}"),
+                before: before.as_ref().and_then(Value::as_str).map(str::to_string),
+                after: String::new(),
+                secret: false,
+            });
+            managed_env.insert(
+                key.clone(),
+                json!({ "before": before.unwrap_or(Value::Null), "after": null }),
+            );
         }
 
         let mut warnings = Vec::new();
@@ -261,8 +366,13 @@ impl Adapter for ClaudeCodeAdapter {
                 })?;
 
             for (key, entry) in managed_env {
-                let Some(after) = entry.get("after") else { continue };
-                if env.get(key) != Some(after) {
+                // after 为 null 表示这次接入把键删了：撤销时"键不在"才算没被动过
+                let untouched = match entry.get("after") {
+                    None => continue,
+                    Some(Value::Null) => !env.contains_key(key),
+                    Some(after) => env.get(key) == Some(after),
+                };
+                if !untouched {
                     kept.push(KeptChange {
                         path: format!("env.{key}"),
                         reason: "Value changed after this client was applied.".to_string(),

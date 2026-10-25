@@ -122,6 +122,7 @@ impl Adapter for CodexAdapter {
         base_url: &str,
         token: &str,
         allow_existing: bool,
+        _extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut doc, original) = load(&path)?;

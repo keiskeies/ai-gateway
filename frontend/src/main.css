@@ -1956,7 +1956,53 @@ html.wall-fullscreen .wall-timeline-lane-chart {
 .console-client-tier-note {
   grid-column: 1 / -1;
   font-size: 11px;
+  line-height: 1.6;
   color: var(--text-3);
+}
+
+.console-client-subhead {
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+
+.console-client-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.console-client-tier {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px 12px;
+  align-items: end;
+}
+
+.console-client-flags {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.console-client-flags .mantine-Checkbox-root {
+  align-items: flex-start;
+}
+
+.console-client-numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px 12px;
+}
+
+@media (max-width: 899px) {
+  .console-client-tier {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .console-client-changes {

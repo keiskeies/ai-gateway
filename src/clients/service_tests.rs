@@ -43,7 +43,9 @@ fn request() -> ClientApplyRequest {
         haiku_model: None,
         fable_model: None,
         subagent_model: None,
-    }
+        tier_names: None,
+        env: None,
+}
 }
 
 const ORIGINAL: &str = r#"{

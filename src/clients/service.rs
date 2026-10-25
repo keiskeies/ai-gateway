@@ -27,6 +27,21 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
+/// 附加项只有 Claude Code 认：其他客户端传了就明确拒绝，而不是悄悄丢掉。
+fn extras_for(
+    id: ClientId,
+    request: &ClientApplyRequest,
+    managed: Option<Value>,
+) -> AppResult<ClientExtras> {
+    let extras = request.extras(managed)?;
+    if id != ClientId::ClaudeCode && (!extras.env.is_empty() || !extras.tier_names.is_empty()) {
+        return Err(AppError::BadRequest(format!(
+            "{id} has no extra settings to manage; only Claude Code does"
+        )));
+    }
+    Ok(extras)
+}
+
 fn parse_managed(row: &ClientConfigRow) -> AppResult<Value> {
     serde_json::from_str::<Value>(&row.managed)
         .map_err(|error| AppError::BadRequest(format!("Managed client state is invalid: {error}")))
@@ -267,7 +282,8 @@ pub fn preview(
     } else {
         "sk-aigw-preview-placeholder".to_string()
     };
-    let plan = adapter.plan(paths, &models, &base_url, &plan_token, row.is_some())?;
+    let extras = extras_for(id, request, managed.clone())?;
+    let plan = adapter.plan(paths, &models, &base_url, &plan_token, row.is_some(), &extras)?;
     let placeholder = if key.reuse { "<managed key>" } else { "<new key on apply>" };
     let mut changes = plan.changes;
     for change in &mut changes {
@@ -287,6 +303,7 @@ pub fn preview(
         .map(|status| status.current)
         .unwrap_or_default();
 
+    let (env, tier_names) = adapter.read_extras(paths);
     Ok(ClientPreview {
         id: id.as_str().into(),
         path: path.display().to_string(),
@@ -297,6 +314,8 @@ pub fn preview(
         changes,
         warnings,
         current: current_summary,
+        env,
+        tier_names,
     })
 }
 
@@ -312,10 +331,11 @@ pub fn apply(
     let models = validate_models(pool, request)?;
     let base_url = resolve_base(request, admin_port)?;
     let row = db::client_config::get(pool, id.as_str())?;
-    let _managed = match &row {
+    let managed = match &row {
         Some(row) => Some(parse_managed(row)?),
         None => None,
     };
+    let extras = extras_for(id, request, managed.clone())?;
     let current = adapter.current_token(paths)?;
     let key = choose_key(pool, row.as_ref(), current.as_deref())?;
     let (token, created_key, key_id, key_name, key_mask) = if key.reuse {
@@ -353,7 +373,7 @@ pub fn apply(
         (token, true, stored.id, name, stored.key_mask)
     };
 
-    let plan = match adapter.plan(paths, &models, &base_url, &token, row.is_some()) {
+    let plan = match adapter.plan(paths, &models, &base_url, &token, row.is_some(), &extras) {
         Ok(plan) => plan,
         Err(error) => {
             if created_key {
