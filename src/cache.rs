@@ -193,6 +193,8 @@ pub struct StatsWriter {
     tx: mpsc::UnboundedSender<RequestStat>,
     attempt_tx: mpsc::UnboundedSender<RequestAttempt>,
     body_tx: mpsc::UnboundedSender<crate::models::stats::RequestBody>,
+    headers_tx: mpsc::UnboundedSender<crate::models::stats::RequestHeaders>,
+    response_tx: mpsc::UnboundedSender<crate::models::stats::ResponseBody>,
 }
 
 impl StatsWriter {
@@ -203,12 +205,16 @@ impl StatsWriter {
         let (tx, mut rx) = mpsc::unbounded_channel::<RequestStat>();
         let (attempt_tx, mut attempt_rx) = mpsc::unbounded_channel::<RequestAttempt>();
         let (body_tx, mut body_rx) = mpsc::unbounded_channel::<crate::models::stats::RequestBody>();
+        let (headers_tx, mut headers_rx) = mpsc::unbounded_channel::<crate::models::stats::RequestHeaders>();
+        let (response_tx, mut response_rx) = mpsc::unbounded_channel::<crate::models::stats::ResponseBody>();
         let events = hub;
 
         tokio::spawn(async move {
             let mut buffer = Vec::with_capacity(64);
             let mut attempt_buffer = Vec::with_capacity(64);
             let mut body_buffer = Vec::with_capacity(64);
+            let mut headers_buffer = Vec::with_capacity(64);
+            let mut response_buffer = Vec::with_capacity(64);
             loop {
                 // 收集一批数据，最多等 500ms
                 let timeout = tokio::time::sleep(std::time::Duration::from_millis(500));
@@ -220,16 +226,7 @@ impl StatsWriter {
                             match stat {
                                 Some(s) => buffer.push(s),
                                 None => {
-                                    // channel 关闭，刷出剩余数据
-                                    if !buffer.is_empty() {
-                                        Self::flush(&db, &mut buffer);
-                                    }
-                                    if !attempt_buffer.is_empty() {
-                                        Self::flush_attempts(&db, &mut attempt_buffer);
-                                    }
-                                    if !body_buffer.is_empty() {
-                                        Self::flush_bodies(&db, &mut body_buffer);
-                                    }
+                                    Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
                                     return;
                                 }
                             }
@@ -238,15 +235,7 @@ impl StatsWriter {
                             match attempt {
                                 Some(a) => attempt_buffer.push(a),
                                 None => {
-                                    if !attempt_buffer.is_empty() {
-                                        Self::flush_attempts(&db, &mut attempt_buffer);
-                                    }
-                                    if !buffer.is_empty() {
-                                        Self::flush(&db, &mut buffer);
-                                    }
-                                    if !body_buffer.is_empty() {
-                                        Self::flush_bodies(&db, &mut body_buffer);
-                                    }
+                                    Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
                                     return;
                                 }
                             }
@@ -255,15 +244,25 @@ impl StatsWriter {
                             match body {
                                 Some(b) => body_buffer.push(b),
                                 None => {
-                                    if !body_buffer.is_empty() {
-                                        Self::flush_bodies(&db, &mut body_buffer);
-                                    }
-                                    if !buffer.is_empty() {
-                                        Self::flush(&db, &mut buffer);
-                                    }
-                                    if !attempt_buffer.is_empty() {
-                                        Self::flush_attempts(&db, &mut attempt_buffer);
-                                    }
+                                    Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
+                                    return;
+                                }
+                            }
+                        }
+                        headers = headers_rx.recv() => {
+                            match headers {
+                                Some(h) => headers_buffer.push(h),
+                                None => {
+                                    Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
+                                    return;
+                                }
+                            }
+                        }
+                        response = response_rx.recv() => {
+                            match response {
+                                Some(r) => response_buffer.push(r),
+                                None => {
+                                    Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
                                     return;
                                 }
                             }
@@ -282,21 +281,40 @@ impl StatsWriter {
                         .filter(|s| s.status_code >= 400 || s.error_type.is_some())
                         .count();
                     written = buffer.len();
-                    Self::flush(&db, &mut buffer);
                 }
-                if !attempt_buffer.is_empty() {
-                    Self::flush_attempts(&db, &mut attempt_buffer);
-                }
-                if !body_buffer.is_empty() {
-                    Self::flush_bodies(&db, &mut body_buffer);
-                }
+                Self::flush_all(&db, &mut buffer, &mut attempt_buffer, &mut body_buffer, &mut headers_buffer, &mut response_buffer);
                 if written > 0 {
                     events.publish(crate::events::ConsoleEvent::Requests { count: written, failures: failed });
                 }
             }
         });
 
-        Self { tx, attempt_tx, body_tx }
+        Self { tx, attempt_tx, body_tx, headers_tx, response_tx }
+    }
+
+    fn flush_all(
+        db: &DbPool,
+        buffer: &mut Vec<RequestStat>,
+        attempt_buffer: &mut Vec<RequestAttempt>,
+        body_buffer: &mut Vec<crate::models::stats::RequestBody>,
+        headers_buffer: &mut Vec<crate::models::stats::RequestHeaders>,
+        response_buffer: &mut Vec<crate::models::stats::ResponseBody>,
+    ) {
+        if !buffer.is_empty() {
+            Self::flush(db, buffer);
+        }
+        if !attempt_buffer.is_empty() {
+            Self::flush_attempts(db, attempt_buffer);
+        }
+        if !body_buffer.is_empty() {
+            Self::flush_bodies(db, body_buffer);
+        }
+        if !headers_buffer.is_empty() {
+            Self::flush_headers(db, headers_buffer);
+        }
+        if !response_buffer.is_empty() {
+            Self::flush_responses(db, response_buffer);
+        }
     }
 
     fn flush(db: &DbPool, buffer: &mut Vec<RequestStat>) {
@@ -334,9 +352,35 @@ impl StatsWriter {
         }
     }
 
+    fn flush_headers(db: &DbPool, buffer: &mut Vec<crate::models::stats::RequestHeaders>) {
+        for headers in buffer.drain(..) {
+            if let Err(e) = crate::db::stats::record_headers(db, &headers) {
+                tracing::warn!("写入请求头失败: {}", e);
+            }
+        }
+    }
+
+    fn flush_responses(db: &DbPool, buffer: &mut Vec<crate::models::stats::ResponseBody>) {
+        for response in buffer.drain(..) {
+            if let Err(e) = crate::db::stats::record_response_body(db, &response) {
+                tracing::warn!("写入响应正文失败: {}", e);
+            }
+        }
+    }
+
     /// 非阻塞发送请求正文。只有采集开着时才会被调用（见 proxy::handler::capture_body）；
     /// 与统计一样绝不阻塞请求，也绝不在请求线程上写 SQL。
     pub fn record_body(&self, body: crate::models::stats::RequestBody) {
         let _ = self.body_tx.send(body);
+    }
+
+    /// 非阻塞发送请求头；与正文独立，长请求即使正文超限也能留下头。
+    pub fn record_headers(&self, headers: crate::models::stats::RequestHeaders) {
+        let _ = self.headers_tx.send(headers);
+    }
+
+    /// 非阻塞发送上游原始响应正文（已截断）。
+    pub fn record_response_body(&self, response: crate::models::stats::ResponseBody) {
+        let _ = self.response_tx.send(response);
     }
 }

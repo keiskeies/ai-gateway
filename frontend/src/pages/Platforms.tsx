@@ -15,6 +15,7 @@ import {
   deletePlatform,
   getAllPlatformHealth,
   getAllPlatformStats,
+  getPlatformCredits,
   listAllRoutes,
   listModels,
   listPlatforms,
@@ -30,7 +31,7 @@ import { formatDuration, formatLogTime, formatNumber, successRateTone } from '..
 import { platformTypeLabel, probePlatformConfig, type PlatformTestResult } from '../lib/platform'
 import { ProviderCreateModal } from '../components/ProviderCreateModal'
 import { getPresetName, platformPresets } from '../presets'
-import type { PlatformDetail, PlatformHealthSummary, PlatformStats, RouteRow } from '../types/stats'
+import type { PlatformCreditUsage, PlatformDetail, PlatformHealthSummary, PlatformStats, RouteRow } from '../types/stats'
 
 interface ModelRow {
   id: string
@@ -45,6 +46,7 @@ interface ProviderRow {
   refBackends: number
   stats: PlatformStats | null
   health: PlatformHealthSummary | null
+  credit: PlatformCreditUsage | null
 }
 
 export default function Platforms() {
@@ -65,12 +67,13 @@ export default function Platforms() {
     queryKey: ['platforms', range],
     queryFn: async (): Promise<ProviderRow[]> => {
       const { from, to } = rangeToParams(range)
-      const [platforms, models, routes, statsRows, healthRows] = await Promise.all([
+      const [platforms, models, routes, statsRows, healthRows, creditRows] = await Promise.all([
         listPlatforms() as Promise<PlatformDetail[]>,
         listModels().catch(() => []) as Promise<ModelRow[]>,
         listAllRoutes().catch(() => []) as Promise<RouteRow[]>,
         getAllPlatformStats({ from, to }).catch(() => []) as Promise<PlatformStats[]>,
         getAllPlatformHealth({ from, to }).catch(() => []) as Promise<PlatformHealthSummary[]>,
+        getPlatformCredits().catch(() => []) as Promise<PlatformCreditUsage[]>,
       ])
 
       const modelCount = new Map<string, number>()
@@ -101,6 +104,11 @@ export default function Platforms() {
         if (row.platform_id) healthByPlatform.set(row.platform_id, row)
       }
 
+      const creditByPlatform = new Map<string, PlatformCreditUsage>()
+      for (const row of creditRows ?? []) {
+        if (row.platform_id) creditByPlatform.set(row.platform_id, row)
+      }
+
       return (platforms ?? []).map(platform => {
         const ref = refs.get(platform.id)
         return {
@@ -110,6 +118,7 @@ export default function Platforms() {
           refBackends: ref?.backends ?? 0,
           stats: statsByPlatform.get(platform.id) ?? null,
           health: healthByPlatform.get(platform.id) ?? null,
+          credit: creditByPlatform.get(platform.id) ?? null,
         }
       })
     },
@@ -236,6 +245,7 @@ export default function Platforms() {
                   <Table.Th className="num">{t(locale, 'reqCount')}</Table.Th>
                   <Table.Th className="num">{t(locale, 'successCountShort')}</Table.Th>
                   <Table.Th className="num">{t(locale, 'avgShort')}</Table.Th>
+                  <Table.Th className="num">{t(locale, 'credits')}</Table.Th>
                   <Table.Th className="num" />
                 </Table.Tr>
               </Table.Thead>
@@ -288,6 +298,15 @@ export default function Platforms() {
                           : <span className="muted">—</span>}
                       </Table.Td>
                       <Table.Td className="num">{stats?.total_requests ? formatDuration(stats.avg_latency_ms) : '—'}</Table.Td>
+                      <Table.Td className="num">
+                        {item.credit ? (
+                          <Tooltip label={t(locale, 'creditResetAt') + ' · ' + new Date(item.credit.reset_at).toLocaleString()}>
+                            <span className={item.credit.exhausted ? 'err' : item.credit.remaining <= item.credit.budget * 0.2 ? 'warn' : ''}>
+                              {`${formatNumber(item.credit.remaining)} / ${formatNumber(item.credit.budget)}`}
+                            </span>
+                          </Tooltip>
+                        ) : <span className="muted">—</span>}
+                      </Table.Td>
                       <Table.Td className="num">
                         <Group gap={2} wrap="nowrap" justify="flex-end">
                           <Tooltip label={t(locale, 'testConnection')}>

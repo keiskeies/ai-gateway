@@ -47,6 +47,8 @@ async fn main() -> std::io::Result<()> {
 
     // 启动后台统计写入器（异步批量写入，不阻塞请求）
     let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());
+    // 自动清理历史明细（默认关闭；设置里开启后才真正执行）
+    ai_gateway::maintenance::spawn_auto_purge(db_pool.clone(), shared_config.clone());
 
     let proxy_state = Arc::new(ProxyState {
         db: db_pool.clone(),

@@ -394,11 +394,33 @@ pub fn latency_percentiles(pool: &DbPool, from: Option<&str>, to: Option<&str>) 
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, request_id, replayed_from) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
             stat.latency_ms, stat.token_input, stat.token_output, stat.error_type, stat.created_at,
             stat.ttft_ms, stat.cache_read_tokens, stat.cache_write_tokens, stat.is_stream as i64,
-            stat.api_key_id, stat.cost, stat.request_id, stat.replayed_from])?;
+            stat.api_key_id, stat.cost, stat.request_id, stat.replayed_from,
+            stat.path, stat.credits])?;
+    Ok(())
+}
+
+/// 入站请求头落库。与正文分开：正文超限不存时，请求头仍然要留下。
+pub fn record_headers(pool: &DbPool, headers: &crate::models::stats::RequestHeaders) -> AppResult<()> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO request_headers (request_id, headers, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![headers.request_id, headers.headers, headers.bytes, headers.truncated as i64, headers.created_at],
+    )?;
+    Ok(())
+}
+
+/// 上游原始响应正文落库（截断后的内容）。
+pub fn record_response_body(pool: &DbPool, body: &ResponseBody) -> AppResult<()> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO response_bodies (request_id, protocol, status_code, content_type, body, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        rusqlite::params![body.request_id, body.protocol, body.status_code, body.content_type,
+            body.body, body.bytes, body.truncated as i64, body.created_at],
+    )?;
     Ok(())
 }
 
@@ -436,11 +458,102 @@ pub fn body_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<Option<RequestBod
     Ok(found)
 }
 
-/// 清空全部正文：关掉采集开关后把已经存进去的提示词抹掉。
-/// 只删正文表，统计与轨迹留着——它们本来就不含正文。
+/// 详情页的请求/响应读数。请求头、请求正文、响应正文三者各自判断存在与否：
+/// 长请求可能只有头没有正文，响应采集也可能独立于请求采集。
+pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models::stats::RequestPayload> {
+    use crate::models::stats::{RequestPayload, RequestPayloadRequest, RequestPayloadResponse};
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+
+    let request_id: Option<String> = match conn.query_row(
+        "SELECT request_id FROM request_stats WHERE id = ?1",
+        [stat_id],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(crate::error::AppError::NotFound("Request not found".to_string()))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let Some(request_id) = request_id else {
+        return Ok(RequestPayload {
+            request: RequestPayloadRequest {
+                headers_captured: false, body_captured: false, protocol: None,
+                headers: None, body: None, bytes: 0, truncated: false,
+            },
+            response: RequestPayloadResponse {
+                captured: false, protocol: None, status_code: None, content_type: None,
+                body: None, bytes: 0, truncated: false,
+            },
+        });
+    };
+
+    let header_row = conn.query_row(
+        "SELECT headers, bytes, truncated FROM request_headers WHERE request_id = ?1",
+        [&request_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? != 0)),
+    ).ok();
+    let body_row = conn.query_row(
+        "SELECT protocol, body, bytes FROM request_bodies WHERE request_id = ?1",
+        [&request_id],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+    ).ok();
+    let response_row = conn.query_row(
+        "SELECT protocol, status_code, content_type, body, bytes, truncated FROM response_bodies WHERE request_id = ?1",
+        [&request_id],
+        |r| Ok((
+            r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?,
+            r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)? != 0,
+        )),
+    ).ok();
+
+    let (headers_captured, headers, header_bytes, header_truncated) = match header_row {
+        Some((raw, bytes, truncated)) => {
+            let parsed = serde_json::from_str(&raw).ok();
+            (parsed.is_some(), parsed, bytes, truncated)
+        }
+        None => (false, None, 0, false),
+    };
+    let (body_captured, protocol, request_body, body_bytes) = match body_row {
+        Some((protocol, body, bytes)) => (true, Some(protocol), Some(body), bytes),
+        None => (false, None, None, 0),
+    };
+
+    Ok(RequestPayload {
+        request: RequestPayloadRequest {
+            headers_captured,
+            body_captured,
+            protocol,
+            headers,
+            body: request_body,
+            bytes: body_bytes.max(header_bytes),
+            truncated: header_truncated,
+        },
+        response: match response_row {
+            Some((protocol, status_code, content_type, body, bytes, truncated)) => RequestPayloadResponse {
+                captured: true,
+                protocol: Some(protocol),
+                status_code: Some(status_code),
+                content_type,
+                body: Some(body),
+                bytes,
+                truncated,
+            },
+            None => RequestPayloadResponse {
+                captured: false, protocol: None, status_code: None, content_type: None,
+                body: None, bytes: 0, truncated: false,
+            },
+        },
+    })
+}
+
+/// 清空全部正文：关掉采集开关后把已经存进去的提示词/响应抹掉。
+/// 只删正文与请求头表，统计与轨迹留着——它们本来就不含正文。
 pub fn delete_all_bodies(pool: &DbPool) -> AppResult<i64> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    let deleted = conn.execute("DELETE FROM request_bodies", [])? as i64;
+    let mut deleted = conn.execute("DELETE FROM request_bodies", [])? as i64;
+    deleted += conn.execute("DELETE FROM request_headers", [])? as i64;
+    deleted += conn.execute("DELETE FROM response_bodies", [])? as i64;
     Ok(deleted)
 }
 
@@ -449,18 +562,18 @@ pub fn delete_all_bodies(pool: &DbPool) -> AppResult<i64> {
 pub fn record_attempt(pool: &DbPool, attempt: &RequestAttempt) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at, forward_url)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         rusqlite::params![
             attempt.request_id, attempt.attempt_no, attempt.backend_id, attempt.platform_id,
             attempt.model_id, attempt.status_code, attempt.error_type, attempt.error_message,
-            attempt.latency_ms, attempt.started_at
+            attempt.latency_ms, attempt.started_at, attempt.forward_url
         ],
     )?;
     Ok(())
 }
 
-const ATTEMPT_COLS: &str = "a.id, a.request_id, a.attempt_no, a.backend_id, a.platform_id, a.model_id, a.status_code, a.error_type, a.error_message, a.latency_ms, a.started_at, p.name";
+const ATTEMPT_COLS: &str = "a.id, a.request_id, a.attempt_no, a.backend_id, a.platform_id, a.model_id, a.status_code, a.error_type, a.error_message, a.latency_ms, a.started_at, a.forward_url, p.name";
 const ATTEMPT_FROM: &str = "FROM request_attempts a LEFT JOIN platforms p ON p.id = a.platform_id";
 
 fn map_attempt(r: &rusqlite::Row) -> rusqlite::Result<RequestAttempt> {
@@ -476,8 +589,9 @@ fn map_attempt(r: &rusqlite::Row) -> rusqlite::Result<RequestAttempt> {
         error_message: r.get(8)?,
         latency_ms: r.get(9)?,
         started_at: r.get(10)?,
+        forward_url: r.get(11)?,
         // 平台已删除时 JOIN 不到名字，前端退回显示 ID
-        platform_name: r.get(11)?,
+        platform_name: r.get(12)?,
     })
 }
 
@@ -716,7 +830,8 @@ SELECT
     -- 正文表按 request_id 一对一，JOIN 不会放大行数但会把 TEXT 列拖进结果集，白读一遍。
     CASE WHEN rs.request_id IS NULL THEN 0
          ELSE EXISTS (SELECT 1 FROM request_bodies tb WHERE tb.request_id = rs.request_id)
-    END AS has_body
+    END AS has_body,
+    rs.path, rs.credits
 "#;
 const REQUESTS_FROM: &str = "FROM request_stats rs
     LEFT JOIN backends b ON rs.backend_id = b.id
@@ -736,6 +851,7 @@ fn requests_order(filter: &RequestFilter) -> String {
         Some("ttft") => "rs.ttft_ms",
         Some("tokens") => "(COALESCE(rs.token_input, 0) + COALESCE(rs.token_output, 0))",
         Some("cost") => "rs.cost",
+        Some("credits") => "rs.credits",
         Some("speed") => "(CASE WHEN rs.token_output > 0 AND rs.latency_ms - COALESCE(rs.ttft_ms, 0) > 0 \
              THEN rs.token_output * 1000.0 / (rs.latency_ms - COALESCE(rs.ttft_ms, 0)) ELSE NULL END)",
         Some("model") => "COALESCE(b.model_id, 'unknown')",
@@ -827,6 +943,8 @@ fn request_row(r: &rusqlite::Row) -> rusqlite::Result<RequestLogItem> {
         attempts: r.get(19)?,
         replayed_from: r.get(20)?,
         has_body: r.get::<_, i64>(21)? != 0,
+        path: r.get(22)?,
+        credits: r.get(23)?,
     })
 }
 
@@ -839,12 +957,12 @@ pub fn list_requests(pool: &DbPool, filter: &RequestFilter) -> AppResult<Request
     let page = filter.page.unwrap_or(1).max(1);
     let page_size = filter.page_size.unwrap_or(50).clamp(1, 200);
 
-    // 成本汇总与总数共用同一份 WHERE：筛选一变，覆盖率跟着变（这里统计的是整个筛选集，不止当前页）
-    let (total, total_cost, priced_requests): (i64, Option<f64>, i64) = conn
+    // 成本/积分汇总与总数共用同一份 WHERE：筛选一变，覆盖率跟着变（这里统计的是整个筛选集，不止当前页）
+    let (total, total_cost, priced_requests, total_credits): (i64, Option<f64>, i64, Option<f64>) = conn
         .query_row(
-            &format!("SELECT COUNT(*), SUM(rs.cost), COUNT(rs.cost) {}{}", REQUESTS_FROM, where_sql),
+            &format!("SELECT COUNT(*), SUM(rs.cost), COUNT(rs.cost), SUM(rs.credits) {}{}", REQUESTS_FROM, where_sql),
             rusqlite::params_from_iter(params.iter()),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
 
     let mut page_params = params;
@@ -867,6 +985,7 @@ pub fn list_requests(pool: &DbPool, filter: &RequestFilter) -> AppResult<Request
         items,
         total_cost,
         priced_requests,
+        total_credits,
     })
 }
 
@@ -916,6 +1035,16 @@ pub fn delete_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<()> {
          (SELECT request_id FROM request_stats WHERE proxy_id = ?1 AND request_id IS NOT NULL)",
         rusqlite::params![proxy_id],
     )?;
+    conn.execute(
+        "DELETE FROM request_headers WHERE request_id IN
+         (SELECT request_id FROM request_stats WHERE proxy_id = ?1 AND request_id IS NOT NULL)",
+        rusqlite::params![proxy_id],
+    )?;
+    conn.execute(
+        "DELETE FROM response_bodies WHERE request_id IN
+         (SELECT request_id FROM request_stats WHERE proxy_id = ?1 AND request_id IS NOT NULL)",
+        rusqlite::params![proxy_id],
+    )?;
     conn.execute("DELETE FROM request_stats WHERE proxy_id = ?1", rusqlite::params![proxy_id])?;
     Ok(())
 }
@@ -958,6 +1087,10 @@ pub struct StatsCleanupResult {
     pub orphan_attempts: i64,
     /// 顺带清掉的孤儿正文行数（正文采集开着时才会大于 0）
     pub orphan_bodies: i64,
+    /// 顺带清掉的孤儿请求头行数
+    pub orphan_headers: i64,
+    /// 顺带清掉的孤儿响应正文行数
+    pub orphan_responses: i64,
     /// 只是预演：数字是"照这个条件会删掉多少"，库里一行没动
     pub dry_run: bool,
 }
@@ -1032,15 +1165,51 @@ pub fn cleanup_dangling(pool: &DbPool, dry_run: bool) -> AppResult<StatsCleanupR
         .unwrap_or(0)
     };
 
+    let orphan_headers: i64 = if dry_run {
+        conn.query_row(
+            "SELECT COUNT(*) FROM request_headers
+             WHERE request_id NOT IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM request_headers
+             WHERE request_id NOT IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL)",
+            [],
+        )?
+        .try_into()
+        .unwrap_or(0)
+    };
+
+    let orphan_responses: i64 = if dry_run {
+        conn.query_row(
+            "SELECT COUNT(*) FROM response_bodies
+             WHERE request_id NOT IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL)",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM response_bodies
+             WHERE request_id NOT IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL)",
+            [],
+        )?
+        .try_into()
+        .unwrap_or(0)
+    };
+
     if !dry_run {
         tracing::info!(
-            "Stats cleanup: removed {} dangling request_stats row(s), {} orphan attempt row(s), {} orphan body row(s)",
+            "Stats cleanup: removed {} dangling request_stats row(s), {} orphan attempt row(s), {} orphan body row(s), {} header row(s), {} response row(s)",
             deleted,
             orphan_attempts,
-            orphan_bodies
+            orphan_bodies,
+            orphan_headers,
+            orphan_responses
         );
     }
-    Ok(StatsCleanupResult { deleted, orphan_attempts, orphan_bodies, dry_run })
+    Ok(StatsCleanupResult { deleted, orphan_attempts, orphan_bodies, orphan_headers, orphan_responses, dry_run })
 }
 
 /// 按年龄清理的结果：命中行数 + 连带轨迹行数 + 生效的边界
@@ -1050,6 +1219,10 @@ pub struct StatsPurgeResult {
     pub attempts: i64,
     /// 连带删掉的正文行数（正文采集开着时才会大于 0）
     pub bodies: i64,
+    /// 连带删掉的请求头行数
+    pub headers: i64,
+    /// 连带删掉的响应正文行数
+    pub responses: i64,
     /// 早于此时间（含）的行会被删，RFC3339
     pub cutoff: String,
     pub days: i64,
@@ -1106,6 +1279,38 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
         .try_into()
         .unwrap_or(0)
     };
+    let headers: i64 = if dry_run {
+        conn.query_row(
+            "SELECT COUNT(*) FROM request_headers h
+             WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = h.request_id AND s.created_at <= ?)",
+            rusqlite::params![cutoff],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM request_headers
+             WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
+            rusqlite::params![cutoff],
+        )?
+        .try_into()
+        .unwrap_or(0)
+    };
+    let responses: i64 = if dry_run {
+        conn.query_row(
+            "SELECT COUNT(*) FROM response_bodies r
+             WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = r.request_id AND s.created_at <= ?)",
+            rusqlite::params![cutoff],
+            |row| row.get(0),
+        )?
+    } else {
+        conn.execute(
+            "DELETE FROM response_bodies
+             WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
+            rusqlite::params![cutoff],
+        )?
+        .try_into()
+        .unwrap_or(0)
+    };
     let rows: i64 = if dry_run {
         conn.query_row(
             "SELECT COUNT(*) FROM request_stats WHERE created_at <= ?",
@@ -1120,14 +1325,16 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
 
     if !dry_run {
         tracing::info!(
-            "Stats purge: removed {} request_stats row(s), {} attempt row(s), {} body row(s) older than {}",
+            "Stats purge: removed {} request_stats row(s), {} attempt row(s), {} body row(s), {} header row(s), {} response row(s) older than {}",
             rows,
             attempts,
             bodies,
+            headers,
+            responses,
             cutoff
         );
     }
-    Ok(StatsPurgeResult { rows, attempts, bodies, cutoff, days, dry_run })
+    Ok(StatsPurgeResult { rows, attempts, bodies, headers, responses, cutoff, days, dry_run })
 }
 
 /// 数据库体检：路径、体积、各表行数与明细时间跨度
@@ -1141,6 +1348,12 @@ pub struct DbInfo {
     /// 已存正文的条数与字节数（采集关着时恒为 0）——设置页要能看出开这个开关花了多少空间
     pub body_rows: i64,
     pub body_bytes: i64,
+    /// 已存请求头的条数与字节数
+    pub header_rows: i64,
+    pub header_bytes: i64,
+    /// 已存响应正文的条数与字节数
+    pub response_rows: i64,
+    pub response_bytes: i64,
     /// 最早 / 最新的明细行时间，用于"这批历史有多长"
     pub oldest_request_at: Option<String>,
     pub newest_request_at: Option<String>,
@@ -1163,6 +1376,18 @@ pub fn db_info(pool: &DbPool, path: &std::path::Path) -> AppResult<DbInfo> {
         body_rows: count("SELECT COUNT(*) FROM request_bodies")?,
         body_bytes: conn.query_row(
             "SELECT COALESCE(SUM(bytes), 0) FROM request_bodies",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        header_rows: count("SELECT COUNT(*) FROM request_headers")?,
+        header_bytes: conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM request_headers",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?,
+        response_rows: count("SELECT COUNT(*) FROM response_bodies")?,
+        response_bytes: conn.query_row(
+            "SELECT COALESCE(SUM(bytes), 0) FROM response_bodies",
             [],
             |row| row.get::<_, i64>(0),
         )?,
@@ -1750,6 +1975,7 @@ mod tests {
             ttft_ms: None, cache_read_tokens: None, cache_write_tokens: None,
             is_stream: false, api_key_id: Some(api_key_id.into()), cost,
             request_id: None, replayed_from: None,
+            credits: None, path: None,
         }
     }
 
@@ -1992,6 +2218,7 @@ mod tests {
                 ttft_ms: None, cache_read_tokens: None, cache_write_tokens: None,
                 is_stream: false, api_key_id: Some("k1".into()), cost,
                 request_id: None, replayed_from: None,
+                credits: None, path: None,
             }
         }
         let (pool, path) = test_db();
@@ -2083,6 +2310,7 @@ mod tests {
             error_message: status.filter(|s| *s >= 400).map(|s| format!("upstream {s}")),
             latency_ms: Some(no * 10),
             started_at: "2026-01-01T00:00:00.000Z".into(),
+            forward_url: None,
             platform_name: None,
         }
     }
@@ -2352,6 +2580,70 @@ mod tests {
         // 不存在的模型：0 条而不是报错，确认框照样能说话
         let none = proxy_history_impact(&pool, "no-such-proxy").expect("impact missing");
         assert_eq!((none.requests, none.attempts), (0, 0));
+
+        cleanup_db(&path);
+    }
+
+    /// 请求头/响应正文与请求明细同生共死：详情能读出来，清空与按年龄清理都要覆盖它们。
+    #[test]
+    fn payload_rows_are_read_and_deleted_with_the_request() {
+        let (pool, path) = test_db();
+        let mut row = stat("k1", None);
+        row.request_id = Some("req-payload".into());
+        row.created_at = "2020-01-01T00:00:00+00:00".into();
+        record(&pool, &row).expect("record");
+
+        let stat_id: i64 = pool.get().unwrap().query_row(
+            "SELECT id FROM request_stats WHERE request_id = 'req-payload'",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        record_body(&pool, &RequestBody {
+            request_id: "req-payload".into(), protocol: "openai".into(),
+            body: "{\"model\":\"m\"}".into(), bytes: 15,
+            created_at: "2020-01-01T00:00:00+00:00".into(),
+        }).expect("record body");
+        record_headers(&pool, &RequestHeaders {
+            request_id: "req-payload".into(),
+            headers: "{\"content-type\":\"application/json\"}".into(),
+            bytes: 34, truncated: false,
+            created_at: "2020-01-01T00:00:00+00:00".into(),
+        }).expect("record headers");
+        record_response_body(&pool, &ResponseBody {
+            request_id: "req-payload".into(), protocol: "openai".into(), status_code: 200,
+            content_type: Some("application/json".into()), body: "{\"ok\":true}".into(),
+            bytes: 11, truncated: false,
+            created_at: "2020-01-01T00:00:00+00:00".into(),
+        }).expect("record response");
+
+        let payload = payload_for_stat(&pool, stat_id).expect("payload");
+        assert!(payload.request.headers_captured);
+        assert_eq!(payload.request.headers.as_ref().unwrap()["content-type"], "application/json");
+        assert!(payload.request.body_captured);
+        assert_eq!(payload.request.body.as_deref(), Some("{\"model\":\"m\"}"));
+        assert!(payload.response.captured);
+        assert_eq!(payload.response.status_code, Some(200));
+        assert_eq!(payload.response.body.as_deref(), Some("{\"ok\":true}"));
+
+        // 清空正文：三张表都算，统计行保留
+        assert_eq!(delete_all_bodies(&pool).unwrap(), 3);
+        let wiped = payload_for_stat(&pool, stat_id).expect("payload after wipe");
+        assert!(!wiped.request.headers_captured && !wiped.request.body_captured && !wiped.response.captured);
+
+        // 再放一份，按年龄清理时跟着明细一起走
+        record_headers(&pool, &RequestHeaders {
+            request_id: "req-payload".into(), headers: "{}".into(), bytes: 2, truncated: false,
+            created_at: "2020-01-01T00:00:00+00:00".into(),
+        }).unwrap();
+        record_response_body(&pool, &ResponseBody {
+            request_id: "req-payload".into(), protocol: "openai".into(), status_code: 200,
+            content_type: None, body: "done".into(), bytes: 4, truncated: false,
+            created_at: "2020-01-01T00:00:00+00:00".into(),
+        }).unwrap();
+        let purged = purge_older_than(&pool, 1, false).expect("purge");
+        assert_eq!(purged.rows, 1);
+        assert_eq!(purged.headers, 1);
+        assert_eq!(purged.responses, 1);
 
         cleanup_db(&path);
     }

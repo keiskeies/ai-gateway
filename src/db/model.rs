@@ -5,7 +5,7 @@ use crate::db::DbPool;
 pub fn list(pool: &DbPool) -> AppResult<Vec<Model>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let mut stmt = conn.prepare(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status FROM models ORDER BY display_name"
+        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models ORDER BY display_name"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(Model {
@@ -17,8 +17,9 @@ pub fn list(pool: &DbPool) -> AppResult<Vec<Model>> {
             context_window: row.get(5)?,
             input_price: row.get(6)?,
             output_price: row.get(7)?,
-            capabilities: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
-            status: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or(ModelStatus::Active),
+            credit_price: row.get(8)?,
+            capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
+            status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -27,7 +28,7 @@ pub fn list(pool: &DbPool) -> AppResult<Vec<Model>> {
 pub fn list_by_platform(pool: &DbPool, platform_id: &str) -> AppResult<Vec<Model>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let mut stmt = conn.prepare(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status FROM models WHERE platform_id = ?1 ORDER BY display_name"
+        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models WHERE platform_id = ?1 ORDER BY display_name"
     )?;
     let rows = stmt.query_map([platform_id], |row| {
         Ok(Model {
@@ -39,8 +40,9 @@ pub fn list_by_platform(pool: &DbPool, platform_id: &str) -> AppResult<Vec<Model
             context_window: row.get(5)?,
             input_price: row.get(6)?,
             output_price: row.get(7)?,
-            capabilities: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
-            status: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or(ModelStatus::Active),
+            credit_price: row.get(8)?,
+            capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
+            status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -49,7 +51,7 @@ pub fn list_by_platform(pool: &DbPool, platform_id: &str) -> AppResult<Vec<Model
 pub fn get(pool: &DbPool, id: &str) -> AppResult<Model> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.query_row(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status FROM models WHERE id = ?1",
+        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models WHERE id = ?1",
         [id],
         |row| {
             Ok(Model {
@@ -61,8 +63,9 @@ pub fn get(pool: &DbPool, id: &str) -> AppResult<Model> {
                 context_window: row.get(5)?,
                 input_price: row.get(6)?,
                 output_price: row.get(7)?,
-                capabilities: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
-                status: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or(ModelStatus::Active),
+                credit_price: row.get(8)?,
+                capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
+                status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
             })
         },
     ).map_err(Into::into)
@@ -79,16 +82,18 @@ pub fn create(pool: &DbPool, req: &CreateModelRequest) -> AppResult<Model> {
         context_window: req.context_window,
         input_price: req.input_price,
         output_price: req.output_price,
+        credit_price: req.credit_price,
         capabilities: req.capabilities.clone(),
         status: ModelStatus::Active,
     };
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             model.id, model.platform_id, model.model_id, model.display_name,
             model.max_tokens, model.context_window, model.input_price, model.output_price,
+            model.credit_price,
             serde_json::to_string(&model.capabilities)?,
             serde_json::to_string(&model.status)?,
         ],
@@ -110,14 +115,16 @@ pub fn batch_create(pool: &DbPool, models: Vec<CreateModelRequest>) -> AppResult
             context_window: req.context_window,
             input_price: req.input_price,
             output_price: req.output_price,
+            credit_price: req.credit_price,
             capabilities: req.capabilities.clone(),
             status: ModelStatus::Active,
         };
         conn.execute(
-            "INSERT OR IGNORE INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR IGNORE INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 model.id, model.platform_id, model.model_id, model.display_name,
                 model.max_tokens, model.context_window, model.input_price, model.output_price,
+                model.credit_price,
                 serde_json::to_string(&model.capabilities)?,
                 serde_json::to_string(&model.status)?,
             ],
@@ -159,6 +166,7 @@ pub fn import_model_ids(pool: &DbPool, platform_id: &str, model_ids: &[String]) 
             context_window: default_context_window(),
             input_price: None,
             output_price: None,
+            credit_price: None,
             capabilities: vec![],
         }).collect())?;
     }
@@ -181,15 +189,16 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateModelRequest) -> AppResult<Mo
     if let Some(c) = req.context_window { model.context_window = c; }
     model.input_price = apply_nullable(req.input_price, model.input_price);
     model.output_price = apply_nullable(req.output_price, model.output_price);
+    model.credit_price = apply_nullable(req.credit_price, model.credit_price);
     if let Some(c) = &req.capabilities { model.capabilities = c.clone(); }
     if let Some(s) = &req.status { model.status = s.clone(); }
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE models SET display_name=?2, max_tokens=?3, context_window=?4, input_price=?5, output_price=?6, capabilities=?7, status=?8 WHERE id=?1",
+        "UPDATE models SET display_name=?2, max_tokens=?3, context_window=?4, input_price=?5, output_price=?6, credit_price=?7, capabilities=?8, status=?9 WHERE id=?1",
         rusqlite::params![
             id, model.display_name, model.max_tokens, model.context_window,
-            model.input_price, model.output_price,
+            model.input_price, model.output_price, model.credit_price,
             serde_json::to_string(&model.capabilities)?,
             serde_json::to_string(&model.status)?,
         ],
@@ -251,6 +260,14 @@ pub fn batch_patch(pool: &DbPool, platform_id: &str, patch: &BatchModelPatch) ->
         NullableNumber::Clear => sets.push("output_price=NULL".to_string()),
         NullableNumber::Set(v) => {
             sets.push("output_price=?".to_string());
+            values.push(Box::new(v));
+        }
+    }
+    match patch.credit_price {
+        NullableNumber::Keep => {}
+        NullableNumber::Clear => sets.push("credit_price=NULL".to_string()),
+        NullableNumber::Set(v) => {
+            sets.push("credit_price=?".to_string());
             values.push(Box::new(v));
         }
     }
@@ -322,6 +339,9 @@ pub fn set_prices(
                 if row.output_price != NullableNumber::Keep {
                     target.output_price = row.output_price;
                 }
+                if row.credit_price != NullableNumber::Keep {
+                    target.credit_price = row.credit_price;
+                }
             }
             None => {
                 positions.insert(model_id, merged.len());
@@ -329,6 +349,7 @@ pub fn set_prices(
                     model_id: model_id.to_string(),
                     input_price: row.input_price,
                     output_price: row.output_price,
+                    credit_price: row.credit_price,
                 });
             }
         }
@@ -344,6 +365,7 @@ pub fn set_prices(
         for (field, intent) in [
             ("input_price", row.input_price),
             ("output_price", row.output_price),
+            ("credit_price", row.credit_price),
         ] {
             match intent {
                 NullableNumber::Keep => {}
@@ -401,6 +423,7 @@ mod tests {
             context_window: None,
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
+            credit_price: NullableNumber::Keep,
             capabilities: None,
             status: None,
         }
@@ -414,6 +437,8 @@ mod tests {
             api_key: "sk-test".to_string(),
             organization: None,
             custom_headers: serde_json::Value::Null,
+            credit_budget: None,
+            credit_window: None,
         })
         .expect("create platform")
         .id
@@ -452,6 +477,7 @@ mod tests {
             context_window: 8192,
             input_price: Some(1.0),
             output_price: Some(2.0),
+            credit_price: None,
             capabilities: vec![],
         }).expect("create model");
 
@@ -486,6 +512,8 @@ mod tests {
             api_key: "sk-test".to_string(),
             organization: None,
             custom_headers: serde_json::Value::Null,
+            credit_budget: None,
+            credit_window: None,
         })
         .expect("create other platform")
         .id
@@ -500,6 +528,7 @@ mod tests {
             context_window: 4096,
             input_price: Some(price),
             output_price: Some(price),
+            credit_price: None,
             capabilities: vec![Capability::Vision],
         })
         .expect("create model")
@@ -518,6 +547,7 @@ mod tests {
             model_ids: vec![ids[0].clone(), format!(" {} ", ids[0]), ids[1].clone()],
             input_price: NullableNumber::Set(0.8),
             output_price: NullableNumber::Clear,
+            credit_price: NullableNumber::Keep,
             capabilities: Some(vec![Capability::Reasoning, Capability::Tool]),
         };
         assert_eq!(batch_patch(&pool, &mine, &patch).unwrap(), 2);
@@ -537,6 +567,7 @@ mod tests {
             model_ids: ids.clone(),
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
+            credit_price: NullableNumber::Keep,
             capabilities: Some(vec![]),
         };
         assert_eq!(batch_patch(&pool, &mine, &caps_only).unwrap(), 2);
@@ -561,6 +592,7 @@ mod tests {
             model_ids: vec![mine_id.clone(), foreign_id.clone()],
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
+            credit_price: NullableNumber::Keep,
             capabilities: None,
         };
         let err = batch_patch(&pool, &mine, &mixed).unwrap_err();
@@ -574,6 +606,7 @@ mod tests {
             model_ids: vec!["  ".to_string()],
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
+            credit_price: NullableNumber::Keep,
             capabilities: None,
         };
         assert!(matches!(batch_patch(&pool, &mine, &empty).unwrap_err(), crate::error::AppError::BadRequest(_)));
@@ -594,6 +627,7 @@ mod tests {
             context_window: 2048,
             input_price: Some(1.5),
             output_price: Some(3.0),
+            credit_price: None,
             capabilities: vec![],
         }).expect("create model");
 
@@ -639,14 +673,14 @@ mod tests {
 
         let rows = vec![
             // 只设一侧，另一侧 Keep
-            ModelPriceRow { model_id: "m0".into(), input_price: NullableNumber::Set(0.5), output_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m0".into(), input_price: NullableNumber::Set(0.5), output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
             // 库里没有这个 ID：报 unmatched，不顺手建一行
-            ModelPriceRow { model_id: " m2 ".into(), input_price: NullableNumber::Set(2.0), output_price: NullableNumber::Set(4.0) },
+            ModelPriceRow { model_id: " m2 ".into(), input_price: NullableNumber::Set(2.0), output_price: NullableNumber::Set(4.0), credit_price: NullableNumber::Keep },
             // 同一个模型分两行写：合并后＝设入价 + 清出价，而不是后一行把入价抹回"不改"
-            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Set(0.6), output_price: NullableNumber::Keep },
-            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Clear },
+            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Set(0.6), output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Clear, credit_price: NullableNumber::Keep },
             // 两个字段都不改：不进 SQL
-            ModelPriceRow { model_id: "m3".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m3".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
         ];
         let out = set_prices(&pool, &mine, &rows).unwrap();
         assert_eq!((out.written, out.unmatched, out.skipped), (2, 1, 1));

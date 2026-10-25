@@ -31,6 +31,11 @@ pub struct RequestStat {
     /// 这条请求是不是重放出来的：存被重放那条 `request_stats.id`（V21）。
     /// 重放会产生费用与副作用，所以新行必须能看出它是重放，而不是又一条普通流量。
     pub replayed_from: Option<i64>,
+    /// 入站路径（V23）：/v1/chat/completions、/v1/completions 或 /v1/messages。
+    /// 只记录路径不记录 query，避免把查询串里的凭据带进统计。
+    pub path: Option<String>,
+    /// 本条请求计入上游平台的积分（V24）；未启用积分/失败请求为 None。
+    pub credits: Option<f64>,
 }
 
 /// 入站请求正文，仅在 `defaults.capture_request_bodies` 开启时落库（V21）。
@@ -67,11 +72,70 @@ pub struct RequestAttempt {
     pub error_message: Option<String>,
     pub latency_ms: Option<i64>,
     pub started_at: String,
+    /// 本次尝试实际请求的上游完整地址（V23，已把 query 里的凭据打码）。
+    /// 旧行为 None——旧数据没有这个字段，不是“没发请求”。
+    pub forward_url: Option<String>,
     /// JOIN platforms 得到的展示名；平台已删除时为 None
     pub platform_name: Option<String>,
 }
 
-/// 请求轨迹：某条 `request_stats` 行对应的全部尝试
+/// 入站请求头（V23）。仅在 `capture_request_bodies` 开启时落库，
+/// 且只收白名单头；Authorization / x-api-key / Cookie 等敏感头永远不会出现在这里。
+#[derive(Debug, Clone)]
+pub struct RequestHeaders {
+    pub request_id: String,
+    pub headers: String,
+    pub bytes: i64,
+    pub truncated: bool,
+    pub created_at: String,
+}
+
+/// 上游原始响应正文（V23）。流式请求存的是原始 SSE 字节（截断到上限），
+/// 不是客户端最终收到的转换结果。
+#[derive(Debug, Clone)]
+pub struct ResponseBody {
+    pub request_id: String,
+    pub protocol: String,
+    pub status_code: i64,
+    pub content_type: Option<String>,
+    pub body: String,
+    pub bytes: i64,
+    pub truncated: bool,
+    pub created_at: String,
+}
+
+/// 详情接口里“请求侧”的读数：请求头与请求正文分别判断，
+/// 长请求可以只有头、没有正文。
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestPayloadRequest {
+    pub headers_captured: bool,
+    pub body_captured: bool,
+    pub protocol: Option<String>,
+    pub headers: Option<serde_json::Value>,
+    pub body: Option<String>,
+    pub bytes: i64,
+    pub truncated: bool,
+}
+
+/// 详情接口里“响应侧”的读数；未采集时 body 为 None。
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestPayloadResponse {
+    pub captured: bool,
+    pub protocol: Option<String>,
+    pub status_code: Option<i64>,
+    pub content_type: Option<String>,
+    pub body: Option<String>,
+    pub bytes: i64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestPayload {
+    pub request: RequestPayloadRequest,
+    pub response: RequestPayloadResponse,
+}
+
+/// 一次请求的尝试轨迹：某条 `request_stats` 行对应的全部尝试
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestTrace {
     /// 明细行 ID
@@ -301,6 +365,10 @@ pub struct RequestLogItem {
     pub api_key_name: Option<String>,
     /// 本条请求的成本估算（模型未定价、只填一侧、上游无 usage 或旧数据时为 None）
     pub cost: Option<f64>,
+    /// 本条请求计入上游平台的积分（V24）；未启用积分、失败请求或旧数据为 None
+    pub credits: Option<f64>,
+    /// 入站路径（V23）；旧数据为 None
+    pub path: Option<String>,
     /// 网关侧请求 ID；None 表示这条记录早于 V16，重试轨迹不可查
     pub request_id: Option<String>,
     /// 网关为这一笔请求发出的尝试次数（含重试与 fallback），至少为 1；
@@ -357,6 +425,8 @@ pub struct RequestLogPage {
     pub total_cost: Option<f64>,
     /// 筛选集中参与成本估算的请求数；覆盖率 = priced_requests / total
     pub priced_requests: i64,
+    /// 整个筛选集的积分合计；一条计过积分的都没有时为 None
+    pub total_credits: Option<f64>,
 }
 
 /// 错误类型分布单项（概览大屏错误分析面板）

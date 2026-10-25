@@ -1,5 +1,38 @@
 use serde::{Deserialize, Serialize, Serializer};
 
+use super::api_key::NullableString;
+use super::model::NullableNumber;
+
+/// 积分窗口只允许这三个自然窗口。与 Key 配额的滚动窗口不同：
+/// 上游额度通常在本地零点重置，所以这里按自然日/周/月计算。
+pub const CREDIT_WINDOWS: [&str; 3] = ["day", "week", "month"];
+
+/// 预算与窗口必须同时存在：有预算没窗口就不知道什么时候重置，
+/// 有窗口没预算则这条配置不产生任何效果。调用方把用户输入归一后再落库。
+pub fn validate_credit_fields(budget: Option<f64>, window: Option<&str>) -> Result<Option<String>, String> {
+    match budget {
+        Some(value) => {
+            if !value.is_finite() || value <= 0.0 {
+                return Err("credit_budget must be greater than 0".to_string());
+            }
+            let raw = window.unwrap_or("day").trim().to_ascii_lowercase();
+            if !CREDIT_WINDOWS.contains(&raw.as_str()) {
+                return Err("credit_window must be day, week or month".to_string());
+            }
+            Ok(Some(raw))
+        }
+        None => {
+            if window.is_some() {
+                return Err("credit_window requires credit_budget".to_string());
+            }
+            Ok(None)
+        }
+    }
+}
+
+fn keep_number() -> NullableNumber { NullableNumber::Keep }
+fn keep_string() -> NullableString { NullableString::Keep }
+
 /// 平台密钥只在进程内和转发时使用，管理接口的响应一律返回掩码：
 /// 明文既不出浏览器，也不可能被表单"原样保存"回去。
 pub fn mask_secret(raw: &str) -> String {
@@ -66,6 +99,10 @@ pub struct Platform {
     pub custom_headers: serde_json::Value,
     pub status: PlatformStatus,
     pub rate_limit: Option<RateLimit>,
+    /// 上游账号的积分预算（如魔塔每天 250 分）。NULL = 不启用积分计费。
+    pub credit_budget: Option<f64>,
+    /// 自然窗口：day / week / month；NULL = 不启用。
+    pub credit_window: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -86,9 +123,13 @@ pub struct CreatePlatformRequest {
     pub organization: Option<String>,
     #[serde(default)]
     pub custom_headers: serde_json::Value,
+    #[serde(default)]
+    pub credit_budget: Option<f64>,
+    #[serde(default)]
+    pub credit_window: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct UpdatePlatformRequest {
     pub name: Option<String>,
     #[serde(rename = "type")]
@@ -98,6 +139,12 @@ pub struct UpdatePlatformRequest {
     pub organization: Option<String>,
     pub custom_headers: Option<serde_json::Value>,
     pub status: Option<PlatformStatus>,
+    /// 三态：没写 = 不改，null = 关闭积分，数字 = 设值。
+    #[serde(default = "keep_number")]
+    pub credit_budget: NullableNumber,
+    /// 三态：没写 = 不改，null = 关闭积分，字符串 = day/week/month。
+    #[serde(default = "keep_string")]
+    pub credit_window: NullableString,
 }
 
 fn default_platform_type() -> PlatformType {
@@ -165,6 +212,8 @@ mod tests {
             custom_headers: serde_json::json!({}),
             status: PlatformStatus::Active,
             rate_limit: None,
+            credit_budget: None,
+            credit_window: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         }

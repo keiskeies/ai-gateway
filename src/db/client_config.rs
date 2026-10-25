@@ -114,7 +114,7 @@ mod tests {
         let version: i64 = conn
             .query_row("SELECT value FROM _schema_version WHERE id = 1", [], |row| row.get(0))
             .expect("schema version");
-        assert_eq!(version, 22);
+        assert_eq!(version, crate::db::schema::CURRENT_SCHEMA_VERSION);
         drop(conn);
 
         assert!(get(&pool, "claude_code").expect("empty get").is_none());

@@ -12,9 +12,9 @@ use crate::models::route::{
 
 /// 导出的是"配置"，不是运行数据：六张表就是全部，统计、健康历史、账号与会话都不在这里。
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, \
-    status, rate_limit, created_at, updated_at";
+    status, rate_limit, credit_budget, credit_window, created_at, updated_at";
 const MODEL_COLS: &str = "id, platform_id, model_id, display_name, max_tokens, context_window, \
-    input_price, output_price, capabilities, status";
+    input_price, output_price, credit_price, capabilities, status";
 const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens";
 const BACKEND_COLS: &str = "id, route_id, platform_id, model_id, weight, priority, max_concurrent, \
     capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo";
@@ -69,8 +69,9 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
         context_window: row.get::<_, i64>(5)?.max(0) as u32,
         input_price: row.get(6)?,
         output_price: row.get(7)?,
-        capabilities: decode::<Vec<Capability>>(row.get::<_, String>(8)?, vec![]),
-        status: decode(row.get::<_, String>(9)?, ModelStatus::Active),
+        credit_price: row.get(8)?,
+        capabilities: decode::<Vec<Capability>>(row.get::<_, String>(9)?, vec![]),
+        status: decode(row.get::<_, String>(10)?, ModelStatus::Active),
     }))? {
         doc.models.push(row?);
     }
@@ -158,8 +159,10 @@ fn map_platform(row: &Row<'_>, include_secrets: bool) -> rusqlite::Result<Platfo
         custom_headers: decode(row.get::<_, String>(6)?, serde_json::json!({})),
         status: decode(row.get::<_, String>(7)?, PlatformStatus::Active),
         rate_limit: decode_opt(row.get::<_, Option<String>>(8)?),
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        credit_budget: row.get(9)?,
+        credit_window: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -386,7 +389,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
             continue;
         }
         tx.execute(
-            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"),
             rusqlite::params![
                 row.id,
                 row.name,
@@ -398,6 +401,8 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 encode(&row.custom_headers)?,
                 encode(&row.status)?,
                 row.rate_limit.as_ref().map(encode).transpose()?,
+                row.credit_budget,
+                row.credit_window,
                 row.created_at,
                 row.updated_at,
             ],
@@ -410,7 +415,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
             continue;
         }
         tx.execute(
-            &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)"),
+            &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
             rusqlite::params![
                 row.id,
                 row.platform_id,
@@ -420,6 +425,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.context_window as i64,
                 row.input_price,
                 row.output_price,
+                row.credit_price,
                 encode(&row.capabilities)?,
                 encode(&row.status)?,
             ],
@@ -554,10 +560,10 @@ mod tests {
     fn seed(pool: &DbPool) {
         let conn = pool.get().unwrap();
         conn.execute_batch(
-            "INSERT INTO platforms (id,name,type,base_url,api_key,organization,custom_headers,status,rate_limit,created_at,updated_at)
-               VALUES ('p1','本地','\"OpenAI\"','http://127.0.0.1:8080/v1','sk-secret',NULL,'{\"X-A\":\"1\"}','\"Active\"',NULL,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
-             INSERT INTO models (id,platform_id,model_id,display_name,max_tokens,context_window,input_price,output_price,capabilities,status)
-               VALUES ('m1','p1','llama','llama',8192,32768,0.5,1.2,'[\"Vision\",\"Reasoning\"]','\"Active\"');
+            "INSERT INTO platforms (id,name,type,base_url,api_key,organization,custom_headers,status,rate_limit,credit_budget,credit_window,created_at,updated_at)
+               VALUES ('p1','本地','\"OpenAI\"','http://127.0.0.1:8080/v1','sk-secret',NULL,'{\"X-A\":\"1\"}','\"Active\"',NULL,250,'day','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');
+             INSERT INTO models (id,platform_id,model_id,display_name,max_tokens,context_window,input_price,output_price,credit_price,capabilities,status)
+               VALUES ('m1','p1','llama','llama',8192,32768,0.5,1.2,2,'[\"Vision\",\"Reasoning\"]','\"Active\"');
              INSERT INTO proxies (id,name,created_at) VALUES ('x1','chat','2026-01-01T00:00:00Z');
              INSERT INTO routes (id,proxy_id,lb_strategy,retry_policy,fallback,default_max_tokens)
                VALUES ('r1','x1','\"WeightedRandom\"','{\"max_retries\":3,\"retry_on_error\":[\"Timeout\"],\"backoff_ms\":250}',NULL,2048);
@@ -577,6 +583,9 @@ mod tests {
         seed(&pool);
         let exported = export(&pool, true).expect("export");
         assert_eq!(exported.platforms[0].api_key.as_deref(), Some("sk-secret"));
+        assert_eq!(exported.platforms[0].credit_budget, Some(250.0));
+        assert_eq!(exported.platforms[0].credit_window.as_deref(), Some("day"));
+        assert_eq!(exported.models[0].credit_price, Some(2.0));
         assert_eq!(
             exported.platforms[0].custom_headers,
             serde_json::json!({"X-A": "1"})

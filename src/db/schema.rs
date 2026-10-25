@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 22;
+pub const CURRENT_SCHEMA_VERSION: i64 = 24;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -163,8 +163,93 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V22 (client_configs for local coding client integration)");
     }
 
+    if current_version < 23 {
+        // `execute_batch` 逐语句自动提交：版本号可能停在 22，而列已经加过一半。
+        // SQLite 没有 ADD COLUMN IF NOT EXISTS，所以逐列查 pragma 再决定。
+        add_column_if_missing(conn, "request_stats", "path",
+            "ALTER TABLE request_stats ADD COLUMN path TEXT")?;
+        add_column_if_missing(conn, "request_attempts", "forward_url",
+            "ALTER TABLE request_attempts ADD COLUMN forward_url TEXT")?;
+        conn.execute_batch(SCHEMA_V23_TABLES)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 23)", [])?;
+        tracing::info!("Database migrated to V23 (request path / forward URL / headers / response bodies)");
+    }
+
+    if current_version < 24 {
+        add_column_if_missing(conn, "platforms", "credit_budget",
+            "ALTER TABLE platforms ADD COLUMN credit_budget REAL")?;
+        add_column_if_missing(conn, "platforms", "credit_window",
+            "ALTER TABLE platforms ADD COLUMN credit_window TEXT")?;
+        add_column_if_missing(conn, "models", "credit_price",
+            "ALTER TABLE models ADD COLUMN credit_price REAL")?;
+        add_column_if_missing(conn, "request_stats", "credits",
+            "ALTER TABLE request_stats ADD COLUMN credits REAL")?;
+        conn.execute_batch(SCHEMA_V24_TABLES)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 24)", [])?;
+        tracing::info!("Database migrated to V24 (platform credits / model credit price / credit ledger)");
+    }
+
     Ok(())
 }
+
+/// 加列前先查 pragma：迁移重跑时列已存在就跳过，而不是把启动卡在 duplicate column。
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str) -> AppResult<()> {
+    let sql = format!("SELECT COUNT(*) FROM pragma_table_info('{}') WHERE name = ?1", table);
+    let existing: i64 = conn.query_row(&sql, [column], |row| row.get(0))?;
+    if existing == 0 {
+        conn.execute(ddl, [])?;
+    }
+    Ok(())
+}
+
+/// V23：请求详情。路径与转发地址是元数据，始终记录；请求头/请求正文/响应正文受采集开关控制。
+/// 请求头单独成表：正文超过 64KB 时不存正文，但请求头仍然有价值，挂在正文行上会一起丢。
+/// 响应正文同样单独成表：`request_bodies` 是重放入口，语义只限“客户端发来的原始请求”。
+const SCHEMA_V23_TABLES: &str = r#"
+CREATE TABLE IF NOT EXISTS request_headers (
+    request_id TEXT PRIMARY KEY,
+    headers    TEXT NOT NULL,
+    bytes      INTEGER NOT NULL,
+    truncated  INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS response_bodies (
+    request_id   TEXT PRIMARY KEY,
+    protocol     TEXT NOT NULL,
+    status_code  INTEGER NOT NULL,
+    content_type TEXT,
+    body         TEXT NOT NULL,
+    bytes        INTEGER NOT NULL,
+    truncated    INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
+"#;
+
+/// V24：上游积分额度。`credit_window` 只允许 day/week/month，NULL 表示不启用；
+/// 预算与窗口必须同时存在，避免“有预算但没有重置口径”的半套配置。
+/// `platform_credit_state` 是独立台账：清理 request_stats 不能把上游已扣的积分退回来。
+const SCHEMA_V24_TABLES: &str = r#"
+CREATE TABLE IF NOT EXISTS platform_credit_state (
+    platform_id  TEXT PRIMARY KEY,
+    period_start TEXT NOT NULL,
+    spent        REAL NOT NULL DEFAULT 0,
+    updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS platform_credit_ledger (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform_id TEXT NOT NULL,
+    request_id  TEXT,
+    model_id    TEXT,
+    delta       REAL NOT NULL,
+    kind        TEXT NOT NULL,
+    note        TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credit_ledger_platform
+    ON platform_credit_ledger(platform_id, created_at);
+"#;
 
 /// V22：客户端接入的托管状态。managed 是每个客户端适配器自己的 JSON：
 /// 应用前/后的非敏感字段、token 摘要、创建过的 Key id、最近一次备份路径。

@@ -6,6 +6,7 @@ pub mod proxy;
 pub mod route;
 pub mod stats;
 pub mod api_key;
+pub mod credit;
 pub mod auth;
 pub mod config_transfer;
 
@@ -15,5 +16,6 @@ pub use proxy::*;
 pub use route::*;
 pub use stats::*;
 pub use api_key::*;
+pub use credit::*;
 pub use auth::*;
 pub use config_transfer::*;

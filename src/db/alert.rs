@@ -27,6 +27,8 @@ const ERROR_RATE_THRESHOLD: f64 = 0.4;
 const KEY_EXPIRY_WARNING_DAYS: i64 = 7;
 /// 配额用到这个比例就提醒一次。"用满"那条只在事后说话，这条要提前一步。
 const BUDGET_WARN_RATIO: f64 = 0.8;
+/// 上游积分剩余低于这个比例提醒；耗尽单独一条，两者互斥。
+const CREDIT_WARN_RATIO: f64 = 0.2;
 /// 超过这么多天没有整库快照就提醒。备份是唯一能找回 `request_stats` 的手段
 /// （配置另有 JSON 导出），但拍不拍、什么时候拍只有用户自己知道，所以只做提醒不做定时任务。
 const BACKUP_STALE_DAYS: i64 = 7;
@@ -343,7 +345,33 @@ pub fn collect_candidates(
         }
     }
 
-    // 7. 备份新鲜度：从没拍过、或者最后一次拍打太久以前，都提醒一次。
+    // 7. 上游积分：耗尽一条、低额度一条；去重键带 period_start，新自然窗口会重新提醒。
+    //    这里直接复用 usage_all 的读数，保证通知里的数字与平台页完全一致。
+    for usage in crate::db::credit::usage_all(pool)? {
+        let (kind, code, severity, remaining_label) = if usage.exhausted {
+            ("platform_credit_exhausted", "alertPlatformCreditExhausted", "error", "0".to_string())
+        } else if usage.remaining <= usage.budget * CREDIT_WARN_RATIO {
+            ("platform_credit_low", "alertPlatformCreditLow", "warn", trim_money(usage.remaining))
+        } else {
+            continue;
+        };
+        out.push(AlertCandidate {
+            dedupe_key: format!("{}:{}:{}", kind, usage.platform_id, usage.period_start),
+            kind,
+            severity,
+            ref_type: Some("platform".into()),
+            ref_id: Some(usage.platform_id.clone()),
+            code,
+            args: vec![
+                usage.platform_name.clone(),
+                remaining_label.to_string(),
+                trim_money(usage.budget),
+                usage.reset_at.clone(),
+            ],
+        });
+    }
+
+    // 8. 备份新鲜度：从没拍过、或者最后一次拍打太久以前，都提醒一次。
     //    时钟回拨得到的负差按 0 天处理，宁可少报也别报一个"负几天前"。
     let age_days = latest_backup_at.map(|secs| {
         let delta = now.timestamp() - secs;

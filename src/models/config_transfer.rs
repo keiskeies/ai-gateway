@@ -10,7 +10,8 @@ use super::route::{
 /// 而不是拿到任意 JSON 就往库里插。版本号变化时导入必须显式拒绝，
 /// 让新程序先告诉用户它读不懂，而不是按老口径插一半。
 pub const CONFIG_FORMAT: &str = "aigw-config";
-pub const CONFIG_VERSION: u32 = 1;
+/// v2 增加平台积分预算与模型积分单价；v1 旧文档仍然可导入（缺失字段按未启用处理）。
+pub const CONFIG_VERSION: u32 = 2;
 
 /// 配置文档：虚拟模型 + 平台 + 模型 + 路由 + 后端 + 网关 Key。
 /// 不含统计、健康历史、账号与会话——那些是运行数据，不是"配置"，
@@ -62,6 +63,11 @@ pub struct PlatformRow {
     pub status: PlatformStatus,
     #[serde(default)]
     pub rate_limit: Option<serde_json::Value>,
+    /// 上游积分预算与自然窗口；NULL = 不启用。
+    #[serde(default)]
+    pub credit_budget: Option<f64>,
+    #[serde(default)]
+    pub credit_window: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -80,6 +86,9 @@ pub struct ModelRow {
     pub input_price: Option<f64>,
     #[serde(default)]
     pub output_price: Option<f64>,
+    /// 每次成功请求的积分单价；NULL = 未定价。
+    #[serde(default)]
+    pub credit_price: Option<f64>,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
     #[serde(default = "default_model_status")]
@@ -256,7 +265,8 @@ impl ConfigDocument {
             None => errors.push(Issue::new("cfgFormatMissing", [] as [String; 0])),
         }
         match self.version {
-            Some(v) if v == CONFIG_VERSION => {}
+            // v1 文档没有积分字段：按默认值导入，等同于“未启用积分”。
+            Some(v) if v == 1 || v == CONFIG_VERSION => {}
             Some(v) => errors.push(Issue::new("cfgVersionMismatch", [v.to_string(), CONFIG_VERSION.to_string()])),
             None => errors.push(Issue::new("cfgVersionMissing", [] as [String; 0])),
         }
@@ -498,6 +508,7 @@ mod tests {
             context_window: 8192,
             input_price: None,
             output_price: None,
+            credit_price: None,
             capabilities: vec![],
             status: ModelStatus::Active,
         });

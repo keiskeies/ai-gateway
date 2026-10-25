@@ -19,6 +19,8 @@ pub struct ConfigResponse {
     pub request_timeout_secs: u64,
     pub test_connection_timeout_secs: u64,
     pub capture_request_bodies: bool,
+    pub capture_response_bodies: bool,
+    pub auto_purge_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +34,8 @@ pub struct UpdateConfigRequest {
     pub request_timeout_secs: Option<u64>,
     pub test_connection_timeout_secs: Option<u64>,
     pub capture_request_bodies: Option<bool>,
+    pub capture_response_bodies: Option<bool>,
+    pub auto_purge_days: Option<u64>,
 }
 
 impl From<&AppConfig> for ConfigResponse {
@@ -46,6 +50,8 @@ impl From<&AppConfig> for ConfigResponse {
             request_timeout_secs: cfg.defaults.request_timeout_secs,
             test_connection_timeout_secs: cfg.defaults.test_connection_timeout_secs,
             capture_request_bodies: cfg.defaults.capture_request_bodies,
+            capture_response_bodies: cfg.defaults.capture_response_bodies,
+            auto_purge_days: cfg.defaults.auto_purge_days,
         }
     }
 }
@@ -107,6 +113,20 @@ pub async fn update_config(
         // 缺字段才是"不改"。前端整表保存每次都带上它。
         if let Some(capture) = body.capture_request_bodies {
             cfg.defaults.capture_request_bodies = capture;
+            need_save = true;
+        }
+        if let Some(capture) = body.capture_response_bodies {
+            cfg.defaults.capture_response_bodies = capture;
+            need_save = true;
+        }
+        if let Some(days) = body.auto_purge_days {
+            // 0 = 关闭；非 0 最短 30 天，短于 Key 月度配额窗口会把“本月已用”一起删掉。
+            if days != 0 && days < 30 {
+                return HttpResponse::BadRequest().json(serde_json::json!({
+                    "error": "auto_purge_days must be 0 or at least 30"
+                }));
+            }
+            cfg.defaults.auto_purge_days = days;
             need_save = true;
         }
 

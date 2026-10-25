@@ -3,7 +3,7 @@ import { Tooltip } from '@mantine/core'
 import { IconRepeat } from '@tabler/icons-react'
 import { StatusPill } from '../components/ui/StatusPill'
 import { t, type Locale, type TranslationKey } from '../i18n'
-import { formatCompact, formatCost, formatDuration, formatLogTime, httpTone } from './format'
+import { formatCompact, formatCost, formatDuration, formatLogTime, formatNumber, httpTone } from './format'
 import type { RequestLogItem } from '../types/stats'
 
 export interface TrafficColumn {
@@ -68,6 +68,13 @@ export const trafficColumns = (locale: Locale): TrafficColumn[] => [
     num: true,
     head: <Tooltip label={t(locale, 'costHint')}><span>{t(locale, 'cost')}</span></Tooltip>,
     cell: item => (item.cost == null ? dash : formatCost(item.cost)),
+  },
+  {
+    id: 'credits',
+    labelKey: 'credits',
+    num: true,
+    head: <Tooltip label={t(locale, 'creditsHint')}><span>{t(locale, 'credits')}</span></Tooltip>,
+    cell: item => (item.credits == null ? dash : formatNumber(item.credits)),
   },
   {
     id: 'error',

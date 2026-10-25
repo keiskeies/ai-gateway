@@ -13,6 +13,230 @@ use crate::models::route::ErrorType;
 use crate::models::stats::{RequestAttempt, RequestStat};
 use crate::protocol::{openai, anthropic, types::UnifiedRequest};
 
+/// 入站元数据：路径始终记录；请求头只在采集开启时带值。
+#[derive(Clone, Default)]
+pub struct InboundMeta {
+    pub path: Option<String>,
+    pub headers: Option<CapturedHeaders>,
+}
+
+#[derive(Clone)]
+pub struct CapturedHeaders {
+    pub value: serde_json::Value,
+    pub bytes: i64,
+    pub truncated: bool,
+}
+
+/// 只收这些头。Authorization / x-api-key / Cookie 等永远不在名单里，
+/// 这比“先全存再打码”可靠：新出现的敏感头不会被漏掉。
+const CAPTURED_HEADER_NAMES: [&str; 8] = [
+    "content-type",
+    "accept",
+    "user-agent",
+    "x-request-id",
+    "anthropic-version",
+    "anthropic-beta",
+    "openai-organization",
+    "openai-beta",
+];
+const MAX_CAPTURED_HEADERS_BYTES: usize = 8 * 1024;
+
+/// 响应正文上限：与请求正文同一量级。流式 SSE 也只留前 64KB，只用于排查。
+pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 64 * 1024;
+
+fn inbound_meta(req: &HttpRequest, capture_headers: bool) -> InboundMeta {
+    let path = Some(req.path().to_string());
+    if !capture_headers {
+        return InboundMeta { path, headers: None };
+    }
+    let mut map = serde_json::Map::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for name in CAPTURED_HEADER_NAMES {
+        let mut values = Vec::new();
+        for value in req.headers().get_all(name) {
+            let text = String::from_utf8_lossy(value.as_bytes()).to_string();
+            bytes += name.len() + text.len();
+            if bytes > MAX_CAPTURED_HEADERS_BYTES {
+                truncated = true;
+                break;
+            }
+            values.push(serde_json::Value::String(text));
+        }
+        if truncated {
+            break;
+        }
+        match values.len() {
+            0 => {}
+            1 => { map.insert(name.to_string(), values.remove(0)); }
+            _ => { map.insert(name.to_string(), serde_json::Value::Array(values)); }
+        }
+    }
+    InboundMeta {
+        path,
+        headers: Some(CapturedHeaders {
+            value: serde_json::Value::Object(map),
+            bytes: bytes.min(MAX_CAPTURED_HEADERS_BYTES) as i64,
+            truncated,
+        }),
+    }
+}
+
+fn capture_headers(state: &Arc<ProxyState>, request_id: &str, meta: &InboundMeta) {
+    let Some(headers) = &meta.headers else { return };
+    state.stats_writer.record_headers(crate::models::stats::RequestHeaders {
+        request_id: request_id.to_string(),
+        headers: headers.value.to_string(),
+        bytes: headers.bytes,
+        truncated: headers.truncated,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
+/// 转发地址打码：query 里常见 `?key=` / `?token=`，以及个别平台把密钥拼进 URL。
+/// 保留其余参数（Azure 的 api-version、Anthropic 的 beta 等）便于排查。
+fn sanitize_forward_url(raw: &str, secret: &str) -> String {
+    if !raw.contains("://") {
+        return "[invalid url]".to_string();
+    }
+    let mut redacted = raw.to_string();
+    if !secret.is_empty() {
+        redacted = redacted.replace(secret, "redacted");
+    }
+    let Some((base, query)) = redacted.split_once('?') else { return redacted };
+    let (query, fragment) = match query.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (query, None),
+    };
+    const SENSITIVE: [&str; 8] = ["key", "api_key", "apikey", "token", "access_token", "sig", "signature", "auth"];
+    let mut pairs = Vec::new();
+    for pair in query.split('&') {
+        let (name, _value) = match pair.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (pair, None),
+        };
+        let lowered = name.to_ascii_lowercase();
+        if SENSITIVE.contains(&lowered.as_str()) {
+            pairs.push(format!("{}=redacted", name));
+        } else {
+            pairs.push(pair.to_string());
+        }
+    }
+    let mut out = format!("{}?{}", base, pairs.join("&"));
+    if let Some(f) = fragment {
+        out.push('#');
+        out.push_str(f);
+    }
+    out
+}
+
+fn upstream_protocol(platform_type: &crate::models::platform::PlatformType) -> &'static str {
+    match platform_type {
+        crate::models::platform::PlatformType::Anthropic => "anthropic",
+        _ => "openai",
+    }
+}
+
+/// 非流式响应正文采集。流式走 StreamCapture，二者共用同一个上限。
+fn capture_response_body(
+    state: &Arc<ProxyState>,
+    request_id: &str,
+    protocol: &str,
+    status_code: i64,
+    content_type: Option<String>,
+    bytes: &[u8],
+) {
+    let capture = state.config.read().defaults.capture_response_bodies;
+    if !capture {
+        return;
+    }
+    let truncated = bytes.len() > MAX_CAPTURED_RESPONSE_BYTES;
+    let slice = &bytes[..bytes.len().min(MAX_CAPTURED_RESPONSE_BYTES)];
+    let body = String::from_utf8_lossy(slice).to_string();
+    state.stats_writer.record_response_body(crate::models::stats::ResponseBody {
+        request_id: request_id.to_string(),
+        protocol: protocol.to_string(),
+        status_code,
+        content_type,
+        bytes: body.len() as i64,
+        body,
+        truncated,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    });
+}
+
+/// 流式响应采集：只追加原始上游字节，不参与转换；超过上限后停止追加。
+pub struct StreamCapture {
+    writer: StatsWriter,
+    request_id: String,
+    protocol: String,
+    status_code: i64,
+    content_type: Option<String>,
+    buf: Vec<u8>,
+    truncated: bool,
+    sent: bool,
+}
+
+impl StreamCapture {
+    fn new(
+        writer: &StatsWriter,
+        request_id: &str,
+        protocol: &str,
+        status_code: i64,
+        content_type: Option<String>,
+    ) -> Self {
+        Self {
+            writer: writer.clone(),
+            request_id: request_id.to_string(),
+            protocol: protocol.to_string(),
+            status_code,
+            content_type,
+            buf: Vec::new(),
+            truncated: false,
+            sent: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if self.buf.len() >= MAX_CAPTURED_RESPONSE_BYTES {
+            self.truncated = true;
+            return;
+        }
+        let remaining = MAX_CAPTURED_RESPONSE_BYTES - self.buf.len();
+        if bytes.len() > remaining {
+            self.buf.extend_from_slice(&bytes[..remaining]);
+            self.truncated = true;
+        } else {
+            self.buf.extend_from_slice(bytes);
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.sent {
+            return;
+        }
+        self.sent = true;
+        let body = String::from_utf8_lossy(&self.buf).to_string();
+        self.writer.record_response_body(crate::models::stats::ResponseBody {
+            request_id: self.request_id.clone(),
+            protocol: self.protocol.clone(),
+            status_code: self.status_code,
+            content_type: self.content_type.clone(),
+            bytes: body.len() as i64,
+            body,
+            truncated: self.truncated,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+}
+
+/// 一次成功预留的积分；失败分支必须调用 release，成功分支则保留扣费。
+struct CreditReservation {
+    platform_id: String,
+    window: Option<String>,
+    price: f64,
+}
+
 pub struct ProxyState {
     pub db: crate::db::DbPool,
     /// 与 `/api/settings` 共用同一份 `Arc<RwLock<_>>`，不是启动时的快照：
@@ -36,11 +260,12 @@ pub async fn openai_chat_completions(
 ) -> Result<HttpResponse, AppError> {
     let auth = extract_auth(&req);
     let auth_key = validate_auth_cached(&state.cache, &auth)?;
+    let meta = inbound_meta(&req, state.config.read().defaults.capture_request_bodies);
 
     // 解析会吃掉这份 JSON，所以要在交给解析器之前留一份原样正文（采集开着才用得上）
     let raw = body.0.clone();
     let unified = openai::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI, auth_key, Some(raw), None).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI, auth_key, Some(raw), None, meta).await
 }
 
 /// Global Anthropic-compatible endpoint: POST /v1/messages
@@ -49,10 +274,11 @@ pub async fn anthropic_messages(
 ) -> Result<HttpResponse, AppError> {
     let auth = extract_auth(&req);
     let auth_key = validate_auth_cached(&state.cache, &auth)?;
+    let meta = inbound_meta(&req, state.config.read().defaults.capture_request_bodies);
 
     let raw = body.0.clone();
     let unified = anthropic::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, Some(raw), None).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, Some(raw), None, meta).await
 }
 
 /// 正文采集上限：再长的上下文也不该让正文表无限膨胀，而且超长请求也不是
@@ -208,7 +434,7 @@ pub async fn replay_request(
             crate::models::proxy::Protocol::OpenAI,
         ),
     };
-    handle_request(state, unified, protocol, None, Some(value), Some(stat_id)).await
+    handle_request(state, unified, protocol, None, Some(value), Some(stat_id), InboundMeta::default()).await
 }
 
 /// 构造一条统计记录
@@ -225,6 +451,7 @@ fn make_stat(
     api_key_id: Option<&str>,
     request_id: &str,
     replayed_from: Option<i64>,
+    path: Option<&str>,
 ) -> RequestStat {
     RequestStat {
         id: 0,
@@ -242,8 +469,10 @@ fn make_stat(
         cache_write_tokens: None,
         is_stream,
         api_key_id: api_key_id.map(|s| s.to_string()),
-        // 成本由调用方在拿到 token 后填写；这里还不知道用量
+        // 成本/积分由调用方在拿到 token 或确认扣费后填写；这里还不知道用量
         cost: None,
+        credits: None,
+        path: path.map(str::to_string),
         request_id: Some(request_id.to_string()),
         replayed_from,
     }
@@ -260,6 +489,7 @@ fn make_attempt(
     error_message: Option<String>,
     latency_ms: i64,
     started_at: String,
+    forward_url: Option<String>,
 ) -> RequestAttempt {
     RequestAttempt {
         id: 0,
@@ -273,6 +503,7 @@ fn make_attempt(
         error_message,
         latency_ms: Some(latency_ms),
         started_at,
+        forward_url,
         platform_name: None,
     }
 }
@@ -287,6 +518,94 @@ fn clip_error(text: &str, secret: &str) -> String {
     }
 }
 
+fn credit_ok(
+    rb: &crate::cache::ResolvedBackend,
+    map: Option<&std::collections::HashMap<String, crate::db::credit::CreditState>>,
+) -> bool {
+    let Some(budget) = rb.platform.credit_budget else { return true };
+    if !budget.is_finite() || budget <= 0.0 {
+        return true;
+    }
+    let price = rb.backend.credit_price.unwrap_or(0.0);
+    if !price.is_finite() || price <= 0.0 {
+        return true;
+    }
+    let Some(window) = rb.platform.credit_window.as_deref() else { return true };
+    let Some(map) = map else { return true };
+    let spent = crate::db::credit::effective_spent(map, &rb.platform.id, window);
+    budget - spent + f64::EPSILON >= price
+}
+
+fn credit_exhausted_message(route: &crate::cache::ResolvedRoute) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut parts = Vec::new();
+    for rb in &route.backends {
+        if rb.platform.credit_budget.is_none() || !seen.insert(rb.platform.id.clone()) {
+            continue;
+        }
+        let reset = rb.platform.credit_window.as_deref()
+            .and_then(crate::db::credit::next_reset_at)
+            .unwrap_or_else(|| "unknown".to_string());
+        parts.push(format!("{} resets at {}", rb.platform.name, reset));
+    }
+    if parts.is_empty() {
+        "upstream credits exhausted".to_string()
+    } else {
+        format!("upstream credits exhausted ({})", parts.join("; "))
+    }
+}
+
+async fn load_credit_map(
+    state: &Arc<ProxyState>,
+) -> Result<std::collections::HashMap<String, crate::db::credit::CreditState>, AppError> {
+    let db = state.db.clone();
+    web::block(move || crate::db::credit::state_map(&db))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+}
+
+async fn reserve_credit(
+    state: &Arc<ProxyState>,
+    resolved: &crate::cache::ResolvedBackend,
+    request_id: &str,
+) -> Result<crate::db::credit::CreditReserve, AppError> {
+    let db = state.db.clone();
+    let platform_id = resolved.platform.id.clone();
+    let budget = resolved.platform.credit_budget;
+    let window = resolved.platform.credit_window.clone();
+    let price = resolved.backend.credit_price;
+    let request_id = request_id.to_string();
+    let model_id = resolved.backend.model_id.clone();
+    web::block(move || {
+        crate::db::credit::try_reserve(&db, &platform_id, budget, window.as_deref(), price, &request_id, &model_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
+}
+
+async fn release_credit(
+    state: &Arc<ProxyState>,
+    reservation: CreditReservation,
+    request_id: &str,
+    model_id: &str,
+) {
+    let db = state.db.clone();
+    let platform_id = reservation.platform_id;
+    let price = reservation.price;
+    let window = reservation.window;
+    let request_id = request_id.to_string();
+    let model_id = model_id.to_string();
+    match web::block(move || {
+        crate::db::credit::release(&db, &platform_id, window.as_deref(), price, &request_id, &model_id)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("释放积分预留失败: {}", e),
+        Err(e) => tracing::warn!("释放积分预留任务失败: {}", e),
+    }
+}
+
 async fn handle_request(
     state: &Arc<ProxyState>,
     unified: UnifiedRequest,
@@ -294,6 +613,7 @@ async fn handle_request(
     auth_key: Option<crate::models::api_key::StoredApiKey>,
     raw_body: Option<serde_json::Value>,
     replayed_from: Option<i64>,
+    meta: InboundMeta,
 ) -> Result<HttpResponse, AppError> {
     let virtual_model = unified.model.clone();
     let is_stream = unified.stream.unwrap_or(false);
@@ -320,7 +640,7 @@ async fn handle_request(
     let mut last_error: Option<String> = None;
     // 一次入站请求一个 ID：所有重试尝试共享，轨迹接口按它串起依次试过的后端
     let request_id = uuid::Uuid::new_v4().to_string();
-    // 正文按这个 request_id 挂到那条统计行上；放在路由解析之后，是为了不给
+    // 正文/请求头按这个 request_id 挂到那条统计行上；放在路由解析之后，是为了不给
     // "模型不存在 / Key 不允许"这类根本没进转发的请求存正文。
     // 重放那一笔也不存：它的正文与当初那份逐字相同，再存一遍只是把同一句话复制一份，
     // 要看第二次就重放当初那条（重放行上的"重放自 #N"会指回去）。
@@ -334,26 +654,85 @@ async fn handle_request(
             },
             &raw_body,
         );
+        capture_headers(state, &request_id, &meta);
     }
+    let path = meta.path.as_deref();
+    let capture_response = state.config.read().defaults.capture_response_bodies;
+    // 只有真的会按次计费的平台才查状态；没有积分配置的路由零额外查询。
+    let credit_enabled = resolved_route.backends.iter().any(|rb| {
+        rb.platform.credit_budget.is_some() && rb.backend.credit_price.unwrap_or(0.0) > 0.0
+    });
 
     for attempt in 0..=max_retries {
-        let backends_ref: Vec<_> = resolved_route.backends.iter().map(|rb| rb.backend.clone()).collect();
-        let backend = state.selector.select(&resolved_route.route_id, &backends_ref, &resolved_route.lb_strategy)
-            .ok_or_else(|| AppError::Internal("No available backend".to_string()))?;
+        // 每次尝试重新取快照：同一请求内的失败释放会改变余额，
+        // 用开头的旧快照会把刚释放的平台误判为耗尽。
+        let credit_map = if credit_enabled { Some(load_credit_map(state).await?) } else { None };
+        let active: Vec<&crate::cache::ResolvedBackend> = resolved_route.backends.iter()
+            .filter(|rb| rb.backend.status == crate::models::route::BackendStatus::Active)
+            .collect();
+        let mut candidates: Vec<crate::models::route::Backend> = active.iter()
+            .filter(|rb| credit_ok(rb, credit_map.as_ref()))
+            .map(|rb| rb.backend.clone())
+            .collect();
+        if candidates.is_empty() {
+            if active.is_empty() {
+                return Err(AppError::Internal("No available backend".to_string()));
+            }
+            return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
+        }
 
-        // 从缓存中找到对应的 ResolvedBackend（包含 platform 信息）
-        let resolved = resolved_route.backends.iter()
-            .find(|rb| rb.backend.id == backend.id)
-            .ok_or_else(|| AppError::Internal("Backend not found in cache".to_string()))?;
+        // 选后端 + 预留积分。预留失败（被并发抢光）就把该后端从本轮候选里去掉再选。
+        let (backend, resolved, charge, mut reservation) = loop {
+            let Some(selected) = state.selector.select(
+                &resolved_route.route_id,
+                &candidates,
+                &resolved_route.lb_strategy,
+            ) else {
+                return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
+            };
+            let selected = selected.clone();
+            let resolved = resolved_route.backends.iter()
+                .find(|rb| rb.backend.id == selected.id)
+                .cloned()
+                .ok_or_else(|| AppError::Internal("Backend not found in cache".to_string()))?;
+            let needs_reserve = resolved.platform.credit_budget.is_some()
+                && resolved.backend.credit_price.unwrap_or(0.0) > 0.0;
+            let reserve = if needs_reserve {
+                reserve_credit(state, &resolved, &request_id).await?
+            } else if resolved.platform.credit_budget.is_some() {
+                crate::db::credit::CreditReserve::Free
+            } else {
+                crate::db::credit::CreditReserve::NotMetered
+            };
+            match reserve {
+                crate::db::credit::CreditReserve::NotMetered => break (selected, resolved, None, None),
+                crate::db::credit::CreditReserve::Free => break (selected, resolved, Some(0.0), None),
+                crate::db::credit::CreditReserve::Reserved { charged } => {
+                    let reservation = CreditReservation {
+                        platform_id: resolved.platform.id.clone(),
+                        window: resolved.platform.credit_window.clone(),
+                        price: charged,
+                    };
+                    break (selected, resolved, Some(charged), Some(reservation));
+                }
+                crate::db::credit::CreditReserve::Exhausted { .. } => {
+                    candidates.retain(|b| b.id != selected.id);
+                    if candidates.is_empty() {
+                        return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
+                    }
+                }
+            }
+        };
 
         state.selector.inc_connection(&resolved_route.route_id, &backend.id);
         let start = Instant::now();
         let started_at = chrono::Utc::now().to_rfc3339();
         let attempt_no = attempt as i64 + 1;
 
-        let (forward_body, forward_url) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+        let (forward_body, forward_url_raw) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+        let forward_url = sanitize_forward_url(&forward_url_raw, &resolved.platform.api_key);
 
-        let mut req_builder = state.http_client.post(&forward_url)
+        let mut req_builder = state.http_client.post(&forward_url_raw)
             // 流式长生成（推理模型/长输出）远超 request_timeout，单独放宽到 stream_timeout
             .timeout(std::time::Duration::from_secs(if is_stream {
                 state.config.read().defaults.stream_timeout_secs
@@ -381,8 +760,10 @@ async fn handle_request(
         match result {
             Ok(resp) => {
                 let status = resp.status();
+                let content_type = resp.headers().get("content-type")
+                    .and_then(|v| v.to_str().ok()).map(str::to_string);
                 if status.is_success() {
-                    // 拿到响应头即算本次尝试成功（后续解析失败不改上游侧结论，也不额外补记）
+                    // 拿到响应头即算本次尝试成功；积分预留到此确认，不再释放。
                     state.stats_writer.record_attempt(make_attempt(
                         &request_id,
                         attempt_no,
@@ -392,10 +773,11 @@ async fn handle_request(
                         None,
                         latency_ms,
                         started_at.clone(),
+                        Some(forward_url.clone()),
                     ));
                     if is_stream {
                         // 流式：统计由 handle_stream / handle_stream_convert 在流结束时记录一次（含 SSE usage token）
-                        let base = make_stat(
+                        let mut base = make_stat(
                             &resolved_route.proxy_id,
                             &resolved_route.route_id,
                             &backend.id,
@@ -408,19 +790,39 @@ async fn handle_request(
                             api_key_id.as_deref(),
                             &request_id,
                             replayed_from,
+                            path,
                         );
-                        // 协议匹配 → 透传；跨协议 → 实时转换（Anthropic 事件流 ↔ OpenAI chunk 流）
+                        base.credits = charge;
                         let client_anthropic = matches!(response_protocol, crate::models::proxy::Protocol::Anthropic);
                         let upstream_anthropic = matches!(resolved.platform.platform_type, crate::models::platform::PlatformType::Anthropic);
+                        let capture = if capture_response {
+                            Some(StreamCapture::new(
+                                &state.stats_writer,
+                                &request_id,
+                                upstream_protocol(&resolved.platform.platform_type),
+                                status.as_u16() as i64,
+                                content_type,
+                            ))
+                        } else {
+                            None
+                        };
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.price_pair(), start));
+                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.price_pair(), start, capture));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
                             if upstream_anthropic { "anthropic" } else { "openai" });
-                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.price_pair(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start));
+                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.price_pair(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, capture));
                     }
                     let body = resp.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
+                    capture_response_body(
+                        state,
+                        &request_id,
+                        upstream_protocol(&resolved.platform.platform_type),
+                        status.as_u16() as i64,
+                        content_type,
+                        &body,
+                    );
                     let raw: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                     let upstream_anthropic = matches!(resolved.platform.platform_type, crate::models::platform::PlatformType::Anthropic);
                     let same_protocol = matches!(response_protocol, crate::models::proxy::Protocol::Anthropic) == upstream_anthropic;
@@ -472,10 +874,12 @@ async fn handle_request(
                         api_key_id.as_deref(),
                         &request_id,
                         replayed_from,
+                        path,
                     );
                     stat.cache_read_tokens = cache_read;
                     stat.cache_write_tokens = cache_write;
                     stat.cost = backend.estimate_cost(token_input, token_output);
+                    stat.credits = charge;
                     state.stats_writer.record(stat);
 
                     // 同协议非流式：原始响应体透传（仅把 model 改回虚拟模型名），避免重建丢失 thinking/未知字段
@@ -488,10 +892,21 @@ async fn handle_request(
                     };
                     return Ok(HttpResponse::Ok().json(cr));
                 } else {
-                    // 上游业务失败：先落本次尝试轨迹，再判断是否重试（统计仍只在最终结果记录，避免重试重复计数）
+                    // 上游业务失败：先释放预留，再落尝试轨迹，最后判断是否重试
+                    if let Some(r) = reservation.take() {
+                        release_credit(state, r, &request_id, &backend.model_id).await;
+                    }
                     let et = format!("{:?}", classify_error(status.as_u16()));
                     last_error = Some(format!("upstream {} ({})", status.as_u16(), et));
                     let eb = resp.text().await.unwrap_or_default();
+                    capture_response_body(
+                        state,
+                        &request_id,
+                        upstream_protocol(&resolved.platform.platform_type),
+                        status.as_u16() as i64,
+                        content_type,
+                        eb.as_bytes(),
+                    );
                     state.stats_writer.record_attempt(make_attempt(
                         &request_id,
                         attempt_no,
@@ -502,6 +917,7 @@ async fn handle_request(
                         (!eb.is_empty()).then(|| clip_error(&eb, &resolved.platform.api_key)),
                         latency_ms,
                         started_at.clone(),
+                        Some(forward_url.clone()),
                     ));
                     if should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
                         tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
@@ -521,12 +937,16 @@ async fn handle_request(
                         api_key_id.as_deref(),
                         &request_id,
                         replayed_from,
+                        path,
                     ));
                     return Ok(HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY)).body(eb));
                 }
             }
             Err(e) => {
-                // 连接错误：轨迹逐次记录（含被重试的那几次），统计只在最终结果落一条，避免重试重复计数
+                // 连接错误：先释放预留，再逐次记录轨迹；统计只在最终结果落一条
+                if let Some(r) = reservation.take() {
+                    release_credit(state, r, &request_id, &backend.model_id).await;
+                }
                 last_error = Some(format!("Connection: {}", e));
                 state.stats_writer.record_attempt(make_attempt(
                     &request_id,
@@ -537,6 +957,7 @@ async fn handle_request(
                     Some(clip_error(&e.to_string(), &resolved.platform.api_key)),
                     latency_ms,
                     started_at.clone(),
+                    Some(forward_url.clone()),
                 ));
                 if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
                     tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
@@ -556,6 +977,7 @@ async fn handle_request(
                     api_key_id.as_deref(),
                     &request_id,
                     replayed_from,
+                    path,
                 ));
             }
         }
@@ -635,12 +1057,16 @@ struct StreamPassthroughBody {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>,
     buffer: String,
     stats: Arc<StreamStatCtx>,
+    capture: Option<StreamCapture>,
 }
 
 /// body 被 drop 时兜底记录统计（覆盖客户端中途断开的情况），record_once 用 CAS 保证恰好一次
 impl Drop for StreamPassthroughBody {
     fn drop(&mut self) {
         self.stats.record_once();
+        if let Some(capture) = &mut self.capture {
+            capture.flush();
+        }
     }
 }
 
@@ -751,12 +1177,18 @@ impl Stream for StreamPassthroughBody {
                         }
                     }
                 }
+                if let Some(capture) = &mut self.capture {
+                    capture.flush();
+                }
                 self.stats.record_once();
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Ok(bytes))) => {
                 // 收到上游第一个数据 chunk：记录首字时长（CAS 幂等）
                 self.stats.mark_first_token();
+                if let Some(capture) = &mut self.capture {
+                    capture.push(&bytes);
+                }
                 self.buffer.push_str(&String::from_utf8_lossy(&bytes));
                 // 逐行解析已完整的 SSE 行，避免把半截事件当作独立事件
                 while let Some(nl) = self.buffer.find('\n') {
@@ -774,6 +1206,9 @@ impl Stream for StreamPassthroughBody {
             Poll::Ready(Some(Err(_))) => {
                 // 上游流错误：标记失败、记录统计，并透传错误
                 self.stats.failed.store(true, Ordering::SeqCst);
+                if let Some(capture) = &mut self.capture {
+                    capture.flush();
+                }
                 self.stats.record_once();
                 Poll::Ready(Some(Err(actix_web::error::ErrorInternalServerError(
                     "upstream stream error",
@@ -791,6 +1226,7 @@ fn handle_stream(
     stat_base: RequestStat,
     prices: Option<(f64, f64)>,
     start: Instant,
+    capture: Option<StreamCapture>,
 ) -> HttpResponse {
     let s = resp.status();
     if !s.is_success() {
@@ -811,6 +1247,7 @@ fn handle_stream(
         inner: Box::pin(resp.bytes_stream()),
         buffer: String::new(),
         stats,
+        capture,
     };
 
     HttpResponse::Ok()
@@ -826,12 +1263,16 @@ struct StreamConvertBody {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>,
     converter: crate::proxy::stream_convert::StreamConverter,
     stats: Arc<StreamStatCtx>,
+    capture: Option<StreamCapture>,
 }
 
 impl Drop for StreamConvertBody {
     fn drop(&mut self) {
         // 客户端中途断开时兜底记录（record_once CAS 保证幂等）
         self.stats.record_once();
+        if let Some(capture) = &mut self.capture {
+            capture.flush();
+        }
     }
 }
 
@@ -848,6 +1289,9 @@ impl Stream for StreamConvertBody {
                     let out = self.converter.finish();
                     let (pi, po, cr, cw) = self.converter.usage();
                     self.stats.absorb_usage(pi, po, cr, cw);
+                    if let Some(capture) = &mut self.capture {
+                        capture.flush();
+                    }
                     if !out.is_empty() {
                         // 先记统计再返回收尾帧：下游可能不再 poll（避免依赖 poll-after-None 行为）
                         self.stats.record_once();
@@ -859,6 +1303,10 @@ impl Stream for StreamConvertBody {
                 Poll::Ready(Some(Ok(bytes))) => {
                     // 收到上游第一个数据 chunk：记录首字时长（CAS 幂等）
                     self.stats.mark_first_token();
+                    // 采的是上游原始字节，必须在转换器之前追加
+                    if let Some(capture) = &mut self.capture {
+                        capture.push(&bytes);
+                    }
                     let out = self.converter.push_chunk(&bytes);
                     if out.is_empty() { continue; } // 事件未完整，继续读上游
                     return Poll::Ready(Some(Ok(Bytes::from(out))));
@@ -867,6 +1315,9 @@ impl Stream for StreamConvertBody {
                     // 上游流错误：按客户端协议发错误帧并正常收尾（SSE 已开始无法改状态码）
                     tracing::warn!("跨协议流式上游错误: {}", e);
                     self.stats.failed.store(true, Ordering::SeqCst);
+                    if let Some(capture) = &mut self.capture {
+                        capture.flush();
+                    }
                     let out = self.converter.emit_error("upstream stream error");
                     let (pi, po, cr, cw) = self.converter.usage();
                     self.stats.absorb_usage(pi, po, cr, cw);
@@ -889,6 +1340,7 @@ fn handle_stream_convert(
     backend_id: &str,
     upstream_model: &str,
     start: Instant,
+    capture: Option<StreamCapture>,
 ) -> HttpResponse {
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, prices));
     let body = StreamConvertBody {
@@ -900,6 +1352,7 @@ fn handle_stream_convert(
             upstream_model,
         ),
         stats,
+        capture,
     };
     HttpResponse::Ok()
         .content_type("text/event-stream")
@@ -958,4 +1411,27 @@ fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> Http
         }
     }
     HttpResponse::Ok().content_type("application/json").body(raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_forward_url;
+
+    #[test]
+    fn forward_url_redacts_query_credentials_and_secrets() {
+        assert_eq!(
+            sanitize_forward_url("https://api.example.com/v1/chat/completions?key=sk-123&api-version=1", "sk-123"),
+            "https://api.example.com/v1/chat/completions?key=redacted&api-version=1"
+        );
+        assert_eq!(
+            sanitize_forward_url("https://api.example.com/v1?token=abc&sig=xyz&q=ok#frag", ""),
+            "https://api.example.com/v1?token=redacted&sig=redacted&q=ok#frag"
+        );
+        // 自定义 query 名也可能塞了密钥：只要值等于平台 Key 就替换
+        assert_eq!(
+            sanitize_forward_url("https://api.example.com/v1?auth=sk-secret", "sk-secret"),
+            "https://api.example.com/v1?auth=redacted"
+        );
+        assert_eq!(sanitize_forward_url("not a url", ""), "[invalid url]");
+    }
 }

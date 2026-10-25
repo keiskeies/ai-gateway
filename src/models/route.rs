@@ -146,6 +146,9 @@ pub struct Backend {
     /// 输出单价（每 100 万 token）；口径同 input_price
     #[serde(default)]
     pub output_price: Option<f64>,
+    /// 每次请求消耗的上游积分；口径同 models.credit_price
+    #[serde(default)]
+    pub credit_price: Option<f64>,
 }
 
 impl Backend {
@@ -253,6 +256,7 @@ mod tests {
             reasoning_echo: ReasoningEcho::default(),
             input_price: input,
             output_price: output,
+            credit_price: None,
         }
     }
 

@@ -27,6 +27,9 @@ pub struct Model {
     pub context_window: u32,
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
+    /// 每次成功请求消耗的上游积分；NULL = 未定价，按 0 计。
+    /// 与 input/output_price 的“每 100 万 token”口径不同，单位是“次”。
+    pub credit_price: Option<f64>,
     pub capabilities: Vec<Capability>,
     pub status: ModelStatus,
 }
@@ -42,6 +45,8 @@ pub struct CreateModelRequest {
     pub context_window: u32,
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
+    #[serde(default)]
+    pub credit_price: Option<f64>,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
 }
@@ -62,6 +67,8 @@ pub struct ModelPriceRow {
     pub input_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub output_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub credit_price: NullableNumber,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -128,6 +135,9 @@ pub struct UpdateModelRequest {
     pub input_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub output_price: NullableNumber,
+    /// 三态：没写 = 不改，null = 清空（未定价），数字 = 设值。
+    #[serde(default = "keep_number")]
+    pub credit_price: NullableNumber,
     pub capabilities: Option<Vec<Capability>>,
     pub status: Option<ModelStatus>,
 }
@@ -143,6 +153,8 @@ pub struct BatchModelPatch {
     pub input_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub output_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub credit_price: NullableNumber,
     pub capabilities: Option<Vec<Capability>>,
 }
 
@@ -150,6 +162,7 @@ impl BatchModelPatch {
     pub fn has_change(&self) -> bool {
         self.input_price != NullableNumber::Keep
             || self.output_price != NullableNumber::Keep
+            || self.credit_price != NullableNumber::Keep
             || self.capabilities.is_some()
     }
 }

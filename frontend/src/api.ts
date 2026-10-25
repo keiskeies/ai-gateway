@@ -122,6 +122,14 @@ export const importPlatformPrices = (id: string, prices: Record<string, unknown>
 // 保存前测试：用还没落库的配置探测；platform_id 只在 Key 留空时用于取回库里已存的那份
 export const testPlatformConfig = (data: { type: string; base_url: string; api_key?: string; platform_id?: string; custom_headers?: Record<string, string> }) =>
   api.post('/platforms/test', data).then(r => r.data)
+// 平台积分读数：只返回启用预算的平台
+export const getPlatformCredits = () => api.get('/platforms/credits').then(r => r.data)
+// 手动校准当前窗口用量：delta 为正补记、为负冲减
+export const adjustPlatformCredit = (id: string, delta: number, note?: string) =>
+  api.post(`/platforms/${id}/credits/adjust`, { delta, note }).then(r => r.data)
+// 把当前窗口已用清零（上游实际重置但本地还没到自然窗口起点时用）
+export const resetPlatformCredit = (id: string) =>
+  api.post(`/platforms/${id}/credits/reset`).then(r => r.data)
 
 // Models
 export const listModels = () => api.get('/models').then(r => r.data)
@@ -273,6 +281,8 @@ export const exportTrafficCsv = (
 ) => api.get('/stats/requests/export', { params: opts, responseType: 'blob' })
 // 单次请求的重试/fallback 轨迹；id 是明细行的 request_stats.id
 export const getRequestTrace = (id: number) => api.get(`/stats/requests/${id}/trace`).then(r => r.data)
+// 请求详情：请求头、请求正文、上游原始响应正文（各自可能未采集）
+export const getRequestPayload = (id: number) => api.get(`/stats/requests/${id}/payload`).then(r => r.data)
 // 清理悬挂统计行：dry_run 只报数不删，确认弹窗要先给出行数再说"不可恢复"
 export const cleanupStats = (opts?: { dry_run?: boolean }) => api.post('/stats/cleanup', opts ?? {}).then(r => r.data)
 // 按年龄清理请求明细与轨迹：同样先预演，确认后才真删

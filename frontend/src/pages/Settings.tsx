@@ -72,6 +72,13 @@ function getPurgeOptions(locale: Locale) {
   return [30, 90, 180, 365].map(days => ({ value: String(days), label: `${days} ${unit}` }))
 }
 
+function getAutoPurgeOptions(locale: Locale) {
+  return [
+    { value: '0', label: t(locale, 'autoPurgeOff') },
+    ...[30, 90, 180, 365].map(days => ({ value: String(days), label: `${days} ${t(locale, 'unitDays')}` })),
+  ]
+}
+
 // 跨度与构建时间要带日期：明细跨度两端可能不同日，只给时分的话"至 06:34:41"没有出处
 function formatStamp(iso: string, locale: Locale) {
   const date = new Date(iso)
@@ -106,13 +113,15 @@ export default function Settings() {
   const [baseline, setBaseline] = useState<string>('')
   const [saving, setSaving] = useState(false)
   const [cleanOpen, setCleanOpen] = useState(false)
-  const [cleanPreview, setCleanPreview] = useState<{ deleted: number; orphan_attempts: number; orphan_bodies: number } | null>(null)
+  const [cleanPreview, setCleanPreview] = useState<{ deleted: number; orphan_attempts: number; orphan_bodies: number; orphan_headers: number; orphan_responses: number } | null>(null)
   const [cleaning, setCleaning] = useState(false)
   const [purgeDays, setPurgeDays] = useState('90')
   const [purgeOpen, setPurgeOpen] = useState(false)
-  const [purgePreview, setPurgePreview] = useState<{ rows: number; attempts: number; bodies: number; cutoff: string } | null>(null)
+  const [purgePreview, setPurgePreview] = useState<{ rows: number; attempts: number; bodies: number; headers: number; responses: number; cutoff: string } | null>(null)
   const [purging, setPurging] = useState(false)
   const [captureOn, setCaptureOn] = useState(false)
+  const [captureResponseOn, setCaptureResponseOn] = useState(false)
+  const [autoPurgeDays, setAutoPurgeDays] = useState('0')
   const [captureSaving, setCaptureSaving] = useState(false)
   const [wipeOpen, setWipeOpen] = useState(false)
   const [wiping, setWiping] = useState(false)
@@ -162,6 +171,8 @@ export default function Settings() {
     setBaseline(JSON.stringify(values))
     // 正文采集不在整表保存里：它是隐私开关，改完立刻生效，不该等用户去点"保存"
     setCaptureOn(data.capture_request_bodies ?? false)
+    setCaptureResponseOn(data.capture_response_bodies ?? false)
+    setAutoPurgeDays(String(data.auto_purge_days ?? 0))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsQuery.data])
 
@@ -263,6 +274,8 @@ export default function Settings() {
         deleted: preview?.deleted ?? 0,
         orphan_attempts: preview?.orphan_attempts ?? 0,
         orphan_bodies: preview?.orphan_bodies ?? 0,
+        orphan_headers: preview?.orphan_headers ?? 0,
+        orphan_responses: preview?.orphan_responses ?? 0,
       })
       setCleanOpen(true)
     } catch {
@@ -299,6 +312,8 @@ export default function Settings() {
         rows: preview?.rows ?? 0,
         attempts: preview?.attempts ?? 0,
         bodies: preview?.bodies ?? 0,
+        headers: preview?.headers ?? 0,
+        responses: preview?.responses ?? 0,
         cutoff: preview?.cutoff ?? '',
       })
       setPurgeOpen(true)
@@ -346,6 +361,36 @@ export default function Settings() {
       notifications.show({ message: t(locale, 'loadFailed'), color: 'red' })
     } finally {
       setCaptureSaving(false)
+    }
+  }
+
+  const onToggleResponseCapture = async (next: boolean) => {
+    setCaptureSaving(true)
+    try {
+      await updateSettings({ capture_response_bodies: next })
+      setCaptureResponseOn(next)
+      await queryClient.invalidateQueries({ queryKey: ['settings'] })
+      notifications.show({
+        message: t(locale, next ? 'captureResponseOn' : 'captureResponseOff'),
+        color: next ? 'yellow' : 'green',
+        icon: next ? <IconAlertTriangle size={18} /> : <IconCheck size={18} />,
+      })
+    } catch {
+      notifications.show({ message: t(locale, 'loadFailed'), color: 'red' })
+    } finally {
+      setCaptureSaving(false)
+    }
+  }
+
+  const onAutoPurgeChange = async (value: string) => {
+    const days = Number(value)
+    try {
+      await updateSettings({ auto_purge_days: days })
+      setAutoPurgeDays(value)
+      await queryClient.invalidateQueries({ queryKey: ['settings'] })
+      notifications.show({ message: t(locale, 'autoPurgeSaved'), color: 'green' })
+    } catch {
+      notifications.show({ message: t(locale, 'loadFailed'), color: 'red' })
     }
   }
 
@@ -532,6 +577,14 @@ export default function Settings() {
                   <span>{t(locale, 'dbBodies')}</span>
                   <strong>{db?.body_rows ? `${formatNumber(db.body_rows)} · ${formatBytes(db.body_bytes)}` : '0'}</strong>
                 </div>
+                <div className="console-db-cell">
+                  <span>{t(locale, 'dbHeaders')}</span>
+                  <strong>{db?.header_rows ? `${formatNumber(db.header_rows)} · ${formatBytes(db.header_bytes)}` : '0'}</strong>
+                </div>
+                <div className="console-db-cell">
+                  <span>{t(locale, 'dbResponses')}</span>
+                  <strong>{db?.response_rows ? `${formatNumber(db.response_rows)} · ${formatBytes(db.response_bytes)}` : '0'}</strong>
+                </div>
               </div>
               <div className="console-db-line">
                 <span>{t(locale, 'dbSpan')}</span>
@@ -555,18 +608,39 @@ export default function Settings() {
                   onChange={event => void onToggleCapture(event.currentTarget.checked)}
                 />
                 <div className="console-note">{t(locale, 'captureBodiesDesc')}</div>
+                <Switch
+                  size="xs"
+                  checked={captureResponseOn}
+                  disabled={captureSaving}
+                  label={t(locale, 'captureResponseBodies')}
+                  onChange={event => void onToggleResponseCapture(event.currentTarget.checked)}
+                />
+                <div className="console-note">{t(locale, 'captureResponseBodiesDesc')}</div>
                 <div className="console-route-actions">
                   <Button
                     size="xs"
                     variant="default"
                     color="red"
                     leftSection={<IconTrash size={13} />}
-                    disabled={!db?.body_rows}
+                    disabled={!db?.body_rows && !db?.header_rows && !db?.response_rows}
                     onClick={() => setWipeOpen(true)}
                   >
                     {t(locale, 'captureBodiesWipe')}
                   </Button>
                 </div>
+              </div>
+
+              <div className="console-capture">
+                <Select
+                  size="xs"
+                  w={180}
+                  data={getAutoPurgeOptions(locale)}
+                  allowDeselect={false}
+                  value={autoPurgeDays}
+                  onChange={value => void onAutoPurgeChange(value ?? '0')}
+                  label={t(locale, 'autoPurge')}
+                />
+                <div className="console-note">{t(locale, 'autoPurgeDesc')}</div>
               </div>
 
               <div className="console-note warn">{t(locale, 'statsCleanupDesc')}</div>
@@ -634,7 +708,7 @@ export default function Settings() {
 
       <Modal opened={cleanOpen} onClose={() => setCleanOpen(false)} title={t(locale, 'statsCleanup')} size="sm">
         <div className="console-note">
-          {t(locale, 'cleanupPreviewBody', String(cleanPreview?.deleted ?? 0), String(cleanPreview?.orphan_attempts ?? 0), String(cleanPreview?.orphan_bodies ?? 0))}
+          {t(locale, 'cleanupPreviewBody', String(cleanPreview?.deleted ?? 0), String(cleanPreview?.orphan_attempts ?? 0), String(cleanPreview?.orphan_bodies ?? 0), String(cleanPreview?.orphan_headers ?? 0), String(cleanPreview?.orphan_responses ?? 0))}
         </div>
         <div className="console-note warn">{t(locale, 'statsCleanupDesc')}</div>
         <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
@@ -647,7 +721,7 @@ export default function Settings() {
 
       <Modal opened={purgeOpen} onClose={() => setPurgeOpen(false)} title={t(locale, 'purgeTitle')} size="sm">
         <div className="console-note">
-          {t(locale, 'purgePreviewBody', String(purgePreview?.rows ?? 0), String(purgePreview?.attempts ?? 0), String(purgePreview?.bodies ?? 0), purgePreview?.cutoff ?? '')}
+          {t(locale, 'purgePreviewBody', String(purgePreview?.rows ?? 0), String(purgePreview?.attempts ?? 0), String(purgePreview?.bodies ?? 0), String(purgePreview?.headers ?? 0), String(purgePreview?.responses ?? 0), purgePreview?.cutoff ?? '')}
         </div>
         <div className="console-note warn">{t(locale, 'purgeConfirmHint')}</div>
         <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
@@ -660,12 +734,12 @@ export default function Settings() {
 
       <Modal opened={wipeOpen} onClose={() => setWipeOpen(false)} title={t(locale, 'captureBodiesWipeTitle')} size="sm">
         <div className="console-note">
-          {t(locale, 'captureBodiesWipeBody', String(db?.body_rows ?? 0), formatBytes(db?.body_bytes))}
+          {t(locale, 'capturePayloadsWipeBody', String((db?.body_rows ?? 0) + (db?.header_rows ?? 0) + (db?.response_rows ?? 0)), formatBytes((db?.body_bytes ?? 0) + (db?.header_bytes ?? 0) + (db?.response_bytes ?? 0)))}
         </div>
         <div className="console-note warn">{t(locale, 'captureBodiesWipeHint')}</div>
         <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
           <Button size="xs" variant="default" onClick={() => setWipeOpen(false)}>{t(locale, 'cancel')}</Button>
-          <Button size="xs" color="red" loading={wiping} disabled={!db?.body_rows} onClick={() => void onWipeBodies()}>
+          <Button size="xs" color="red" loading={wiping} disabled={!db?.body_rows && !db?.header_rows && !db?.response_rows} onClick={() => void onWipeBodies()}>
             {t(locale, 'confirmDelete')}
           </Button>
         </div>

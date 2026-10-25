@@ -2,12 +2,12 @@ use crate::error::AppResult;
 use crate::models::route::*;
 use crate::db::DbPool;
 
-// 后端读取列：末尾两列是单价，来自按 (platform_id, model_id) 的 LEFT JOIN models。
+// 后端读取列：末尾三列是单价/积分价，来自按 (platform_id, model_id) 的 LEFT JOIN models。
 // 放在读取路径里，是为了让代理热路径直接拿到单价，不必每条请求再查一次库；
 // 模型行不存在或价格列为 NULL 时这里就是 None，调用方据此整单不估算。
 const BACKEND_COLS: &str = "b.id, b.route_id, b.platform_id, b.model_id, b.weight, b.priority, \
     b.max_concurrent, b.capabilities, b.status, b.param_overrides, b.unknown_params, \
-    b.reasoning_style, b.reasoning_echo, m.input_price, m.output_price";
+    b.reasoning_style, b.reasoning_echo, m.input_price, m.output_price, m.credit_price";
 const BACKEND_FROM: &str = "FROM backends b LEFT JOIN models m \
     ON m.platform_id = b.platform_id AND m.model_id = b.model_id";
 
@@ -25,6 +25,7 @@ fn map_backend(row: &rusqlite::Row) -> rusqlite::Result<Backend> {
         reasoning_echo: serde_json::from_str(&row.get::<_, String>(12)?).unwrap_or_default(),
         input_price: row.get(13)?,
         output_price: row.get(14)?,
+        credit_price: row.get(15)?,
     })
 }
 
@@ -258,6 +259,8 @@ mod tests {
             api_key: "sk-test".into(),
             organization: None,
             custom_headers: serde_json::Value::Null,
+            credit_budget: None,
+            credit_window: None,
         }).expect("create platform");
         let proxy = crate::db::proxy::create(&pool, &CreateProxyRequest { name: "virtual-model".into() })
             .expect("create proxy");
@@ -288,6 +291,7 @@ mod tests {
             display_name: "GPT Test".into(),
             max_tokens: 4096, context_window: 8192,
             input_price: Some(2.5), output_price: None,
+            credit_price: None,
             capabilities: vec![Capability::Reasoning],
         }).expect("create model (input only)");
         let b = backend_by_id(&pool, &backend_id).expect("read backend");
@@ -309,6 +313,7 @@ mod tests {
             name: "plat-2".into(), platform_type: PlatformType::OpenAI,
             base_url: "http://127.0.0.1:2/v1".into(), api_key: "sk-2".into(),
             organization: None, custom_headers: serde_json::Value::Null,
+            credit_budget: None, credit_window: None,
         }).expect("create second platform");
         let mut conn = pool.get().unwrap();
         conn.execute("INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status) VALUES ('m-other', ?1, 'gpt-test', 'Other', 4096, 8192, 9.9, 9.9, '[]', 'Active')",

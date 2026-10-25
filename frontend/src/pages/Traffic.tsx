@@ -15,7 +15,7 @@ import {
 import { notifications } from '@mantine/notifications'
 import { IconArrowDown, IconArrowUp, IconBookmark, IconCheck, IconColumns, IconCopy, IconDownload, IconFilterOff, IconRefresh, IconRepeat, IconSearch, IconStar, IconTrash } from '@tabler/icons-react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { exportTrafficCsv, getErrorStats, getModelSummaries, getRequestLogs, getRequestTrace, listApiKeys, listPlatforms, listProxies, replayRequest } from '../api'
+import { exportTrafficCsv, getErrorStats, getModelSummaries, getRequestLogs, getRequestPayload, getRequestTrace, listApiKeys, listPlatforms, listProxies, replayRequest } from '../api'
 import { rangeToParams, useAppState } from '../app/AppState'
 import { useLive, usePollInterval } from '../app/LiveContext'
 import { useAppContext } from '../ThemeContext'
@@ -60,6 +60,7 @@ import type {
   ProxyRow,
   RequestLogItem,
   RequestLogPage,
+  RequestPayload,
   RequestTrace,
 } from '../types/stats'
 import { Field } from '../components/Field'
@@ -411,6 +412,15 @@ export default function Traffic() {
   })
   const attempts = traceQuery.data?.attempts ?? []
 
+  // 详情正文单独拉：列表接口不带大字段，点开哪一条才取哪一条
+  const payloadQuery = useQuery({
+    queryKey: ['request-payload', selected?.id],
+    queryFn: () => getRequestPayload(selected!.id) as Promise<RequestPayload>,
+    enabled: selected != null,
+    staleTime: 60_000,
+  })
+  const payload = payloadQuery.data
+
   // 重放结果只挂在当前这条明细的 Inspector 里：正文可能含敏感内容，所以不写 localStorage，
   // 换一条请求就清掉，免得上一笔的回答挂在下一笔下面。
   const [replayOpen, setReplayOpen] = useState(false)
@@ -746,7 +756,7 @@ export default function Traffic() {
                 label={t(locale, 'costCoverageHint', String(data?.priced_requests ?? 0), String(data?.total ?? 0))}
               >
                 <span className="console-panel-sub">
-                  {formatNumber(data?.total ?? 0)} {t(locale, 'total')} · {t(locale, 'cost')} {formatCost(data?.total_cost)} · {t(locale, 'costCoverage', formatCostCoverage(data?.priced_requests, data?.total))}
+                  {formatNumber(data?.total ?? 0)} {t(locale, 'total')} · {t(locale, 'cost')} {formatCost(data?.total_cost)} · {t(locale, 'credits')} {data?.total_credits == null ? '—' : formatNumber(data.total_credits)} · {t(locale, 'costCoverage', formatCostCoverage(data?.priced_requests, data?.total))}
                 </span>
               </Tooltip>
               <Menu shadow="md" width={200} position="bottom-end" closeOnItemClick={false}>
@@ -886,6 +896,13 @@ export default function Traffic() {
                 <div><div className="console-meta-label">{t(locale, 'modelId')}</div><div className="console-meta-value mono">{selected.model_id}</div></div>
                 <div><div className="console-meta-label">{t(locale, 'stream')}</div><div className="console-meta-value">{selected.is_stream ? 'stream' : 'non-stream'}</div></div>
                 <div><div className="console-meta-label">{t(locale, 'apiKey')}</div><div className="console-meta-value">{selected.api_key_name || '—'}</div></div>
+                <div><div className="console-meta-label">{t(locale, 'requestPath')}</div><div className="console-meta-value mono">{selected.path || '—'}</div></div>
+                <div>
+                  <div className="console-meta-label">
+                    <Tooltip label={t(locale, 'creditsHint')}><span>{t(locale, 'credits')}</span></Tooltip>
+                  </div>
+                  <div className="console-meta-value mono">{selected.credits == null ? '—' : formatNumber(selected.credits)}</div>
+                </div>
               </div>
               <div className="console-attempts">
                 <div className="console-section-label">
@@ -909,6 +926,9 @@ export default function Traffic() {
                           {attempt.platform_name ?? t(locale, 'attemptBackendMissing')}
                           {attempt.model_id ? ` · ${attempt.model_id}` : ''}
                         </span>
+                        {attempt.forward_url && (
+                          <span className="console-attempt-url" title={attempt.forward_url}>{attempt.forward_url}</span>
+                        )}
                         <span className="console-attempt-status">{attempt.status_code ?? t(locale, 'errShort')}</span>
                         <span>{attempt.latency_ms == null ? '—' : formatDuration(attempt.latency_ms)}</span>
                         {attempt.error_message && (
@@ -918,6 +938,57 @@ export default function Traffic() {
                     )
                   })
                 )}
+              </div>
+              <div className="console-payload">
+                <div className="console-section-label">{t(locale, 'payloadTitle')}</div>
+                {payloadQuery.isPending ? (
+                  <div className="console-attempts-note">{t(locale, 'payloadLoading')}</div>
+                ) : payloadQuery.isError ? (
+                  <div className="console-attempts-note">{t(locale, 'payloadFailed')}</div>
+                ) : payload ? (
+                  <>
+                    <details className="console-payload-block">
+                      <summary>
+                        {t(locale, 'requestHeaders')}
+                        {!payload.request.headers_captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                      </summary>
+                      {payload.request.headers ? (
+                        <pre className="console-payload-body">{JSON.stringify(payload.request.headers, null, 2)}</pre>
+                      ) : (
+                        <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
+                      )}
+                      {payload.request.truncated && <div className="console-note warn">{t(locale, 'payloadTruncated')}</div>}
+                    </details>
+                    <details className="console-payload-block">
+                      <summary>
+                        {t(locale, 'requestBody')}
+                        {!payload.request.body_captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                      </summary>
+                      {payload.request.body ? (
+                        <pre className="console-payload-body">{payload.request.body}</pre>
+                      ) : (
+                        <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
+                      )}
+                    </details>
+                    <details className="console-payload-block">
+                      <summary>
+                        {t(locale, 'responseBody')}
+                        {!payload.response.captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                      </summary>
+                      {payload.response.captured ? (
+                        <>
+                          <div className="console-note">
+                            {t(locale, 'payloadRawUpstream')} · {payload.response.protocol ?? '—'} · {payload.response.status_code ?? '—'} · {payload.response.content_type ?? '—'}
+                          </div>
+                          <pre className="console-payload-body">{payload.response.body ?? ''}</pre>
+                          {payload.response.truncated && <div className="console-note warn">{t(locale, 'payloadTruncated')}</div>}
+                        </>
+                      ) : (
+                        <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
+                      )}
+                    </details>
+                  </>
+                ) : null}
               </div>
               <div className="console-waterfall">
                 <div className="console-section-label">{t(locale, 'timingLabel')}</div>

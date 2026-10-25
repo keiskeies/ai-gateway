@@ -16,9 +16,11 @@ interface ProviderDraft {
   base_url: string
   api_key: string
   organization: string
+  credit_budget: string
+  credit_window: string
 }
 
-const emptyDraft: ProviderDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '' }
+const emptyDraft: ProviderDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '', credit_budget: '', credit_window: 'day' }
 
 const typeOptions = Object.entries(PLATFORM_TYPE_LABELS).map(([value, label]) => ({ value, label }))
 
@@ -41,6 +43,8 @@ export function ProviderCreateModal({
   const [test, setTest] = useState<PlatformTestResult | null>(null)
 
   const presetOptions = platformPresets.map(p => ({ value: p.name, label: getPresetName(p, locale) }))
+  const creditInvalid = draft.credit_budget.trim() !== ''
+    && (!Number.isFinite(Number(draft.credit_budget)) || Number(draft.credit_budget) <= 0)
 
   const applyPreset = (value: string | null) => {
     setPreset(value)
@@ -78,6 +82,8 @@ export function ProviderCreateModal({
     const name = draft.name.trim()
     const baseUrl = draft.base_url.trim()
     if (!name || !baseUrl) return
+    const budget = draft.credit_budget.trim()
+    if (budget !== '' && (!Number.isFinite(Number(budget)) || Number(budget) <= 0)) return
     setSaving(true)
     try {
       const platform = await createPlatform({
@@ -86,6 +92,8 @@ export function ProviderCreateModal({
         base_url: baseUrl,
         api_key: draft.api_key.trim(),
         organization: draft.organization.trim() || undefined,
+        credit_budget: budget === '' ? null : Number(budget),
+        credit_window: budget === '' ? null : draft.credit_window,
       })
       notifications.show({ message: t(locale, 'createSuccess'), color: 'green' })
       reset()
@@ -167,6 +175,32 @@ export function ProviderCreateModal({
             placeholder="org-xxx"
           />
         </Field>
+        <Field label={t(locale, 'creditBudget').toUpperCase()} unit={t(locale, 'creditUnit')}>
+          <TextInput
+            size="xs"
+            inputMode="decimal"
+            value={draft.credit_budget}
+            onChange={event => setField('credit_budget', event.currentTarget.value)}
+            placeholder="250"
+          />
+        </Field>
+        <Field label={t(locale, 'creditWindow').toUpperCase()}>
+          <Select
+            size="xs"
+            data={[
+              { value: 'day', label: t(locale, 'creditWindowDay') },
+              { value: 'week', label: t(locale, 'creditWindowWeek') },
+              { value: 'month', label: t(locale, 'creditWindowMonth') },
+            ]}
+            value={draft.credit_window}
+            onChange={value => setField('credit_window', value || 'day')}
+            disabled={!draft.credit_budget.trim()}
+            allowDeselect={false}
+          />
+        </Field>
+        <div className="console-field console-form-full">
+          <div className="console-note">{t(locale, 'creditBudgetHint')}</div>
+        </div>
       </div>
       <div className="console-note">{t(locale, 'providerSaveHint')}</div>
       {test && (
@@ -191,7 +225,7 @@ export function ProviderCreateModal({
         <Button
           size="xs"
           loading={saving}
-          disabled={!draft.name.trim() || !draft.base_url.trim()}
+          disabled={!draft.name.trim() || !draft.base_url.trim() || creditInvalid}
           onClick={() => void create()}
         >
           {t(locale, 'create')}

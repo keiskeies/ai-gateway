@@ -201,7 +201,7 @@ pub async fn batch_update_models(
 /// 上限只用来挡住把整张无关大表粘进来的情况。
 const PRICE_IMPORT_MAX_ROWS: usize = 5000;
 
-/// 导出本平台的定价表：`model_id,input_price,output_price`，空单元格就是未定价。
+/// 导出本平台的定价表：`model_id,input_price,output_price,credit_price`，空单元格就是未定价。
 /// 导出的正是导入吃的格式——"下载 → 改数字 → 传回来"这条回路不需要用户猜列名。
 /// 只导价格，不导显示名 / 能力 / 状态：那些列导入时不写，出现在文件里只会让人以为改了会生效。
 pub async fn export_prices(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<HttpResponse> {
@@ -221,12 +221,13 @@ pub async fn export_prices(db: web::Data<DbPool>, path: web::Path<String>) -> Ap
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
     let mut body = String::from("\u{feff}"); // BOM：没有它 Excel 会把中文列名读成乱码
-    body.push_str("model_id,input_price,output_price\n");
+    body.push_str("model_id,input_price,output_price,credit_price\n");
     for model in &models {
         let cells = [
             crate::api::stats::csv_text(&model.model_id),
             crate::api::stats::csv_num(model.input_price),
             crate::api::stats::csv_num(model.output_price),
+            crate::api::stats::csv_num(model.credit_price),
         ];
         body.push_str(&cells.join(","));
         body.push('\n');
@@ -265,6 +266,7 @@ pub async fn import_prices(
     let negative = rows.iter().any(|row| {
         matches!(row.input_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
             || matches!(row.output_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
+            || matches!(row.credit_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
     });
     if negative {
         return Err(AppError::BadRequest("价格不能小于 0".to_string()));
@@ -386,6 +388,48 @@ fn build_client(timeout_secs: u64) -> AppResult<reqwest::Client> {
         .apply_to_builder(reqwest::Client::builder().timeout(std::time::Duration::from_secs(timeout_secs)))
         .build()
         .map_err(|e| AppError::Internal(e.to_string()))
+}
+
+/// 所有启用积分预算的平台读数。平台列表/详情用它，不在 `Platform` 上塞运行态字段。
+pub async fn credits(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
+    let db = db.into_inner();
+    let usage = web::block(move || crate::db::credit::usage_all(&db))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    Ok(HttpResponse::Ok().json(usage))
+}
+
+/// 手动校准当前窗口用量。delta 是补记/冲减的积分，`spent` 下限为 0。
+pub async fn adjust_credit(
+    db: web::Data<DbPool>,
+    path: web::Path<String>,
+    body: web::Json<crate::models::credit::CreditAdjustRequest>,
+) -> AppResult<HttpResponse> {
+    let id = path.into_inner();
+    let req = body.into_inner();
+    let note = req.note.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let db = db.into_inner();
+    let (before, after) = web::block(move || crate::db::credit::adjust(&db, &id, req.delta, note.as_deref()))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "ok": true,
+        "before": before,
+        "after": after,
+    })))
+}
+
+/// 手动把当前窗口清零。用于上游额度被重置但本地还没到自然窗口起点。
+pub async fn reset_credit(
+    db: web::Data<DbPool>,
+    path: web::Path<String>,
+) -> AppResult<HttpResponse> {
+    let id = path.into_inner();
+    let db = db.into_inner();
+    let before = web::block(move || crate::db::credit::reset(&db, &id))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true, "before": before })))
 }
 
 /// 按平台类型探测：OpenAI 兼容走 GET /models，Anthropic 没有标准列表接口，

@@ -16,7 +16,7 @@ import {
   IconX,
 } from '@tabler/icons-react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { batchUpdatePlatformModels, deletePlatform, exportPlatformPrices, getPlatform, getPlatformHealth, getPlatformStats, listAllRoutes, listModels, listProxies, syncPlatformModels, testPlatformConfig, updateModel, updatePlatform } from '../api'
+import { batchUpdatePlatformModels, deletePlatform, exportPlatformPrices, getPlatform, getPlatformCredits, getPlatformHealth, getPlatformStats, adjustPlatformCredit, resetPlatformCredit, listAllRoutes, listModels, listProxies, syncPlatformModels, testPlatformConfig, updateModel, updatePlatform } from '../api'
 import { rangeToParams, useAppState } from '../app/AppState'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
@@ -30,7 +30,7 @@ import { Readout } from '../components/ui/Readout'
 import { StatusPill } from '../components/ui/StatusPill'
 import { formatCompact, formatCost, formatCostCoverage, formatDuration, formatLogTime, formatNumber, successRateTone } from '../lib/format'
 import { PLATFORM_TYPE_LABELS, platformTypeLabel } from '../lib/platform'
-import type { PlatformDetail, PlatformHealthRecord, PlatformStats, ProxyRow, RouteRow } from '../types/stats'
+import type { PlatformCreditUsage, PlatformDetail, PlatformHealthRecord, PlatformStats, ProxyRow, RouteRow } from '../types/stats'
 import { Field } from '../components/Field'
 
 interface LinkedModel {
@@ -49,6 +49,7 @@ interface SyncedModel {
   context_window: number
   input_price: number | null
   output_price: number | null
+  credit_price: number | null
   capabilities: string[]
   status: string
 }
@@ -59,6 +60,7 @@ interface ModelDraft {
   context_window: string
   input_price: string
   output_price: string
+  credit_price: string
   capabilities: string[]
   status: string
 }
@@ -70,6 +72,8 @@ interface BatchDraft {
   input_price: string
   output_price_on: boolean
   output_price: string
+  credit_price_on: boolean
+  credit_price: string
   capabilities_on: boolean
   capabilities: string[]
 }
@@ -79,6 +83,8 @@ const emptyBatch = (): BatchDraft => ({
   input_price: '',
   output_price_on: false,
   output_price: '',
+  credit_price_on: false,
+  credit_price: '',
   capabilities_on: false,
   capabilities: [],
 })
@@ -99,6 +105,7 @@ const modelDraftFrom = (row: SyncedModel): ModelDraft => ({
   context_window: String(row.context_window),
   input_price: row.input_price == null ? '' : String(row.input_price),
   output_price: row.output_price == null ? '' : String(row.output_price),
+  credit_price: row.credit_price == null ? '' : String(row.credit_price),
   capabilities: row.capabilities,
   status: row.status,
 })
@@ -140,9 +147,11 @@ interface PlatformDraft {
   base_url: string
   api_key: string
   organization: string
+  credit_budget: string
+  credit_window: string
 }
 
-const emptyDraft: PlatformDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '' }
+const emptyDraft: PlatformDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '', credit_budget: '', credit_window: 'day' }
 
 const draftFrom = (platform: PlatformDetail): PlatformDraft => ({
   name: platform.name,
@@ -150,6 +159,8 @@ const draftFrom = (platform: PlatformDetail): PlatformDraft => ({
   base_url: platform.base_url,
   api_key: '',
   organization: platform.organization || '',
+  credit_budget: platform.credit_budget == null ? '' : String(platform.credit_budget),
+  credit_window: platform.credit_window || 'day',
 })
 
 interface HeaderRow {
@@ -181,6 +192,12 @@ const sameHeaders = (a: Record<string, string>, b: Record<string, string>): bool
 
 const typeOptions = Object.entries(PLATFORM_TYPE_LABELS).map(([value, label]) => ({ value, label }))
 
+const creditWindowOptions = (locale: Locale) => [
+  { value: 'day', label: t(locale, 'creditWindowDay') },
+  { value: 'week', label: t(locale, 'creditWindowWeek') },
+  { value: 'month', label: t(locale, 'creditWindowMonth') },
+]
+
 export default function ProviderDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -206,6 +223,10 @@ export default function ProviderDetail() {
   const [selected, setSelected] = useState<string[]>([])
   const [batchDraft, setBatchDraft] = useState<BatchDraft | null>(null)
   const [batchSaving, setBatchSaving] = useState(false)
+  const [creditOpen, setCreditOpen] = useState(false)
+  const [creditDelta, setCreditDelta] = useState('')
+  const [creditNote, setCreditNote] = useState('')
+  const [creditSaving, setCreditSaving] = useState(false)
 
   const platformQuery = useQuery({
     queryKey: ['platform', id],
@@ -218,6 +239,12 @@ export default function ProviderDetail() {
     queryFn: async (): Promise<PlatformStats> => getPlatformStats(id!, rangeToParams(range)) as Promise<PlatformStats>,
     enabled: Boolean(id),
   })
+
+  const creditsQuery = useQuery({
+    queryKey: ['platform-credits'],
+    queryFn: async (): Promise<PlatformCreditUsage[]> => getPlatformCredits() as Promise<PlatformCreditUsage[]>,
+  })
+  const creditUsage = creditsQuery.data?.find(row => row.platform_id === id) ?? null
 
   // 连通检测历史：每次测试连接由后端落一行，刷新页面后仍看得到
   const healthQuery = useQuery({
@@ -274,9 +301,9 @@ export default function ProviderDetail() {
   const toggleSelected = (rowId: string) =>    setSelected(prev => (prev.includes(rowId) ? prev.filter(value => value !== rowId) : [...prev, rowId]))
 
   const batchTouched = Boolean(batchDraft)
-    && (batchDraft!.input_price_on || batchDraft!.output_price_on || batchDraft!.capabilities_on)
+    && (batchDraft!.input_price_on || batchDraft!.output_price_on || batchDraft!.credit_price_on || batchDraft!.capabilities_on)
   const batchInvalid = Boolean(batchDraft)
-    && (isInvalidPrice(batchDraft!.input_price) || isInvalidPrice(batchDraft!.output_price))
+    && (isInvalidPrice(batchDraft!.input_price) || isInvalidPrice(batchDraft!.output_price) || isInvalidPrice(batchDraft!.credit_price))
 
   const saveBatch = async () => {
     if (!id || !batchDraft || !batchTouched || batchInvalid) return
@@ -287,6 +314,7 @@ export default function ProviderDetail() {
         // 开关关着＝这个字段整个不出现在 body 里＝后端保持原值；开着且留空＝发 null＝清空
         ...(batchDraft.input_price_on ? { input_price: parseNumberField(batchDraft.input_price) } : {}),
         ...(batchDraft.output_price_on ? { output_price: parseNumberField(batchDraft.output_price) } : {}),
+        ...(batchDraft.credit_price_on ? { credit_price: parseNumberField(batchDraft.credit_price) } : {}),
         ...(batchDraft.capabilities_on ? { capabilities: batchDraft.capabilities } : {}),
       })
       await queryClient.invalidateQueries({ queryKey: ['platform-models', id] })
@@ -414,6 +442,7 @@ export default function ProviderDetail() {
     || isInvalidTokens(modelDraft!.context_window)
     || isInvalidPrice(modelDraft!.input_price)
     || isInvalidPrice(modelDraft!.output_price)
+    || isInvalidPrice(modelDraft!.credit_price)
   )
 
   const saveModel = async () => {
@@ -427,6 +456,7 @@ export default function ProviderDetail() {
         // 空串走 null＝清空；字段始终整份提交，所以后端"缺省＝不改"的三态不会被前端误触发
         input_price: parseNumberField(modelDraft.input_price),
         output_price: parseNumberField(modelDraft.output_price),
+        credit_price: parseNumberField(modelDraft.credit_price),
         capabilities: modelDraft.capabilities,
         status: modelDraft.status,
       })
@@ -458,15 +488,24 @@ export default function ProviderDetail() {
   const headersDraft = headersToPayload(headerRows)
   const headerNames = headerRows.map(row => row.name.trim().toLowerCase()).filter(Boolean)
   const dupHeader = headerNames.length !== new Set(headerNames).size
+  const creditBudgetInvalid = draft.credit_budget.trim() !== ''
+    && (!Number.isFinite(Number(draft.credit_budget)) || Number(draft.credit_budget) <= 0)
   const dirty = Boolean(current) && (
     draft.name !== current!.name
     || draft.type !== current!.type
     || draft.base_url !== current!.base_url
     || (draft.organization || '') !== (current!.organization || '')
     || draft.api_key !== ''
+    || draft.credit_budget !== (current!.credit_budget == null ? '' : String(current!.credit_budget))
+    || (draft.credit_budget.trim() !== '' && draft.credit_window !== (current!.credit_window || 'day'))
     || !sameHeaders(headersDraft, headersToPayload(headerRowsFrom(current!)))
   )
-  const invalid = !draft.name.trim() || !draft.base_url.trim() || dupHeader
+  const invalid = !draft.name.trim() || !draft.base_url.trim() || dupHeader || creditBudgetInvalid
+  const creditWindowLabel = current?.credit_window === 'week'
+    ? t(locale, 'creditWindowWeek')
+    : current?.credit_window === 'month'
+      ? t(locale, 'creditWindowMonth')
+      : t(locale, 'creditWindowDay')
 
   const setField = <K extends keyof PlatformDraft>(key: K, value: PlatformDraft[K]) => {
     setDraft(prev => ({ ...prev, [key]: value }))
@@ -493,6 +532,9 @@ export default function ProviderDetail() {
         base_url: draft.base_url.trim(),
         organization: draft.organization.trim(),
         custom_headers: headersDraft,
+        // 空预算 = 关闭积分；窗口只在有预算时提交，避免留下“有窗口没预算”的半套配置
+        credit_budget: draft.credit_budget.trim() === '' ? null : Number(draft.credit_budget),
+        credit_window: draft.credit_budget.trim() === '' ? null : draft.credit_window,
       }
       // 后端用 Option 区分“不改”和“改成空”，留空表示保留现有密钥
       if (draft.api_key) payload.api_key = draft.api_key.trim()
@@ -500,6 +542,7 @@ export default function ProviderDetail() {
       notifications.show({ message: t(locale, 'updateSuccess'), color: 'green' })
       await queryClient.invalidateQueries({ queryKey: ['platform', id] })
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
+      await queryClient.invalidateQueries({ queryKey: ['platform-credits'] })
       await queryClient.invalidateQueries({ queryKey: ['platform-linked-models', id] })
       await queryClient.invalidateQueries({ queryKey: ['models'] })
       await queryClient.invalidateQueries({ queryKey: ['overview'] })
@@ -511,6 +554,48 @@ export default function ProviderDetail() {
       })
     } finally {
       setSaving(false)
+    }
+  }
+
+  const onAdjustCredit = async () => {
+    if (!id) return
+    const delta = Number(creditDelta)
+    if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 1_000_000) return
+    setCreditSaving(true)
+    try {
+      await adjustPlatformCredit(id, delta, creditNote.trim() || undefined)
+      await queryClient.invalidateQueries({ queryKey: ['platform-credits'] })
+      setCreditOpen(false)
+      setCreditDelta('')
+      setCreditNote('')
+      notifications.show({ message: t(locale, 'creditAdjustDone'), color: 'green' })
+    } catch (error: any) {
+      notifications.show({
+        title: t(locale, 'updateFailed'),
+        message: error?.response?.data?.error?.message || '',
+        color: 'red',
+      })
+    } finally {
+      setCreditSaving(false)
+    }
+  }
+
+  const onResetCredit = async () => {
+    if (!id) return
+    setCreditSaving(true)
+    try {
+      await resetPlatformCredit(id)
+      await queryClient.invalidateQueries({ queryKey: ['platform-credits'] })
+      setCreditOpen(false)
+      notifications.show({ message: t(locale, 'creditResetDone'), color: 'green' })
+    } catch (error: any) {
+      notifications.show({
+        title: t(locale, 'updateFailed'),
+        message: error?.response?.data?.error?.message || '',
+        color: 'red',
+      })
+    } finally {
+      setCreditSaving(false)
     }
   }
 
@@ -629,6 +714,29 @@ export default function ProviderDetail() {
               <Field label={t(locale, 'organization').toUpperCase()}>
                 <TextInput size="xs" value={draft.organization} onChange={event => setField('organization', event.currentTarget.value)} placeholder="org-xxx" />
               </Field>
+              <Field label={t(locale, 'creditBudget').toUpperCase()} unit={t(locale, 'creditUnit')}>
+                <TextInput
+                  size="xs"
+                  inputMode="decimal"
+                  value={draft.credit_budget}
+                  onChange={event => setField('credit_budget', event.currentTarget.value)}
+                  placeholder="250"
+                />
+              </Field>
+              <Field label={t(locale, 'creditWindow').toUpperCase()}>
+                <Select
+                  size="xs"
+                  data={creditWindowOptions(locale)}
+                  value={draft.credit_window}
+                  onChange={value => setField('credit_window', value || 'day')}
+                  disabled={!draft.credit_budget.trim()}
+                  allowDeselect={false}
+                />
+              </Field>
+              <div className="console-field console-form-full">
+                <div className="console-note">{t(locale, 'creditBudgetHint')}</div>
+                {creditBudgetInvalid && <div className="console-note warn">{t(locale, 'creditBudgetInvalid')}</div>}
+              </div>
             </div>
             <div className="console-field console-form-full">
               <label>{t(locale, 'customHeaders').toUpperCase()}</label>
@@ -683,6 +791,54 @@ export default function ProviderDetail() {
               <Button size="xs" variant="default" disabled={!dirty} onClick={resetDraft}>{t(locale, 'discardChanges')}</Button>
               <Button size="xs" loading={saving} disabled={!dirty || invalid} onClick={() => void save()}>{t(locale, 'save')}</Button>
             </div>
+          </div>
+        </section>
+
+        <section className="console-panel">
+          <div className="console-panel-head">
+            <div className="console-panel-title">{t(locale, 'creditUsageTitle')}</div>
+            <span className="console-panel-sub">
+              {platform.credit_budget == null ? t(locale, 'creditNotEnabled') : creditWindowLabel}
+            </span>
+          </div>
+          <div className="console-panel-body">
+            {platform.credit_budget == null ? (
+              <div className="console-note">{t(locale, 'creditNotEnabledDesc')}</div>
+            ) : (
+              <>
+                <div className="console-meta-grid">
+                  <div>
+                    <div className="console-meta-label">{t(locale, 'creditRemaining')}</div>
+                    <div className="console-meta-value mono">
+                      {creditUsage ? `${formatNumber(creditUsage.remaining)} / ${formatNumber(creditUsage.budget)}` : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="console-meta-label">{t(locale, 'creditSpent')}</div>
+                    <div className="console-meta-value mono">{creditUsage ? formatNumber(creditUsage.spent) : '—'}</div>
+                  </div>
+                  <div>
+                    <div className="console-meta-label">{t(locale, 'creditResetAt')}</div>
+                    <div className="console-meta-value mono">
+                      {creditUsage?.reset_at
+                        ? new Date(creditUsage.reset_at).toLocaleString(locale === 'zh' ? 'zh-CN' : 'en-US', { hour12: false })
+                        : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="console-meta-label">{t(locale, 'creditUnpriced')}</div>
+                    <div className="console-meta-value mono">{formatNumber(creditUsage?.unpriced_models ?? 0)}</div>
+                  </div>
+                </div>
+                {creditUsage?.exhausted && <div className="console-note warn">{t(locale, 'creditExhaustedHint')}</div>}
+                <div className="console-route-actions">
+                  <Button size="xs" variant="default" onClick={() => setCreditOpen(true)}>{t(locale, 'creditAdjust')}</Button>
+                  <Button size="xs" variant="default" leftSection={<IconRefresh size={13} />} loading={creditsQuery.isFetching} onClick={() => void creditsQuery.refetch()}>
+                    {t(locale, 'refresh')}
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         </section>
 
@@ -777,6 +933,11 @@ export default function ProviderDetail() {
                       <span>{t(locale, 'modelPriceCol')}</span>
                     </Tooltip>
                   </Table.Th>
+                  <Table.Th className="num">
+                    <Tooltip withArrow w={240} label={t(locale, 'creditPriceHint')}>
+                      <span>{t(locale, 'thCreditPrice')}</span>
+                    </Tooltip>
+                  </Table.Th>
                   <Table.Th>{t(locale, 'thCaps')}</Table.Th>
                   <Table.Th>{t(locale, 'status')}</Table.Th>
                   <Table.Th />
@@ -803,6 +964,9 @@ export default function ProviderDetail() {
                       <span className={row.input_price == null && row.output_price == null ? 'muted' : ''}>
                         {`${row.input_price ?? '—'} / ${row.output_price ?? '—'}`}
                       </span>
+                    </Table.Td>
+                    <Table.Td className="num">
+                      <span className={row.credit_price == null ? 'muted' : ''}>{row.credit_price ?? '—'}</span>
                     </Table.Td>
                     <Table.Td>
                       {row.capabilities.length > 0 ? (
@@ -963,6 +1127,30 @@ export default function ProviderDetail() {
         </div>
       </section>
 
+      <Modal opened={creditOpen} onClose={() => setCreditOpen(false)} title={t(locale, 'creditAdjustTitle')} size="sm">
+        <div className="console-note">{t(locale, 'creditAdjustHint')}</div>
+        <Field label={t(locale, 'creditAdjustDelta')}>
+          <TextInput size="xs" inputMode="decimal" value={creditDelta} onChange={event => setCreditDelta(event.currentTarget.value)} placeholder="-5" />
+        </Field>
+        <Field label={t(locale, 'creditAdjustNote')}>
+          <TextInput size="xs" value={creditNote} onChange={event => setCreditNote(event.currentTarget.value)} placeholder={t(locale, 'creditAdjustNotePlaceholder')} />
+        </Field>
+        <div className="console-note warn">{t(locale, 'creditResetHint')}</div>
+        <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
+          <Button size="xs" variant="default" color="red" loading={creditSaving} onClick={() => void onResetCredit()}>
+            {t(locale, 'creditReset')}
+          </Button>
+          <Button
+            size="xs"
+            loading={creditSaving}
+            disabled={!creditDelta.trim() || !Number.isFinite(Number(creditDelta)) || Number(creditDelta) === 0}
+            onClick={() => void onAdjustCredit()}
+          >
+            {t(locale, 'save')}
+          </Button>
+        </div>
+      </Modal>
+
       <Modal
         opened={Boolean(editTarget && modelDraft)}
         onClose={closeModelEditor}
@@ -985,6 +1173,9 @@ export default function ProviderDetail() {
             </Field>
             <Field label={t(locale, 'modelOutputPrice')} unit={t(locale, 'modelPriceUnit')}>
               <TextInput size="xs" inputMode="decimal" value={modelDraft.output_price} onChange={event => setModelDraft(prev => prev && { ...prev, output_price: event.currentTarget.value })} />
+            </Field>
+            <Field label={t(locale, 'modelCreditPrice')} unit={t(locale, 'creditUnit')}>
+              <TextInput size="xs" inputMode="decimal" value={modelDraft.credit_price} onChange={event => setModelDraft(prev => prev && { ...prev, credit_price: event.currentTarget.value })} />
             </Field>
             <Field full label={t(locale, 'modelCapabilities')}>
               <MultiSelect size="xs" data={CAP_DATA(locale)} value={modelDraft.capabilities} onChange={value => setModelDraft(prev => prev && { ...prev, capabilities: value })} />
@@ -1027,6 +1218,15 @@ export default function ProviderDetail() {
                 label={`${t(locale, 'modelOutputPrice')} · ${t(locale, 'modelPriceUnit')}`}
               />
               <TextInput size="xs" inputMode="decimal" disabled={!batchDraft.output_price_on} value={batchDraft.output_price} onChange={event => setBatchDraft(prev => prev && { ...prev, output_price: event.currentTarget.value })} />
+            </div>
+            <div className="console-field">
+              <Checkbox
+                size="xs"
+                checked={batchDraft.credit_price_on}
+                onChange={event => setBatchDraft(prev => prev && { ...prev, credit_price_on: event.currentTarget.checked })}
+                label={`${t(locale, 'modelCreditPrice')} · ${t(locale, 'creditUnit')}`}
+              />
+              <TextInput size="xs" inputMode="decimal" disabled={!batchDraft.credit_price_on} value={batchDraft.credit_price} onChange={event => setBatchDraft(prev => prev && { ...prev, credit_price: event.currentTarget.value })} />
             </div>
             <div className="console-field console-form-full">
               <Checkbox

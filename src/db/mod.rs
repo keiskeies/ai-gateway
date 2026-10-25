@@ -7,6 +7,7 @@ pub mod proxy;
 pub mod route;
 pub mod stats;
 pub mod api_key;
+pub mod credit;
 pub mod auth;
 pub mod config_transfer;
 pub mod client_config;

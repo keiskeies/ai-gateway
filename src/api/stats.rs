@@ -242,7 +242,7 @@ pub async fn export_traffic(
     body.push_str(
         "created_at,model,platform,virtual_model,api_key,status_code,error_type,stream,\
          token_input,token_output,fresh_input_tokens,cache_read_tokens,cache_write_tokens,\
-         latency_ms,ttft_ms,output_tokens_per_sec,cost,attempts\n",
+         latency_ms,ttft_ms,output_tokens_per_sec,cost,credits,path,attempts\n",
     );
     for row in &rows {
         let cells = [
@@ -263,6 +263,8 @@ pub async fn export_traffic(
             csv_num(row.ttft_ms),
             csv_num(row.output_speed_tps.map(|v| v.round())),
             csv_num(row.cost),
+            csv_num(row.credits),
+            csv_text(row.path.as_deref().unwrap_or("")),
             // 空单元格 = 这条行早于 V16，次数无从查起（不是 0 次）
             csv_num(row.attempts),
         ];
@@ -299,6 +301,19 @@ pub async fn request_trace(
     let trace = web::block(move || crate::db::stats::request_trace(&db, stat_id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
     Ok(HttpResponse::Ok().json(trace))
+}
+
+/// 请求/响应详情：请求头、请求正文、上游原始响应正文。
+/// 三者各自判断是否存在；长请求可以只有头、没有正文，响应采集也可以独立开启。
+pub async fn request_payload(
+    db: web::Data<DbPool>,
+    path: web::Path<i64>,
+) -> AppResult<HttpResponse> {
+    let stat_id = path.into_inner();
+    let db = db.into_inner();
+    let payload = web::block(move || crate::db::stats::payload_for_stat(&db, stat_id))
+        .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    Ok(HttpResponse::Ok().json(payload))
 }
 
 /// 单个密钥的虚拟模型维度用量

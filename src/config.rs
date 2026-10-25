@@ -70,6 +70,10 @@ pub struct DefaultsConfig {
     /// 是否把入站请求正文存进 `request_bodies`。默认 false——正文里就是用户的提示词，
     /// 存不存是隐私决定，不是调试便利，所以只有显式开启才落库（见 §2 原则 10）。
     pub capture_request_bodies: bool,
+    /// 是否把上游原始响应正文存进 `response_bodies`。默认 false，与请求正文开关独立。
+    pub capture_response_bodies: bool,
+    /// 自动清理的天数；0 = 关闭。非 0 时最短 30 天，避免短于 Key 月度配额窗口。
+    pub auto_purge_days: u64,
 }
 
 /// 系统代理检测结果
@@ -334,6 +338,8 @@ impl Default for AppConfig {
                 stream_timeout_secs: 1800,
                 test_connection_timeout_secs: 10,
                 capture_request_bodies: false,
+                capture_response_bodies: false,
+                auto_purge_days: 0,
             },
         }
     }
@@ -401,6 +407,12 @@ impl AppConfig {
                         if let Some(v) = def.get("capture_request_bodies").and_then(|v| v.as_bool()) {
                             config.defaults.capture_request_bodies = v;
                         }
+                        if let Some(v) = def.get("capture_response_bodies").and_then(|v| v.as_bool()) {
+                            config.defaults.capture_response_bodies = v;
+                        }
+                        if let Some(v) = def.get("auto_purge_days").and_then(|v| v.as_integer()) {
+                            config.defaults.auto_purge_days = v.max(0) as u64;
+                        }
                     }
                     config
                 }
@@ -458,6 +470,8 @@ request_timeout_secs = {}
 stream_timeout_secs = {}
 test_connection_timeout_secs = {}
 capture_request_bodies = {}
+capture_response_bodies = {}
+auto_purge_days = {}
 "#,
             self.server.host,
             self.server.admin_port,
@@ -472,6 +486,8 @@ capture_request_bodies = {}
             self.defaults.stream_timeout_secs,
             self.defaults.test_connection_timeout_secs,
             self.defaults.capture_request_bodies,
+            self.defaults.capture_response_bodies,
+            self.defaults.auto_purge_days,
         ))
     }
 }

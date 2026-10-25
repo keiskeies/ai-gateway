@@ -68,6 +68,10 @@ export interface RequestLogItem {
   api_key_name: string | null
   /** 本条请求的成本估算；模型未定价、只填一侧、上游无 usage 或旧数据时为 null */
   cost: number | null
+  /** 本条请求计入上游平台的积分（V24）；未启用积分、失败或旧数据时为 null */
+  credits: number | null
+  /** 入站路径（V23）；旧数据为 null */
+  path: string | null
   /** 网关侧请求 ID（V16）；迁移前写入的旧行为 null，此时重试轨迹不可用 */
   request_id: string | null
   /** 网关为这一笔请求发出的尝试次数（含重试与 fallback）；null = 该行早于 V16，次数无从查起 */
@@ -95,6 +99,8 @@ export interface RequestAttempt {
   error_message: string | null
   latency_ms: number | null
   started_at: string
+  /** 本次尝试实际请求的上游完整地址（已打码）；旧数据为 null */
+  forward_url: string | null
   platform_name: string | null
 }
 
@@ -114,6 +120,48 @@ export interface RequestLogPage {
   total_cost?: number | null
   /** 筛选集中已定价的请求数 */
   priced_requests?: number
+  /** 整个筛选集的积分合计；一条计过积分的都没有时为 null */
+  total_credits?: number | null
+}
+
+/** 请求侧详情：请求头与正文分别判断，长请求可能只有头没有正文 */
+export interface RequestPayloadRequest {
+  headers_captured: boolean
+  body_captured: boolean
+  protocol: string | null
+  headers: Record<string, unknown> | null
+  body: string | null
+  bytes: number
+  truncated: boolean
+}
+
+/** 响应侧详情：存的是上游原始响应（流式为原始 SSE），不是跨协议转换后的结果 */
+export interface RequestPayloadResponse {
+  captured: boolean
+  protocol: string | null
+  status_code: number | null
+  content_type: string | null
+  body: string | null
+  bytes: number
+  truncated: boolean
+}
+
+export interface RequestPayload {
+  request: RequestPayloadRequest
+  response: RequestPayloadResponse
+}
+
+export interface PlatformCreditUsage {
+  platform_id: string
+  platform_name: string
+  budget: number
+  window: 'day' | 'week' | 'month' | string
+  spent: number
+  remaining: number
+  period_start: string
+  reset_at: string
+  unpriced_models: number
+  exhausted: boolean
 }
 
 export interface ErrorBreakdown {
@@ -254,6 +302,10 @@ export interface PlatformDetail {
   custom_headers?: Record<string, unknown>
   status: string
   rate_limit?: { rpm?: number; tpm?: number } | null
+  /** 上游积分预算；null/undefined = 不启用积分 */
+  credit_budget?: number | null
+  /** 自然窗口：day / week / month */
+  credit_window?: string | null
   created_at: string
   updated_at: string
 }

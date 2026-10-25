@@ -13,8 +13,10 @@ export interface PricePlanRow {
   modelId: string
   input: PriceCell
   output: PriceCell
+  credit: PriceCell
   currentInput: number | null
   currentOutput: number | null
+  currentCredit: number | null
 }
 
 export interface PricePlanIssue {
@@ -38,6 +40,7 @@ export interface PriceModelRow {
   model_id: string
   input_price: number | null
   output_price: number | null
+  credit_price: number | null
 }
 
 // 列名按归一化后的字符串匹配：小写、去掉空格/下划线/连字符/括号。
@@ -45,6 +48,7 @@ export interface PriceModelRow {
 const MODEL_HEADERS = ['modelid', 'model', 'id', '模型', '模型id', '模型名称']
 const INPUT_HEADERS = ['inputprice', 'input', 'promptprice', 'prompt', 'in', '输入', '输入价格', '输入单价']
 const OUTPUT_HEADERS = ['outputprice', 'output', 'completionprice', 'completion', 'out', '输出', '输出价格', '输出单价']
+const CREDIT_HEADERS = ['creditprice', 'credits', 'credit', '积分', '积分价格', '积分单价']
 
 function normalizeHeader(cell: string): string {
   return cell.trim().toLowerCase().replace(/[\s_\-()/（）]/g, '')
@@ -95,8 +99,9 @@ export function buildPricePlan(
   const modelCol = findColumn(headers, MODEL_HEADERS, false)
   const inputCol = findColumn(headers, INPUT_HEADERS, true)
   const outputCol = findColumn(headers, OUTPUT_HEADERS, true)
+  const creditCol = findColumn(headers, CREDIT_HEADERS, true)
   if (modelCol < 0) return { ...plan, error: 'noModelColumn' }
-  if (inputCol < 0 && outputCol < 0) return { ...plan, error: 'noPriceColumn' }
+  if (inputCol < 0 && outputCol < 0 && creditCol < 0) return { ...plan, error: 'noPriceColumn' }
 
   const byId = new Map(models.map(model => [model.model_id, model]))
   const seen = new Set<string>()
@@ -121,8 +126,8 @@ export function buildPricePlan(
     if (seen.has(modelId)) plan.duplicates += 1
     seen.add(modelId)
 
-    const parsed: Record<'input' | 'output', PriceCell | null> = { input: null, output: null }
-    for (const [side, column] of [['input', inputCol], ['output', outputCol]] as const) {
+    const parsed: Record<'input' | 'output' | 'credit', PriceCell | null> = { input: null, output: null, credit: null }
+    for (const [side, column] of [['input', inputCol], ['output', outputCol], ['credit', creditCol]] as const) {
       if (column < 0) {
         parsed[side] = { state: 'keep' }
         continue
@@ -137,8 +142,9 @@ export function buildPricePlan(
         parsed[side] = null
         continue
       }
-      const value = scaled(raw, options.factor)
-      if (value === null || value < 0) {
+      // 积分单价是“每次请求”的单位，不跟 token 单价一起按千/百万换算
+      const value = side === 'credit' ? Number(raw) : scaled(raw, options.factor)
+      if (value === null || !Number.isFinite(value) || value < 0) {
         plan.invalid.push({ line: index + 1, detail: `${modelId} · ${raw}` })
         parsed[side] = null
       } else {
@@ -147,16 +153,18 @@ export function buildPricePlan(
     }
     // 一行里任何一侧读不出来就整行跳过：只写一半的价格会造出"只填一侧＝整单不估算"的模型，
     // 那种行在成本列里显示 —，用户看不出是导入失败还是本来就没定价。
-    if (parsed.input === null || parsed.output === null) continue
+    if (parsed.input === null || parsed.output === null || parsed.credit === null) continue
 
     const row: PricePlanRow = {
       modelId,
       input: parsed.input,
       output: parsed.output,
+      credit: parsed.credit,
       currentInput: model.input_price,
       currentOutput: model.output_price,
+      currentCredit: model.credit_price,
     }
-    if (row.input.state === 'keep' && row.output.state === 'keep') {
+    if (row.input.state === 'keep' && row.output.state === 'keep' && row.credit.state === 'keep') {
       plan.unchanged += 1
       continue
     }
@@ -164,7 +172,8 @@ export function buildPricePlan(
     // 而且会让"预览说改 N 个"和实际变化的行数对不上。
     if (
       sameAsCurrent(row.input, model.input_price) &&
-      sameAsCurrent(row.output, model.output_price)
+      sameAsCurrent(row.output, model.output_price) &&
+      sameAsCurrent(row.credit, model.credit_price)
     ) {
       plan.same += 1
       continue
@@ -182,6 +191,7 @@ export function pricePlanPayload(rows: PricePlanRow[]) {
     const item: Record<string, unknown> = { model_id: row.modelId }
     if (row.input.state !== 'keep') item.input_price = row.input.state === 'clear' ? null : row.input.value
     if (row.output.state !== 'keep') item.output_price = row.output.state === 'clear' ? null : row.output.value
+    if (row.credit.state !== 'keep') item.credit_price = row.credit.state === 'clear' ? null : row.credit.value
     return item
   })
 }

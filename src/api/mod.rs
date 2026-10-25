@@ -32,6 +32,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/platforms", web::post().to(platform::create))
                 .route("/platforms/presets", web::get().to(platform::list_presets))
                 .route("/platforms/test", web::post().to(platform::test_config))
+                // 静态段必须在 `{id}` 之前注册，否则 /platforms/credits 会被当成平台 id
+                .route("/platforms/credits", web::get().to(platform::credits))
                 .route("/platforms/{id}", web::get().to(platform::get))
                 .route("/platforms/{id}", web::put().to(platform::update))
                 .route("/platforms/{id}", web::delete().to(platform::delete))
@@ -41,6 +43,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/platforms/{id}/models/batch", web::put().to(platform::batch_update_models))
                 .route("/platforms/{id}/models/prices", web::get().to(platform::export_prices))
                 .route("/platforms/{id}/models/prices", web::post().to(platform::import_prices))
+                .route("/platforms/{id}/credits/adjust", web::post().to(platform::adjust_credit))
+                .route("/platforms/{id}/credits/reset", web::post().to(platform::reset_credit))
                 // 模型
                 .route("/models", web::get().to(model::list))
                 .route("/models", web::post().to(model::create))
@@ -89,6 +93,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         .route("/stats/requests", web::get().to(stats::request_logs))
         .route("/stats/requests/export", web::get().to(stats::export_traffic))
         .route("/stats/requests/{id}/trace", web::get().to(stats::request_trace))
+        .route("/stats/requests/{id}/payload", web::get().to(stats::request_payload))
         .route("/stats/requests/{id}/replay", web::post().to(stats::replay_request))
         .route("/stats/bodies", web::delete().to(stats::delete_bodies))
         .route("/stats/api-keys", web::get().to(stats::api_key_usage))

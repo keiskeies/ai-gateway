@@ -5,6 +5,7 @@ pub mod models;
 pub mod db;
 pub mod events;
 pub mod lb;
+pub mod maintenance;
 pub mod protocol;
 pub mod proxy;
 pub mod api;
