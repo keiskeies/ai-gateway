@@ -2,7 +2,7 @@ body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
-  background: var(--wall-bg, #0A142E);
+  background: var(--wall-bg, #0B0D0D);
 }
 
 #root {
@@ -10,64 +10,64 @@ body {
 }
 
 /* ============================================================
-   概览监控大屏 · Deep Navy + Wall Display
+   概览监控大屏 · Graphite + Wall Display
    设计稿：docs/dashboard-screen-design.md
-   原则：单一强调色、深海军蓝三阶明度、实心蓝调文字（不发灰）、
-   大字号 tabular-nums 等宽数字、300–600ms 克制微动效。
+   原则：暗色中性石墨 / 亮色中性白纸承担层级、单一强调色（品牌青 + 数据金）、
+   实心中性文字、大字号 tabular-nums 等宽数字、300–600ms 克制微动效。
    ============================================================ */
 
-/* ---- 视觉 Token：暗色 = 深海军蓝三阶明度，文字用实心板岩蓝（非半透明白，杜绝灰蒙感） ---- */
+/* ---- 视觉 Token：暗色 = 中性石墨三阶明度，文字用中性灰阶（非半透明白、非蓝调） ---- */
 :root {
   color-scheme: dark;
-  --wall-bg: #0A142E;
-  --wall-glow: rgba(84, 140, 255, 0.11);
-  --panel-bg: #121F3D;
-  --panel-bg-2: #1C2C52;
-  --line: rgba(140, 180, 255, 0.14);
-  --line-strong: rgba(140, 180, 255, 0.28);
-  --text-1: #F2F6FF;
-  --text-2: #C6D3F0;
-  --text-3: #94A7D0;
-  --accent: #5C9DFF;
-  /* 填充在 --accent 底色上的文字：暗色方案是亮蓝底，必须用深墨才够 4.5:1 */
-  --accent-ink: #0A142E;
-  --accent-2: #22D3EE;
-  --ok: #35D399;
-  --warn: #FBBF24;
-  --err: #FF6B7A;
+  --wall-bg: #0B0D0D;
+  --wall-glow: rgba(69, 200, 195, 0.10);
+  --panel-bg: #111414;
+  --panel-bg-2: #171B1B;
+  --line: rgba(230, 245, 242, 0.07);
+  --line-strong: rgba(230, 245, 242, 0.14);
+  --text-1: #F1F3F1;
+  --text-2: #B8BEBA;
+  --text-3: #858D88;
+  --accent: #45C8C3;
+  /* 填充在 --accent 底色上的文字：亮青底必须用深墨才够 4.5:1 */
+  --accent-ink: #04211F;
+  --accent-2: #E0AF63;
+  --ok: #6FD39A;
+  --warn: #E8B75C;
+  --err: #F07C86;
 }
 
 /* 让 Mantine 内置的文字/暗色文字/主体底色变量跟随 token，
    未逐一定制的组件（Text c="dimmed"、Code、默认 body、Modal 等）不再透出中性灰。
    :root:root 双写提高优先级，压过 MantineProvider 运行时注入的 :root[attribute]。 */
 :root:root[data-mantine-color-scheme='dark'] {
-  --mantine-color-text: #F2F6FF;
-  --mantine-color-dimmed: #C6D3F0;
-  --mantine-color-body: #121F3D;
+  --mantine-color-text: #F1F3F1;
+  --mantine-color-dimmed: #B8BEBA;
+  --mantine-color-body: #111414;
 }
 
-/* 浅色 token 与 Mantine 调色板取同一阶（brand/gray 6、red/green 7），否则同一屏里
-   Mantine 的徽标与 console 的 pill 是两种蓝/两种红。状态色不能停在 6 阶：pill 文字落在
-   自身 8% 染色底上，6 阶会掉到 4.5:1 以下（green-6 只有 3.2）。 */
+/* 浅色 token 与 Mantine 调色板取同一阶（brand/gray 6、red/green/yellow 7），否则同一屏里
+   Mantine 的徽标与 console 的 pill 是两种青/两种红。状态色不能停在 6 阶：pill 文字落在
+   自身 11% 染色底上，6 阶会掉到 4.5:1 以下。 */
 :root:root[data-mantine-color-scheme='light'] {
   color-scheme: light;
-  --wall-bg: #EDF2FB;
-  --wall-glow: rgba(59, 110, 220, 0.08);
+  --wall-bg: #F4F4F1;
+  --wall-glow: rgba(15, 110, 106, 0.06);
   --panel-bg: #FFFFFF;
-  --panel-bg-2: #E9F0FA;
-  --line: rgba(18, 38, 86, 0.10);
-  --line-strong: rgba(18, 38, 86, 0.20);
-  --text-1: #0A1530;
-  --text-2: #40507A;
-  --text-3: #55658C;
-  --accent: #2E63B8;
+  --panel-bg-2: #E9ECE6;
+  --line: rgba(22, 30, 25, 0.10);
+  --line-strong: rgba(22, 30, 25, 0.20);
+  --text-1: #141714;
+  --text-2: #4B524B;
+  --text-3: #626962;
+  --accent: #0F6E6A;
   --accent-ink: #FFFFFF;
-  --accent-2: #0D90AC;
-  --ok: #146E54;
-  --warn: #855C12;
+  --accent-2: #9A6B1F;
+  --ok: #216636;
+  --warn: #8A5A00;
   --err: #A61B2E;
-  --mantine-color-text: #0A1530;
-  --mantine-color-dimmed: #40507A;
+  --mantine-color-text: #141714;
+  --mantine-color-dimmed: #4B524B;
   --mantine-color-body: #FFFFFF;
 }
 
@@ -79,9 +79,9 @@ body {
 
 /* 全屏模式（仅深色）：页底再压暗一档 */
 html.wall-fullscreen[data-mantine-color-scheme='dark'] {
-  --wall-bg: #060D24;
-  --wall-glow: rgba(84, 140, 255, 0.14);
-  --line: rgba(140, 180, 255, 0.11);
+  --wall-bg: #070909;
+  --wall-glow: rgba(69, 200, 195, 0.12);
+  --line: rgba(230, 245, 242, 0.06);
 }
 
 /* ---- 页底容器：与控制台其他页面同底同距，不再额外套一层卡片 ---- */
@@ -1736,7 +1736,7 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   background: var(--panel-bg);
   border: 1px solid var(--line);
   border-radius: 16px;
-  box-shadow: 0 24px 64px rgba(2, 8, 24, 0.32);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.28);
 }
 
 .auth-brand {
@@ -1894,9 +1894,9 @@ html.wall-fullscreen .wall-timeline-lane-chart {
 .console-client-needs {
   margin: 0 0 12px;
   padding: 8px 12px 8px 26px;
-  border: 1px solid rgba(255, 176, 32, 0.32);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
   border-radius: 7px;
-  background: rgba(255, 176, 32, 0.07);
+  background: color-mix(in srgb, var(--warn) 7%, transparent);
   color: var(--text-1);
   font-size: 12px;
   line-height: 1.65;

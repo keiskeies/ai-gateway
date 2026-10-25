@@ -242,22 +242,20 @@ function rangeToFromTo(range: RangeKey): { from?: string; to?: string } {
 }
 
 // 固定 8 色模型调色板：趋势图 / 排行榜 / 环形占比共用，「一个模型 = 一个颜色」贯穿全页
-// 相邻取色按色相大间隔轮转（蓝→橙→绿→粉→紫→琥珀→青→红），避免冷色扎堆难以区分；
-// 统一中明度（Tailwind-500 档），深浅两套主题下与背景都有足够对比
-// 分类色板按明暗方案各一组：深色底靠提亮取可读，浅色底同一批亮色（粉/紫）会糊成一片，
-// 所以浅色组是同一色相族里压暗的版本，对白底与 #EDF2FB 都 ≥4.3:1。
+// 暗色组接品牌青 + 数据金，其余按色相大间隔轮转，避免冷色扎堆难以区分；
+// 浅色组是同一批色相的深色版本，对白底与 #F4F4F1 都 ≥5.2:1。
 const MODEL_PALETTE = {
-  dark: ['#3B82F6', '#F97316', '#10B981', '#EC4899', '#8B5CF6', '#F59E0B', '#14B8A6', '#EF4444'],
-  light: ['#1D5FD1', '#C2410C', '#0F7A5A', '#B02565', '#6D34C6', '#A16207', '#0B7285', '#C42020'],
+  dark: ['#45C8C3', '#E0AF63', '#B7A6FF', '#F07C86', '#8FBF7F', '#6FA8DC', '#E39AC8', '#C6D96B'],
+  light: ['#0F6E6A', '#8A5C12', '#5B3F9E', '#A62B3A', '#216636', '#1D5A9E', '#8E3B6B', '#5E6B1A'],
 }
 
 // 强调色 / 状态语义色：按明暗方案各取一组，暗色高亮通透、亮色保证可读对比。
 // 数值必须与 main.css 的 --accent / --ok / --warn / --err 同步——大屏这里走的是 Recharts
 // 与内联 style，拿不到 CSS 变量，两处不同步就会出现"同一屏两种红"。
-const ACCENT = { dark: '#5C9DFF', light: '#2E63B8' }
+const ACCENT = { dark: '#45C8C3', light: '#0F6E6A' }
 const STATUS = {
-  dark: { ok: '#35D399', warn: '#FBBF24', err: '#FF6B7A' },
-  light: { ok: '#146E54', warn: '#855C12', err: '#A61B2E' },
+  dark: { ok: '#6FD39A', warn: '#E8B75C', err: '#F07C86' },
+  light: { ok: '#216636', warn: '#8A5A00', err: '#A61B2E' },
 }
 
 function formatNumber(n: number | undefined): string {
@@ -335,14 +333,15 @@ const ERROR_LABELS: Record<string, TranslationKey> = {
   Unknown: 'errUnknown',
 }
 
-// 图表配色：暗/亮自适应，网格线染蓝提亮（避免中性灰在黑底上发闷）
+// 图表配色：暗/亮自适应；网格和坐标轴用中性细线，不再染蓝
 function chartTokens(isDark: boolean) {
   return {
-    axis: isDark ? '#8FA3CE' : '#40507A',
-    grid: isDark ? 'rgba(140,180,255,0.11)' : 'rgba(18,38,86,0.09)',
-    tooltipBg: isDark ? 'rgba(18,31,61,0.92)' : 'rgba(255,255,255,0.92)',
-    tooltipBorder: isDark ? 'rgba(140,180,255,0.26)' : 'rgba(18,38,86,0.14)',
-    text: isDark ? '#F2F6FF' : '#0A1530',
+    accent: isDark ? ACCENT.dark : ACCENT.light,
+    axis: isDark ? '#858D88' : '#5C635D',
+    grid: isDark ? 'rgba(230,245,242,0.08)' : 'rgba(22,30,25,0.09)',
+    tooltipBg: isDark ? 'rgba(17,20,20,0.94)' : 'rgba(255,255,255,0.92)',
+    tooltipBorder: isDark ? 'rgba(230,245,242,0.14)' : 'rgba(22,30,25,0.14)',
+    text: isDark ? '#F1F3F1' : '#141714',
   }
 }
 
@@ -907,7 +906,7 @@ export default function Dashboard() {
     // hover 十字线 + 毛玻璃 tooltip
     <RTooltip
       key="tt"
-      cursor={{ stroke: 'rgba(92,157,255,0.6)', strokeDasharray: '4 4' }}
+      cursor={{ stroke: cc.accent, strokeOpacity: 0.6, strokeDasharray: '4 4' }}
       contentStyle={{
         background: cc.tooltipBg,
         border: `1px solid ${cc.tooltipBorder}`,
@@ -1214,7 +1213,7 @@ export default function Dashboard() {
                 colors={{
                   accent: ACCENT[isDark ? 'dark' : 'light'],
                   err: status.err,
-                  out: isDark ? '#14B8A6' : '#0B7285',
+                  out: isDark ? '#E0AF63' : '#8A5C12',
                   axis: cc.axis,
                   grid: cc.grid,
                 }}
@@ -1252,7 +1251,7 @@ export default function Dashboard() {
                         stroke={s.color}
                         strokeWidth={1.5}
                         dot={false}
-                        activeDot={{ r: 3.5, fill: s.color, stroke: isDark ? '#0A142E' : '#FFFFFF', strokeWidth: 2 }}
+                        activeDot={{ r: 3.5, fill: s.color, stroke: isDark ? '#0B0D0D' : '#FFFFFF', strokeWidth: 2 }}
                         animationDuration={500}
                       />
                     ))}

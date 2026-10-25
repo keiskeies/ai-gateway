@@ -284,7 +284,7 @@ h4,
     32px
     calc(var(--app-shell-navbar-offset, 0px) + 22px);
   background:
-    radial-gradient(1000px 480px at 70% -10%, rgba(92, 157, 255, .08), transparent 62%),
+    radial-gradient(1000px 480px at 70% -10%, var(--wall-glow), transparent 62%),
     var(--wall-bg) !important;
 }
 
@@ -2213,7 +2213,7 @@ h4,
   border-radius: 50%;
   background: var(--accent);
   transform: translate(-50%, -50%);
-  box-shadow: 0 0 0 4px var(--signal-soft, rgba(92, 157, 255, .12));
+  box-shadow: 0 0 0 4px var(--signal-soft, color-mix(in srgb, var(--accent) 14%, transparent));
 }
 
 .console-backend-stack {

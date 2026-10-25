@@ -11,7 +11,7 @@
         var t = localStorage.getItem('theme');
         var dark = t === 'dark' || (t !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
         document.documentElement.setAttribute('data-mantine-color-scheme', dark ? 'dark' : 'light');
-        var bg = dark ? '#0A142E' : '#EDF2FB';
+        var bg = dark ? '#0B0D0D' : '#F4F4F1';
         document.documentElement.style.background = bg;
         if (document.body) document.body.style.background = bg;
       })();

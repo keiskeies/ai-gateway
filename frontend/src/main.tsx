@@ -33,14 +33,12 @@ initConfig()
 document.documentElement.style.removeProperty('background')
 document.body?.style.removeProperty('background')
 
-/* ---- Deep Navy Analytics 主题 ----
-   单一强调色 #5C9DFF；gray/dark 调色板整体染成蓝调，
-   夜间模式下所有 Mantine 组件（含未覆盖的默认表面）不再透出中性灰。
+/* ---- 双主题：暗色 = 石墨 + 亮青/金，亮色 = 白纸 + 深青/金 ----
+   两套都从 logo 的青 + 金取色；暗色用中性石墨承托，亮色用中性白纸承托。
    页面代码不散落视觉参数，统一由此处 + main.css token 控制。 */
 
-/* 填充面的 autoContrast 有个坑：Mantine 判定深浅时拿的是 light 方案的 brand[6]
-   （#2E63B8），可暗色方案真正铺的底是 brand[4]（#5C9DFF）——于是白字留在亮蓝底上，
-   实测只有 2.7:1。深浅由 CSS token 决定：暗色配深墨（6:1），浅色仍是白字（5.8:1）。 */
+/* 填充面的文字色交给 CSS token（--accent-ink）：
+   暗色青底配深墨、浅色蓝底配白字；避免 autoContrast 用错方案的色阶。 */
 const variantColorResolver = (input: Parameters<typeof defaultVariantColorsResolver>[0]) => {
   const colors = defaultVariantColorsResolver(input)
   const brand = !input.color || input.color === 'brand'
@@ -48,39 +46,39 @@ const variantColorResolver = (input: Parameters<typeof defaultVariantColorsResol
   return colors
 }
 
-const theme = createTheme({
+const lightTheme = createTheme({
   primaryColor: 'brand',
   primaryShade: { light: 6, dark: 4 },
-  /* 填充按钮/徽标文字按底色亮度自动取深墨或纯白：
-     夜间模式下 #5C9DFF 亮蓝底自动配深字，避免白字发虚 */
+  /* 填充按钮/徽标文字按底色亮度自动取深墨或纯白；
+     brand 填充面再由 variantColorResolver 统一到 --accent-ink */
   autoContrast: true,
   variantColorResolver,
   colors: {
     brand: [
-      '#E7F0FF', '#CFE1FF', '#A8C8FF', '#7FACFF', '#5C9DFF',
-      '#3F7EE0', '#2E63B8', '#244E92', '#1B3B6E', '#122747',
+      '#E6F6F4', '#C4EDE9', '#9ADFD9', '#6FCFC8', '#45C8C3',
+      '#2A9D97', '#0F6E6A', '#0B5754', '#08413F', '#052B2A',
     ],
-    /* 亮灰阶：蓝灰 slate，供 gray-0..9 引用处保持冷色调 */
+    /* 亮色方案：中性灰；暗色方案在 darkColors 中覆盖为石墨 */
     gray: [
-      '#EEF2FB', '#DCE3F1', '#BCC8DF', '#93A3C4', '#6E80A9',
-      '#55658C', '#404E71', '#2E3A58', '#1F2942', '#121A2E',
+      '#F7F8F6', '#EDEFEB', '#DDE1DB', '#C3C9C2', '#9AA39B',
+      '#747D75', '#59625A', '#404842', '#2A302C', '#171C18',
     ],
-    /* 暗色模式的中性面：深海军蓝三阶，替代 Mantine 默认的近黑灰 */
+    /* 浅色主题不渲染暗色面；保留一套石墨暗面，暗色主题在 darkColors 中覆盖 */
     dark: [
-      '#F2F6FF', '#C9D6F2', '#93A8D1', '#5E77AD', '#3A5387',
-      '#27406F', '#1A3057', '#121F3D', '#0A142E', '#060D24',
+      '#F1F3F1', '#B8BEBA', '#858D88', '#5F6661', '#474E4A',
+      '#2E3431', '#1E2323', '#111414', '#0B0D0D', '#070909',
     ],
     red: [
       '#FFE3E6', '#FFC9CF', '#FF9FA9', '#FF7F8D', '#FF6B7A',
       '#F04356', '#D2263B', '#A61B2E', '#7D1524', '#520E19',
     ],
     green: [
-      '#D8F7EA', '#AEEED6', '#7CE0BC', '#4FD3A3', '#35D399',
-      '#22B083', '#198F69', '#146E54', '#0F513F', '#0A3529',
+      '#E9F7EC', '#CDEED4', '#A6DEB2', '#7CCB8D', '#55B96C',
+      '#3A9E54', '#2B7F44', '#216636', '#174A28', '#0E2F1A',
     ],
     yellow: [
-      '#FEF4DA', '#FBE5AC', '#F7D37C', '#F3C254', '#EEB135',
-      '#D99A1F', '#B57D17', '#8C6113', '#63460F', '#3E2C09',
+      '#FEF4E2', '#FBE6C4', '#F6D49B', '#F0C06F', '#E9AB45',
+      '#CE8F2A', '#A8751D', '#8A5A00', '#633F00', '#402900',
     ],
   },
   defaultRadius: 'md',
@@ -124,10 +122,41 @@ const theme = createTheme({
   },
 })
 
+/* 暗色方案：中性石墨表面 + 中性文字 + 亮青/金。
+   只覆盖颜色，字体、圆角、组件默认值全部沿用 lightTheme。 */
+const darkColors: typeof lightTheme.colors = {
+  ...lightTheme.colors,
+  brand: [
+    '#E3F8F6', '#C0F0EC', '#94E6DF', '#6BD9D1', '#45C8C3',
+    '#31A9A5', '#268A87', '#1D6C6A', '#15504F', '#0E3635',
+  ],
+  gray: [
+    '#F7F8F7', '#E4E7E5', '#CDD2CF', '#B0B7B2', '#8E9691',
+    '#6E7671', '#515853', '#3A413D', '#262C28', '#171B1B',
+  ],
+  dark: [
+    '#F1F3F1', '#B8BEBA', '#858D88', '#5F6661', '#474E4A',
+    '#2E3431', '#1E2323', '#111414', '#0B0D0D', '#070909',
+  ],
+  red: [
+    '#FDE7EA', '#F9C9D0', '#F5A6B1', '#F28C99', '#F07C86',
+    '#D45E6C', '#B24653', '#8E343F', '#6A252D', '#46161C',
+  ],
+  green: [
+    '#E7F8EF', '#C9EFDC', '#A4E3C4', '#82D9AE', '#6FD39A',
+    '#56B87F', '#3F9967', '#2F7A52', '#225B3E', '#153D2A',
+  ],
+  yellow: [
+    '#FCF3DC', '#F6E4B7', '#F0D38E', '#ECC469', '#E8B75C',
+    '#C99A42', '#A67D2E', '#826120', '#5E4516', '#3D2C0D',
+  ],
+}
+const darkTheme = { ...lightTheme, colors: darkColors }
+
 function ThemedApp() {
   const { isDark } = useAppContext()
   return (
-    <MantineProvider theme={theme} forceColorScheme={isDark ? 'dark' : 'light'}>
+    <MantineProvider theme={isDark ? darkTheme : lightTheme} forceColorScheme={isDark ? 'dark' : 'light'}>
       <Notifications position="top-right" />
       <QueryClientProvider client={queryClient}>
         <AppStateProvider>
