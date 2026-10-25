@@ -139,6 +139,16 @@ export interface ModelTimeSeriesPoint {
   avg_ttft_ms?: number
   output_speed_tps?: number
   cache_read_tokens?: number
+  /** 缓存写入 token 总量（目前仅 Anthropic 等支持 cache_creation 的上游） */
+  cache_write_tokens?: number
+  /** 新增输入 = 总输入 − 缓存读 − 缓存写；真正新鲜计费的 prompt */
+  fresh_input_tokens?: number
+  /** 该桶成本合计；全未定价时为 null（不是 0） */
+  total_cost?: number | null
+  /** 该桶参与成本估算的请求数 */
+  priced_requests?: number
+  /** 该桶有首字样本的请求数；0 = 没有流式样本，不是首字 0ms */
+  ttft_samples?: number
 }
 
 export interface ModelTimeSeriesStats {

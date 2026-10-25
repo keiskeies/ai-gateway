@@ -226,6 +226,11 @@ html.wall-fullscreen .wall-trend-panel {
   height: 400px !important;
 }
 
+/* 单模型模式是多条 lane，全屏时不能被上面那条固定高度裁掉 */
+html.wall-fullscreen .wall-trend-panel.wall-trend-single {
+  height: auto !important;
+}
+
 /* ---- 热力图 + 平台分布：同一行 7 / 5，够宽也不留大片空白 ---- */
 .wall-pair {
   display: grid;
@@ -290,6 +295,255 @@ html.wall-fullscreen .wall-trend-panel {
   font-size: 12px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- 单模型分时：共享悬停读数条 + 分面 lane ----
+   读数条是 10 个指标唯一的浮层；图上只保留共享竖线，避免 5 张图各弹一份 tooltip。 */
+.wall-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wall-timeline-readout {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-bg-2);
+  padding: 8px 10px;
+  transition: border-color 0.2s ease;
+}
+
+.wall-timeline-readout.hovered {
+  border-color: var(--line-strong);
+}
+
+.wall-timeline-readout-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.wall-timeline-readout-title {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.wall-timeline-readout-tail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.wall-timeline-hint {
+  color: var(--text-3);
+}
+
+.wall-timeline-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+.wall-timeline-readout-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin-top: 6px;
+}
+
+.wall-timeline-chip {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wall-timeline-chip-label {
+  font-size: 11px;
+  color: var(--text-3);
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall-timeline-chip-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wall-timeline-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wall-timeline-lane {
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.wall-timeline-lane:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.wall-timeline-lane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 22px;
+}
+
+.wall-timeline-lane-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-1);
+  white-space: nowrap;
+}
+
+.wall-timeline-lane-note {
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.wall-timeline-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.wall-timeline-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.wall-timeline-legend-swatch {
+  display: inline-block;
+  width: 10px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.wall-timeline-lane-chart {
+  height: 88px;
+}
+
+.wall-timeline-notes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 1.5;
+}
+
+.wall-timeline-empty {
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.wall-timeline-empty-action {
+  border: 1px solid var(--line-strong);
+  background: transparent;
+  color: var(--text-2);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.wall-timeline-empty-action:hover {
+  border-color: var(--accent);
+  color: var(--text-1);
+}
+
+@media (max-width: 1279px) {
+  .wall-timeline-readout-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .wall-timeline-lane-chart {
+    height: 80px;
+  }
+}
+
+@media (max-width: 767px) {
+  .wall-timeline-readout-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wall-timeline-lane-head {
+    flex-wrap: wrap;
+  }
+
+  .wall-timeline-lane-title {
+    white-space: normal;
+  }
+}
+
+html.wall-fullscreen .wall-timeline-lane-chart {
+  height: 104px;
+}
+
+/* 矩阵模型名做成下钻按钮：外观仍是单元格文字，键盘/读屏能拿到「查看分时性能」 */
+.wall-matrix .wall-mx-model-btn {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.wall-matrix .wall-mx-model-btn:hover {
+  color: var(--accent);
+}
+
+.wall-matrix .wall-mx-model-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wall-matrix .wall-mx-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- 模型排行：横向条（同调色板） ---- */

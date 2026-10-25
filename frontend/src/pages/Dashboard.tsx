@@ -45,8 +45,10 @@ import {
   IconX,
 } from '@tabler/icons-react'
 import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs } from '../api'
+import { ModelTimeline } from '../components/ModelTimeline'
 import { ChartAltTable, peakOf } from '../components/ui/ChartAlt'
 import { Readout } from '../components/ui/Readout'
+import type { ModelSummaryRow, ModelTimeSeriesPoint, ModelTimeSeriesStats } from '../types/stats'
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale, type TranslationKey } from '../i18n'
 import { getPresetName, platformPresets } from '../presets'
@@ -126,44 +128,6 @@ const RANGE_LABEL_KEYS: Record<RangeKey, TranslationKey> = {
   all: 'rangeAll',
 }
 
-interface ModelTimeSeriesPoint {
-  period: string
-  model_id: string
-  requests: number
-  token_input: number
-  token_output: number
-  avg_latency_ms?: number
-  // V7 性能指标扩展
-  failed_requests?: number
-  stream_requests?: number
-  avg_ttft_ms?: number
-  output_speed_tps?: number
-  cache_read_tokens?: number
-}
-
-interface ModelTimeSeriesStats {
-  granularity: string
-  periods: string[]
-  data: ModelTimeSeriesPoint[]
-}
-
-// 模型性能矩阵行（后端 /stats/model-summaries）
-interface ModelSummaryRow {
-  model_id: string
-  requests: number
-  success_requests: number
-  failed_requests: number
-  stream_requests: number
-  token_input: number
-  token_output: number
-  avg_latency_ms: number
-  avg_ttft_ms: number
-  output_speed_tps: number
-  cache_read_tokens: number
-  fresh_input_tokens: number
-  cache_hit_rate: number
-}
-
 // 请求明细行（后端 /stats/requests）
 interface RequestLogItem {
   id: number
@@ -224,6 +188,7 @@ interface LatencyPercentiles {
 
 type Metric = 'requests' | 'failed_requests' | 'token_input' | 'token_output' | 'avg_latency_ms' | 'avg_ttft_ms' | 'output_speed_tps' | 'cache_read_tokens'
 type Granularity = 'hour' | 'day' | 'month' | 'year'
+type TrendMode = 'all' | 'single'
 type RangeKey = 'today' | '24h' | '7d' | '30d' | '12m' | 'all'
 
 // 指标 → 面板文案 key（趋势图切换 + 排行榜副标题共用）
@@ -519,9 +484,12 @@ export default function Dashboard() {
   const [heatmapRange, setHeatmapRange] = useState<HeatmapRange>('7d')
   const [metric, setMetric] = useState<Metric>('requests')
   const [stacked, setStacked] = useState(false)
+  const [trendMode, setTrendMode] = useState<TrendMode>('all')
+  const [selectedModel, setSelectedModel] = useState('')
   const [tsData, setTsData] = useState<ModelTimeSeriesStats | null>(null)
   const [tsLoading, setTsLoading] = useState(false)
   const [refreshNonce, setRefreshNonce] = useState(0)
+  const trendPanelRef = useRef<HTMLDivElement>(null)
 
   // 模型性能矩阵（全量汇总，随时段联动）+ 明细筛选用的模型选项
   const [summaries, setSummaries] = useState<ModelSummaryRow[]>([])
@@ -771,6 +739,56 @@ export default function Dashboard() {
 
   // 矩阵色点沿用趋势图"一个模型一个颜色"的映射；无趋势数据的模型按序补色
   const trendColorOf = useMemo(() => new Map(series.map((s) => [s.label, s.color])), [series])
+  const selectedModelColor = trendColorOf.get(selectedModel) || palette[0]
+
+  // 单模型视图的模型集合：与当前时段的趋势数据同源，按请求数降序、同数按 id 升序，
+  // 保证默认选中与截图/测试都稳定。
+  const modelTotals = useMemo(() => {
+    const totals = new Map<string, number>()
+    tsData?.data.forEach((point) => {
+      totals.set(point.model_id, (totals.get(point.model_id) || 0) + point.requests)
+    })
+    return Array.from(totals, ([model_id, requests]) => ({ model_id, requests }))
+      .sort((a, b) => b.requests - a.requests || a.model_id.localeCompare(b.model_id))
+  }, [tsData])
+
+  // 切时段后选中的模型可能已不在新窗口：仍保留在选项里，面板显示空态，
+  // 不静默跳到另一个模型——否则用户以为看的是 A，实际是 B。
+  const timelineOptions = useMemo(() => {
+    const ids = modelTotals.map((item) => item.model_id)
+    if (selectedModel && !ids.includes(selectedModel)) ids.unshift(selectedModel)
+    return ids
+  }, [modelTotals, selectedModel])
+
+  const selectedSummary = useMemo(
+    () => summaries.find((row) => row.model_id === selectedModel),
+    [summaries, selectedModel],
+  )
+
+  useEffect(() => {
+    if (trendMode !== 'single' || selectedModel || modelTotals.length === 0) return
+    setSelectedModel(modelTotals[0].model_id)
+  }, [trendMode, selectedModel, modelTotals])
+
+  const handleTrendMode = useCallback((value: string) => {
+    const mode = value as TrendMode
+    setTrendMode(mode)
+    if (mode === 'single' && !selectedModel && modelTotals[0]) {
+      setSelectedModel(modelTotals[0].model_id)
+    }
+  }, [selectedModel, modelTotals])
+
+  // 从模型矩阵下钻：切到单模型并滚到统计面板；面板已经可见时 scrollIntoView 只做最小移动
+  const openModelTimeline = useCallback((modelId: string) => {
+    setTrendMode('single')
+    setSelectedModel(modelId)
+    requestAnimationFrame(() => {
+      const panel = trendPanelRef.current
+      if (!panel) return
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      panel.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' })
+    })
+  }, [])
 
   // KPI 走势微件：请求数与加权平均延迟按周期聚合（随时段/粒度联动）
   const periodTotals = useMemo(() => {
@@ -1086,25 +1104,58 @@ export default function Dashboard() {
       </div>
 
       {/* ===== 趋势：整行宽，时间轴更长 ===== */}
-      <div className="wall-panel wall-trend-panel" style={{ display: 'flex', flexDirection: 'column', position: 'relative', height: 320 }}>
+      <div
+        ref={trendPanelRef}
+        className={`wall-panel wall-trend-panel${trendMode === 'single' ? ' wall-trend-single' : ''}`}
+        style={{ display: 'flex', flexDirection: 'column', position: 'relative', height: trendMode === 'single' ? 'auto' : 320 }}
+      >
           <div className="wall-panel-head">
             <span className="wall-panel-title">{t(locale, 'modelStats')}</span>
             <Group gap="xs" wrap="wrap">
-              <SegmentedControl
-                size="xs"
-                value={metric}
-                onChange={(v) => setMetric(v as Metric)}
-                data={[
-                  { label: t(locale, 'mShortRequests'), value: 'requests' },
-                  { label: t(locale, 'mShortFailed'), value: 'failed_requests' },
-                  { label: t(locale, 'mShortTokenIn'), value: 'token_input' },
-                  { label: t(locale, 'mShortTokenOut'), value: 'token_output' },
-                  { label: t(locale, 'mShortLatency'), value: 'avg_latency_ms' },
-                  { label: t(locale, 'mShortTtft'), value: 'avg_ttft_ms' },
-                  { label: t(locale, 'mShortSpeed'), value: 'output_speed_tps' },
-                  { label: t(locale, 'mShortCache'), value: 'cache_read_tokens' },
-                ]}
-              />
+              {(series.length > 0 || trendMode === 'single') && (
+                <SegmentedControl
+                  size="xs"
+                  value={trendMode}
+                  onChange={handleTrendMode}
+                  aria-label={t(locale, 'timelineModeLabel')}
+                  data={[
+                    { label: t(locale, 'trendModeAll'), value: 'all' },
+                    { label: t(locale, 'trendModeSingle'), value: 'single' },
+                  ]}
+                />
+              )}
+              {trendMode === 'single' && (
+                <Group gap={6} wrap="nowrap">
+                  <span className="wall-dot" style={{ background: selectedModelColor }} />
+                  <Select
+                    size="xs"
+                    w={200}
+                    aria-label={t(locale, 'singleModelSelect')}
+                    value={selectedModel || null}
+                    onChange={(value) => { if (value) setSelectedModel(value) }}
+                    data={timelineOptions.map((model) => ({ value: model, label: model }))}
+                    allowDeselect={false}
+                    searchable
+                  />
+                </Group>
+              )}
+              {trendMode === 'all' && (
+                <SegmentedControl
+                  size="xs"
+                  value={metric}
+                  onChange={(v) => setMetric(v as Metric)}
+                  data={[
+                    { label: t(locale, 'mShortRequests'), value: 'requests' },
+                    { label: t(locale, 'mShortFailed'), value: 'failed_requests' },
+                    { label: t(locale, 'mShortTokenIn'), value: 'token_input' },
+                    { label: t(locale, 'mShortTokenOut'), value: 'token_output' },
+                    { label: t(locale, 'mShortLatency'), value: 'avg_latency_ms' },
+                    { label: t(locale, 'mShortTtft'), value: 'avg_ttft_ms' },
+                    { label: t(locale, 'mShortSpeed'), value: 'output_speed_tps' },
+                    { label: t(locale, 'mShortCache'), value: 'cache_read_tokens' },
+                  ]}
+                />
+              )}
               <SegmentedControl
                 size="xs"
                 value={granularity}
@@ -1116,17 +1167,19 @@ export default function Dashboard() {
                   { label: t(locale, 'granularityYear'), value: 'year', disabled: !RANGE_GRANULARITIES[rangeKey].allowed.includes('year') },
                 ]}
               />
-              <Tooltip label={isSumMetric(metric) ? (stacked ? t(locale, 'groupedMode') : t(locale, 'stackedMode')) : ''}>
-                <ActionIcon
-                  variant="subtle"
-                  size="sm"
-                  aria-label={t(locale, effectiveStacked ? 'groupedMode' : 'stackedMode')}
-                  disabled={!isSumMetric(metric)}
-                  onClick={() => setStacked((s) => !s)}
-                >
-                  {effectiveStacked ? <IconStack2 size={14} /> : <IconLayoutGrid size={14} />}
-                </ActionIcon>
-              </Tooltip>
+              {trendMode === 'all' && (
+                <Tooltip label={isSumMetric(metric) ? (stacked ? t(locale, 'groupedMode') : t(locale, 'stackedMode')) : ''}>
+                  <ActionIcon
+                    variant="subtle"
+                    size="sm"
+                    aria-label={t(locale, effectiveStacked ? 'groupedMode' : 'stackedMode')}
+                    disabled={!isSumMetric(metric)}
+                    onClick={() => setStacked((s) => !s)}
+                  >
+                    {effectiveStacked ? <IconStack2 size={14} /> : <IconLayoutGrid size={14} />}
+                  </ActionIcon>
+                </Tooltip>
+              )}
               <Tooltip label={t(locale, 'refresh')}>
                 <ActionIcon
                   variant="subtle"
@@ -1142,6 +1195,31 @@ export default function Dashboard() {
           </div>
           {failed('modelStats') ? (
             <PanelFailed locale={locale} />
+          ) : trendMode === 'single' ? (
+            !tsData ? (
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Stack align="center" gap="xs">
+                  <IconChartBarPlaceholder />
+                  <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t(locale, 'noChartData')}</span>
+                </Stack>
+              </div>
+            ) : (
+              <ModelTimeline
+                stats={tsData}
+                modelId={selectedModel}
+                granularity={granularity}
+                locale={locale}
+                summary={selectedSummary}
+                onBackToAll={() => setTrendMode('all')}
+                colors={{
+                  accent: ACCENT[isDark ? 'dark' : 'light'],
+                  err: status.err,
+                  out: isDark ? '#14B8A6' : '#0B7285',
+                  axis: cc.axis,
+                  grid: cc.grid,
+                }}
+              />
+            )
           ) : series.length ? (
             <div style={{ flex: 1, minHeight: 0 }} role="group" aria-label={trendAlt}>
               <ResponsiveContainer width="100%" height="100%">
@@ -1351,8 +1429,15 @@ export default function Dashboard() {
                       <Fragment key={m.model_id}>
                       <tr>
                         <td className="wall-mx-model" title={m.model_id}>
-                          <span className="wall-dot" style={{ background: dot, marginRight: 6 }} />
-                          {m.model_id}
+                          <button
+                            type="button"
+                            className="wall-mx-model-btn"
+                            aria-label={t(locale, 'viewModelTimeline', m.model_id)}
+                            onClick={() => openModelTimeline(m.model_id)}
+                          >
+                            <span className="wall-dot" style={{ background: dot, marginRight: 6 }} />
+                            <span className="wall-mx-model-name">{m.model_id}</span>
+                          </button>
                         </td>
                         {mxCell(m, 'requests', formatNumber(m.requests))}
                         {mxCell(

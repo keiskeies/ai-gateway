@@ -180,7 +180,11 @@ pub fn model_timeseries(
             CASE WHEN SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)) > 0
                  THEN COALESCE(SUM(rs.token_output), 0) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
                  ELSE 0 END                     AS output_speed_tps,
-            COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens
+            COALESCE(SUM(rs.cache_read_tokens), 0)  AS cache_read_tokens,
+            COALESCE(SUM(rs.cache_write_tokens), 0) AS cache_write_tokens,
+            SUM(rs.cost)                            AS total_cost,
+            COUNT(rs.cost)                          AS priced_requests,
+            COUNT(rs.ttft_ms)                       AS ttft_samples
         FROM request_stats rs
         LEFT JOIN backends b ON rs.backend_id = b.id
         WHERE 1=1
@@ -195,18 +199,27 @@ pub fn model_timeseries(
     let rows = stmt.query_map(
         rusqlite::params![fmt, range.from, range.to],
         |r| {
+            let token_input: i64 = r.get(3)?;
+            let cache_read_tokens: i64 = r.get(10)?;
+            let cache_write_tokens: i64 = r.get(11)?;
             Ok(ModelTimeSeriesPoint {
                 period: r.get::<_, String>(0)?,
                 model_id: r.get::<_, String>(1)?,
                 requests: r.get::<_, i64>(2)?,
-                token_input: r.get::<_, i64>(3)?,
+                token_input,
                 token_output: r.get::<_, i64>(4)?,
                 avg_latency_ms: r.get::<_, f64>(5)?,
                 failed_requests: r.get::<_, i64>(6)?,
                 stream_requests: r.get::<_, i64>(7)?,
                 avg_ttft_ms: r.get::<_, f64>(8)?,
                 output_speed_tps: r.get::<_, f64>(9)?,
-                cache_read_tokens: r.get::<_, i64>(10)?,
+                cache_read_tokens,
+                cache_write_tokens,
+                // 与 model_summaries 同一公式：新增输入 = 总输入 − 缓存读 − 缓存写
+                fresh_input_tokens: (token_input - cache_read_tokens - cache_write_tokens).max(0),
+                total_cost: r.get(12)?,
+                priced_requests: r.get(13)?,
+                ttft_samples: r.get(14)?,
             })
         },
     )?;
@@ -1738,6 +1751,114 @@ mod tests {
             is_stream: false, api_key_id: Some(api_key_id.into()), cost,
             request_id: None, replayed_from: None,
         }
+    }
+
+    /// 时序点要带齐单模型分时图需要的聚合：新增输入、缓存写、成本覆盖、首字样本来数。
+    /// 成本全 NULL 的点必须是 None（不是 0）；ttft 全 NULL 的点 samples 必须是 0。
+    #[test]
+    fn model_timeseries_carries_cache_cost_and_ttft_samples() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id,name,type,base_url,api_key,created_at,updated_at) VALUES ('pl','p','openai','http://x','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platform");
+            conn.execute("INSERT INTO proxies (id,name,created_at) VALUES ('px','px','2026-01-01T00:00:00Z')", []).expect("proxy");
+            conn.execute("INSERT INTO routes (id,proxy_id) VALUES ('rt','px')", []).expect("route");
+            conn.execute(
+                "INSERT INTO backends (id,route_id,platform_id,model_id,weight,priority) VALUES ('b-a','rt','pl','model-a',1,0),('b-b','rt','pl','model-b',1,0)",
+                [],
+            ).expect("backends");
+        }
+
+        let mut cached = stat("k", Some(0.01));
+        cached.backend_id = "b-a".into();
+        cached.created_at = "2026-01-01T10:15:00Z".into();
+        cached.ttft_ms = Some(100);
+        cached.is_stream = true;
+        cached.cache_read_tokens = Some(600);
+        cached.cache_write_tokens = Some(100);
+        record(&pool, &cached).expect("cached row");
+
+        let mut plain = stat("k", None);
+        plain.backend_id = "b-a".into();
+        plain.created_at = "2026-01-01T10:45:00Z".into();
+        plain.token_input = Some(500);
+        plain.token_output = Some(100);
+        record(&pool, &plain).expect("unpriced row");
+
+        let mut uncached_stream = stat("k", None);
+        uncached_stream.backend_id = "b-b".into();
+        uncached_stream.created_at = "2026-01-01T10:30:00Z".into();
+        uncached_stream.token_input = Some(300);
+        uncached_stream.token_output = Some(50);
+        uncached_stream.ttft_ms = Some(200);
+        uncached_stream.is_stream = true;
+        // 异常数据：缓存读大于总输入，fresh 必须 saturating 到 0 而不是负数
+        uncached_stream.cache_read_tokens = Some(400);
+        record(&pool, &uncached_stream).expect("uncached row");
+
+        let series = model_timeseries(
+            &pool,
+            "hour",
+            24,
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-02T00:00:00Z"),
+        )
+        .expect("timeseries");
+
+        let a = series.data.iter().find(|p| p.model_id == "model-a").expect("model-a point");
+        assert_eq!(a.requests, 2);
+        assert_eq!(a.token_input, 1500);
+        assert_eq!(a.cache_read_tokens, 600);
+        assert_eq!(a.cache_write_tokens, 100);
+        assert_eq!(a.fresh_input_tokens, 800, "1500 - 600 - 100");
+        assert_eq!(a.priced_requests, 1, "只有第一行有成本");
+        assert!((a.total_cost.expect("已定价请求") - 0.01).abs() < 1e-12);
+        assert_eq!(a.ttft_samples, 1, "只有流式那一行有首字");
+        assert_eq!(a.avg_ttft_ms, 100.0);
+        assert_eq!(a.stream_requests, 1);
+
+        let b = series.data.iter().find(|p| p.model_id == "model-b").expect("model-b point");
+        assert_eq!(b.requests, 1);
+        assert_eq!(b.cache_read_tokens, 400);
+        assert_eq!(b.fresh_input_tokens, 0, "缓存读大于总输入时 saturating 到 0");
+        assert_eq!(b.total_cost, None, "全未定价是 NULL，不是 0");
+        assert_eq!(b.priced_requests, 0);
+        assert_eq!(b.ttft_samples, 1);
+        assert_eq!(b.avg_ttft_ms, 200.0);
+
+        // 单模型分时图与矩阵必须同口径：桶求和/加权必须逐项等于同一范围的 model_summaries。
+        let summaries = model_summaries(
+            &pool,
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-02T00:00:00Z"),
+        )
+        .expect("summaries");
+        for summary in &summaries {
+            let points: Vec<_> = series.data.iter().filter(|p| p.model_id == summary.model_id).collect();
+            assert_eq!(points.iter().map(|p| p.requests).sum::<i64>(), summary.requests);
+            assert_eq!(points.iter().map(|p| p.token_input).sum::<i64>(), summary.token_input);
+            assert_eq!(points.iter().map(|p| p.token_output).sum::<i64>(), summary.token_output);
+            assert_eq!(points.iter().map(|p| p.cache_read_tokens).sum::<i64>(), summary.cache_read_tokens);
+            assert_eq!(points.iter().map(|p| p.fresh_input_tokens).sum::<i64>(), summary.fresh_input_tokens);
+            assert_eq!(points.iter().map(|p| p.priced_requests).sum::<i64>(), summary.priced_requests);
+            let cost: f64 = points.iter().filter_map(|p| p.total_cost).sum();
+            match summary.total_cost {
+                Some(total) => assert!((cost - total).abs() < 1e-12, "成本合计不一致：{cost} vs {total}"),
+                None => assert_eq!(summary.priced_requests, 0),
+            }
+            let weighted = points.iter().map(|p| p.avg_latency_ms * p.requests as f64).sum::<f64>()
+                / summary.requests as f64;
+            assert!(
+                (weighted - summary.avg_latency_ms).abs() < 1e-9,
+                "加权耗时不一致：{weighted} vs {}",
+                summary.avg_latency_ms
+            );
+        }
+
+        cleanup_db(&path);
     }
 
     /// 大屏矩阵的失败数下钻：按 backends.model_id 过滤，且 total/success 同口径

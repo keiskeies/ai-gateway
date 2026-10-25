@@ -188,6 +188,16 @@ pub struct ModelTimeSeriesPoint {
     pub output_speed_tps: f64,
     /// 该周期该模型的缓存命中 token 总量
     pub cache_read_tokens: i64,
+    /// 该周期该模型的缓存写入 token 总量（仅 Anthropic 等支持 cache_creation 的上游）
+    pub cache_write_tokens: i64,
+    /// 新增输入 token = 总输入 − 缓存命中 − 缓存写入（即真正新鲜计费的 prompt）
+    pub fresh_input_tokens: i64,
+    /// 成本估算合计：该周期该模型所有已定价请求的 cost 之和；一条都没有时为 None（区别于 0）
+    pub total_cost: Option<f64>,
+    /// 参与成本估算的请求数（cost 非 NULL 的行数），用于逐桶成本覆盖率
+    pub priced_requests: i64,
+    /// 有首字样本的请求数（ttft_ms 非 NULL）。0 表示"没有流式样本"，与"首字为 0ms"是两件事
+    pub ttft_samples: i64,
 }
 
 /// 模型时间序列统计聚合结果
