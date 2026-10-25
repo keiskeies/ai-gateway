@@ -320,6 +320,7 @@ fn start_backend_server() {
         // 控制台实时事件总线：与独立服务模式同一套语义
         let events_hub = ai_gateway::events::EventHub::new();
         let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());
+        ai_gateway::maintenance::spawn_auto_purge(db_pool.clone(), shared_config.clone());
         let api_cache = Arc::new(cache.clone());
         let login_limiter = web::Data::new(ai_gateway::api::auth::LoginLimiter::new());
 
