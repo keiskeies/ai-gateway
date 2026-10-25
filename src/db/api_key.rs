@@ -299,6 +299,17 @@ pub fn usage_by_key(pool: &DbPool) -> AppResult<std::collections::HashMap<String
 
 /// 轮换：只换密钥值，id / 名称 / 绑定虚拟模型 / enabled 全部保留，
 /// 这样调用方改一处 Header 就能继续用，历史统计也仍挂在同一个 id 上。
+/// 启用/停用一条 Key。客户端接入撤销时用它把专用 Key 停掉，而不是删除：
+/// 历史用量还挂在 id 上，删除会让报表失去归属。
+pub fn set_enabled(pool: &DbPool, id: &str, enabled: bool) -> AppResult<()> {
+    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    conn.execute(
+        "UPDATE api_keys SET enabled = ?1 WHERE id = ?2",
+        rusqlite::params![if enabled { 1 } else { 0 }, id],
+    )?;
+    Ok(())
+}
+
 pub fn rotate(pool: &DbPool, id: &str, new_key: &str) -> AppResult<Option<StoredApiKey>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let changed = conn.execute(

@@ -1,4 +1,5 @@
 import axios from 'axios'
+import type { ClientApplyBody, ClientApplyResult, ClientPreview, ClientRestoreResult, ClientStatus } from './types/clients'
 
 // Detect Tauri desktop mode
 const isTauri = !!(window as any).__TAURI_INTERNALS__
@@ -358,3 +359,14 @@ export const planConfigImport = (doc: unknown, mode: ImportModeName): Promise<Im
   api.post('/config/import/plan', doc, { params: { mode } }).then(r => r.data)
 export const applyConfigImport = (doc: unknown, mode: ImportModeName): Promise<ImportResult> =>
   api.post('/config/import', doc, { params: { mode } }).then(r => r.data)
+
+// 客户端接入：检测 / 预览 / 应用 / 撤销 / 恢复备份
+export const listClients = (): Promise<ClientStatus[]> => api.get('/clients').then(r => r.data)
+export const previewClient = (id: string, body: ClientApplyBody): Promise<ClientPreview> =>
+  api.post(`/clients/${id}/preview`, body).then(r => r.data)
+export const applyClient = (id: string, body: ClientApplyBody): Promise<ClientApplyResult> =>
+  api.post(`/clients/${id}/apply`, body).then(r => r.data)
+export const restoreClient = (id: string): Promise<ClientRestoreResult> =>
+  api.post(`/clients/${id}/restore`).then(r => r.data)
+export const restoreClientBackup = (id: string): Promise<ClientRestoreResult> =>
+  api.post(`/clients/${id}/restore-backup`).then(r => r.data)

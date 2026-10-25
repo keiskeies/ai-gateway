@@ -1,6 +1,4 @@
 use actix_web::{web, HttpResponse};
-use rand::rngs::OsRng;
-use rand::RngCore;
 use crate::cache::RouteCache;
 use crate::error::{AppError, AppResult};
 use crate::db::DbPool;
@@ -8,9 +6,7 @@ use crate::models::api_key::*;
 use std::sync::Arc;
 
 fn generate_key() -> String {
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    format!("sk-aigw-{}", hex::encode(bytes))
+    crate::models::api_key::generate_secret()
 }
 
 /// 客户端自带 key 时用它，但太短的凭据不受理：

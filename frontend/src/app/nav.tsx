@@ -3,6 +3,7 @@ import {
   IconActivity,
   IconCloudShare,
   IconDeviceDesktop,
+  IconPlugConnected,
   IconKey,
   IconSettings,
   IconStack2,
@@ -38,6 +39,7 @@ export const NAV_GROUPS: { label: TranslationKey; items: NavItem[] }[] = [
     label: 'navTools',
     items: [
       { path: '/playground', label: 'playground', icon: IconTerminal2 },
+      { path: '/clients', label: 'clients', icon: IconPlugConnected },
     ],
   },
   {

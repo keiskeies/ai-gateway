@@ -16,6 +16,7 @@ PAGES = [
     ("/providers", ".console-shell"),
     ("/keys", ".console-shell"),
     ("/settings", ".console-shell"),
+    ("/clients", ".console-shell"),
     ("/wall", ".wall-root"),
 ]
 INIT = "localStorage.setItem('locale', 'zh'); localStorage.setItem('wizard', 'skipped')"

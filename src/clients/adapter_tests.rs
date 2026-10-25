@@ -1,0 +1,353 @@
+use super::*;
+use serde_json::{json, Value};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn home() -> PathBuf {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("test-clients")
+        .join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir_all(&path).expect("create test home");
+    path
+}
+
+fn write(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create config dir");
+    }
+    fs::write(path, text).expect("write config");
+}
+
+fn models() -> ResolvedModels {
+    ResolvedModels {
+        default: "agnes".into(),
+        sonnet: "agnes".into(),
+        opus: "agnes".into(),
+        haiku: "agnes".into(),
+        fable: "agnes".into(),
+        subagent: "agnes".into(),
+    }
+}
+
+fn with_hash(managed: &Value, token: &str) -> Value {
+    let mut value = managed.clone();
+    value
+        .as_object_mut()
+        .expect("managed object")
+        .insert("token_hash".to_string(), json!(sha256_hex(token)));
+    value
+}
+
+fn apply_plan(adapter: &dyn Adapter, paths: &ClientPaths, token: &str) -> ClientPlan {
+    let plan = adapter
+        .plan(paths, &models(), "http://127.0.0.1:1994", token, false)
+        .expect("plan");
+    assert!(plan.original.is_some(), "test config must exist");
+    fs::write(adapter.path(paths), &plan.content).expect("apply plan");
+    plan
+}
+
+fn restore_and_parse_json(adapter: &dyn Adapter, paths: &ClientPaths, plan: &ClientPlan, token: &str) -> Value {
+    let restored = adapter
+        .restore(paths, &with_hash(&plan.managed, token))
+        .expect("restore");
+    assert!(restored.changed, "restore should change the file");
+    fs::write(adapter.path(paths), &restored.content).expect("write restored");
+    serde_json::from_slice(&restored.content).expect("restored json")
+}
+
+fn parse_json5(text: &str) -> Value {
+    json5::from_str(text).expect("json5")
+}
+
+fn parse_yaml(text: &str) -> Value {
+    serde_yaml::from_str(text).expect("yaml")
+}
+
+#[test]
+fn claude_code_only_patches_env_and_restores_before_values() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = claude::ClaudeCodeAdapter;
+    let original = json!({
+        "permissions": {"allow": ["Bash"]},
+        "mcpServers": {"fs": {"command": "npx"}},
+        "env": {
+            "ANTHROPIC_BASE_URL": "http://old",
+            "ANTHROPIC_AUTH_TOKEN": "old-token",
+            "ANTHROPIC_MODEL": "old-model",
+            "KEEP": "yes"
+        }
+    });
+    write(&adapter.path(&paths), &serde_json::to_string_pretty(&original).unwrap());
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied: Value = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(applied["permissions"], original["permissions"]);
+    assert_eq!(applied["mcpServers"], original["mcpServers"]);
+    assert_eq!(applied["env"]["KEEP"], "yes");
+    assert_eq!(applied["env"]["ANTHROPIC_BASE_URL"], "http://127.0.0.1:1994");
+    assert_eq!(applied["env"]["ANTHROPIC_AUTH_TOKEN"], token);
+    assert_eq!(applied["env"]["ANTHROPIC_MODEL"], "agnes");
+    assert_eq!(applied["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "agnes");
+
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, token))
+        .expect("restore");
+    let restored_json: Value = serde_json::from_slice(&restored.content).unwrap();
+    assert_eq!(restored_json["permissions"], original["permissions"]);
+    assert_eq!(restored_json["env"]["KEEP"], "yes");
+    assert_eq!(restored_json["env"]["ANTHROPIC_BASE_URL"], "http://old");
+    assert_eq!(restored_json["env"]["ANTHROPIC_MODEL"], "old-model");
+    assert!(restored_json["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(), "old token is only in the backup");
+    assert!(restored_json["env"].get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none());
+    assert!(
+        restored.warnings.iter().any(|warning| warning.contains("previous ANTHROPIC_AUTH_TOKEN")),
+        "{:?}",
+        restored.warnings
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn claude_code_created_file_is_removed_on_restore() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = claude::ClaudeCodeAdapter;
+    let path = adapter.path(&paths);
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = adapter
+        .plan(&paths, &models(), "http://127.0.0.1:1994", token, false)
+        .expect("plan");
+    assert_eq!(plan.managed["created_file"], true);
+    write(&path, std::str::from_utf8(&plan.content).unwrap());
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, token))
+        .expect("restore");
+    assert!(restored.remove_file);
+    fs::remove_file(&path).expect("remove created file");
+    assert!(!path.exists());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_preserves_other_tables_and_restores_top_level() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = codex::CodexAdapter;
+    let original = r#"model = "old-model"
+model_provider = "openai"
+
+[projects.demo]
+trust_level = "trusted"
+
+[model_providers.other]
+name = "Other"
+base_url = "https://other.example/v1"
+wire_api = "responses"
+"#;
+    write(&adapter.path(&paths), original);
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied: toml::Value = std::str::from_utf8(&plan.content).unwrap().parse().unwrap();
+    assert_eq!(applied.get("model").and_then(toml::Value::as_str), Some("agnes"));
+    assert_eq!(applied.get("model_provider").and_then(toml::Value::as_str), Some("ai-gateway"));
+    assert_eq!(
+        applied
+            .get("projects")
+            .and_then(|projects| projects.get("demo"))
+            .and_then(|demo| demo.get("trust_level"))
+            .and_then(toml::Value::as_str),
+        Some("trusted")
+    );
+    let gateway = applied
+        .get("model_providers")
+        .and_then(|providers| providers.get("ai-gateway"))
+        .expect("gateway table");
+    assert_eq!(gateway.get("base_url").and_then(toml::Value::as_str), Some("http://127.0.0.1:1994/v1"));
+    assert_eq!(gateway.get("wire_api").and_then(toml::Value::as_str), Some("chat"));
+    assert_eq!(gateway.get("experimental_bearer_token").and_then(toml::Value::as_str), Some(token));
+    assert!(applied
+        .get("model_providers")
+        .and_then(|providers| providers.get("other"))
+        .is_some());
+
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, token))
+        .expect("restore");
+    let restored_toml: toml::Value = std::str::from_utf8(&restored.content).unwrap().parse().unwrap();
+    assert_eq!(restored_toml.get("model").and_then(toml::Value::as_str), Some("old-model"));
+    assert_eq!(restored_toml.get("model_provider").and_then(toml::Value::as_str), Some("openai"));
+    assert!(restored_toml
+        .get("model_providers")
+        .and_then(|providers| providers.get("ai-gateway"))
+        .is_none());
+    assert!(restored_toml
+        .get("model_providers")
+        .and_then(|providers| providers.get("other"))
+        .is_some());
+    assert!(restored_toml.get("projects").is_some());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn opencode_jsonc_preserves_other_providers() {
+    let home = home();
+    let path = home.join(".config").join("opencode").join("opencode.jsonc");
+    write(
+        &path,
+        r#"{
+  // existing
+  "provider": {
+    "open-webui": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://old", "apiKey": "other" }
+    },
+  },
+}
+"#,
+    );
+    let paths = ClientPaths::for_home(&home);
+    assert_eq!(paths.opencode_config, path);
+    let adapter = opencode::OpenCodeAdapter;
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied: Value = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(applied["provider"]["open-webui"]["options"]["baseURL"], "http://old");
+    assert_eq!(
+        applied["provider"]["ai-gateway"]["options"]["baseURL"],
+        "http://127.0.0.1:1994/v1"
+    );
+    assert_eq!(applied["provider"]["ai-gateway"]["options"]["apiKey"], token);
+    assert!(applied["provider"]["ai-gateway"]["models"]["agnes"].is_object());
+    let restored = restore_and_parse_json(&adapter, &paths, &plan, token);
+    assert!(restored["provider"].get("ai-gateway").is_none());
+    assert_eq!(restored["provider"]["open-webui"]["options"]["baseURL"], "http://old");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn openclaw_preserves_providers_and_primary() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = openclaw::OpenClawAdapter;
+    write(
+        &adapter.path(&paths),
+        r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      other: { baseUrl: 'https://other/v1', apiKey: 'x', api: 'openai-completions', models: [{ id: 'm' }] }
+    }
+  },
+  agents: { defaults: { model: { primary: 'other/m', fallbacks: ['other/n'] } } }
+}
+"#,
+    );
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied = parse_json5(std::str::from_utf8(&plan.content).unwrap());
+    assert_eq!(applied["agents"]["defaults"]["model"]["primary"], "ai-gateway/agnes");
+    assert_eq!(applied["agents"]["defaults"]["model"]["fallbacks"][0], "other/n");
+    assert_eq!(applied["models"]["providers"]["other"]["baseUrl"], "https://other/v1");
+    assert_eq!(applied["models"]["providers"]["ai-gateway"]["baseUrl"], "http://127.0.0.1:1994/v1");
+    let restored = restore_and_parse_json(&adapter, &paths, &plan, token);
+    assert_eq!(restored["agents"]["defaults"]["model"]["primary"], "other/m");
+    assert!(restored["models"]["providers"].get("ai-gateway").is_none());
+    assert_eq!(restored["models"]["providers"]["other"]["baseUrl"], "https://other/v1");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn pi_preserves_providers_and_does_not_touch_settings() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = pi::PiAdapter;
+    write(
+        &adapter.path(&paths),
+        r#"{"providers":{"other":{"name":"Other","baseUrl":"https://other/v1","api":"openai-completions","apiKey":"x","models":[{"id":"m"}]}}}"#,
+    );
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied: Value = serde_json::from_slice(&plan.content).unwrap();
+    assert_eq!(applied["providers"]["other"]["baseUrl"], "https://other/v1");
+    assert_eq!(applied["providers"]["ai-gateway"]["baseUrl"], "http://127.0.0.1:1994/v1");
+    assert_eq!(applied["providers"]["ai-gateway"]["apiKey"], token);
+    let restored = restore_and_parse_json(&adapter, &paths, &plan, token);
+    assert!(restored["providers"].get("ai-gateway").is_none());
+    assert_eq!(restored["providers"]["other"]["baseUrl"], "https://other/v1");
+    assert!(!home.join(".pi").join("agent").join("settings.json").exists());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn hermes_preserves_other_providers_and_mcp() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = hermes::HermesAdapter;
+    write(
+        &adapter.path(&paths),
+        r#"model:
+  default: old
+  provider: other
+custom_providers:
+  - name: other
+    base_url: https://other/v1
+    api_key: other-key
+    model: old
+mcp_servers:
+  fs:
+    command: npx
+"#,
+    );
+    let token = "sk-aigw-unit-test-token-0123456789";
+    let plan = apply_plan(&adapter, &paths, token);
+    let applied = parse_yaml(std::str::from_utf8(&plan.content).unwrap());
+    assert_eq!(applied["model"]["default"], "agnes");
+    assert_eq!(applied["model"]["provider"], "ai-gateway");
+    assert_eq!(applied["mcp_servers"]["fs"]["command"], "npx");
+    let providers = applied["custom_providers"].as_array().unwrap();
+    assert!(providers.iter().any(|provider| provider["name"] == "other"));
+    assert!(providers.iter().any(|provider| provider["name"] == "ai-gateway"));
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, token))
+        .expect("restore");
+    let restored_yaml = parse_yaml(std::str::from_utf8(&restored.content).unwrap());
+    assert_eq!(restored_yaml["model"]["default"], "old");
+    assert_eq!(restored_yaml["model"]["provider"], "other");
+    assert_eq!(restored_yaml["mcp_servers"]["fs"]["command"], "npx");
+    let providers = restored_yaml["custom_providers"].as_array().unwrap();
+    assert!(providers.iter().any(|provider| provider["name"] == "other"));
+    assert!(!providers.iter().any(|provider| provider["name"] == "ai-gateway"));
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn additive_adapters_refuse_an_unmanaged_ai_gateway_provider() {
+    let cases: [(&dyn Adapter, &str); 5] = [
+        (&codex::CodexAdapter, "[model_providers.ai-gateway]\nname = \"x\"\n"),
+        (&opencode::OpenCodeAdapter, "{\"provider\":{\"ai-gateway\":{}}}"),
+        (&openclaw::OpenClawAdapter, "{\"models\":{\"providers\":{\"ai-gateway\":{}}}}"),
+        (&pi::PiAdapter, "{\"providers\":{\"ai-gateway\":{}}}"),
+        (&hermes::HermesAdapter, "custom_providers:\n  - name: ai-gateway\n"),
+    ];
+    for (adapter, text) in cases {
+        let home = home();
+        let paths = ClientPaths::for_home(&home);
+        write(&adapter.path(&paths), text);
+        let result = adapter.plan(
+            &paths,
+            &models(),
+            "http://127.0.0.1:1994",
+            "sk-aigw-unit-test-token-0123456789",
+            false,
+        );
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "{} should refuse an unmanaged provider",
+            adapter.id().as_str()
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+}

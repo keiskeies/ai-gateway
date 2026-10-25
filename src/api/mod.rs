@@ -10,6 +10,7 @@ pub mod api_key;
 pub mod auth;
 pub mod config_transfer;
 pub mod events;
+pub mod client_config;
 
 use actix_web::web;
 
@@ -112,5 +113,11 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/config/export", web::get().to(config_transfer::export))
                 .route("/config/import/plan", web::post().to(config_transfer::plan))
                 .route("/config/import", web::post().to(config_transfer::apply))
+                // 客户端接入：检测 / 预览 / 应用 / 撤销 / 恢复备份
+                .route("/clients", web::get().to(client_config::list))
+                .route("/clients/{id}/preview", web::post().to(client_config::preview))
+                .route("/clients/{id}/apply", web::post().to(client_config::apply))
+                .route("/clients/{id}/restore", web::post().to(client_config::restore))
+                .route("/clients/{id}/restore-backup", web::post().to(client_config::restore_backup))
         );
 }

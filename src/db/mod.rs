@@ -9,6 +9,7 @@ pub mod stats;
 pub mod api_key;
 pub mod auth;
 pub mod config_transfer;
+pub mod client_config;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

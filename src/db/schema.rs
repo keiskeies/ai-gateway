@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 21;
+pub const CURRENT_SCHEMA_VERSION: i64 = 22;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -157,8 +157,31 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V21 (opt-in request_bodies + request_stats.replayed_from)");
     }
 
+    if current_version < 22 {
+        conn.execute_batch(SCHEMA_V22_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 22)", [])?;
+        tracing::info!("Database migrated to V22 (client_configs for local coding client integration)");
+    }
+
     Ok(())
 }
+
+/// V22：客户端接入的托管状态。managed 是每个客户端适配器自己的 JSON：
+/// 应用前/后的非敏感字段、token 摘要、创建过的 Key id、最近一次备份路径。
+/// 只存 token 的 sha256，不存明文；配置里的凭据和备份文件才是原文。
+const SCHEMA_V22_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS client_configs (
+    client_id   TEXT PRIMARY KEY,
+    config_path TEXT NOT NULL,
+    managed     TEXT NOT NULL,
+    token_hash  TEXT,
+    key_id      TEXT,
+    key_name    TEXT,
+    backup_path TEXT,
+    applied_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"#;
 
 /// 请求正文只在显式开启时落库，默认关（见 §2 原则 10"默认不存请求正文"）。
 /// 单独一张表而不是给 `request_stats` 加 TEXT 列：绝大多数部署一行正文都不存，

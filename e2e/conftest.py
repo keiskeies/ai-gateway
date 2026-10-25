@@ -132,7 +132,7 @@ class Api:
 
 
 class Instance:
-    def __init__(self, name: str, port: int | None = None):
+    def __init__(self, name: str, port: int | None = None, extra_env: dict[str, str] | None = None):
         # 端口写死是视觉回归要的前提：端口出现在侧栏页脚、设置页的管理端口和数据库路径里，
         # 每次换端口就是在改屏上文字，像素 diff 会变成随机失败
         port = port if port is not None and port_is_free(port) else free_port()
@@ -152,7 +152,10 @@ class Instance:
         shutil.copytree(STATIC, self.dir / "static")
         (self.dir / "config.toml").write_text(CONFIG_TEMPLATE.format(port=port), encoding="utf-8")
         log = (self.dir / "server.log").open("ab")
-        self.process = subprocess.Popen([str(self.dir / EXE.name)], cwd=str(self.dir), stdout=log, stderr=log)
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
+        self.process = subprocess.Popen([str(self.dir / EXE.name)], cwd=str(self.dir), stdout=log, stderr=log, env=env)
         self.api = Api(port)
         self._wait_health()
 
@@ -190,8 +193,8 @@ def instances():
     """工厂夹具：一个 session 里可以起多个实例（首次向导要一份全新库，不能被别的用例污染）。"""
     created: list[Instance] = []
 
-    def make(name: str, port: int | None = None) -> Instance:
-        instance = Instance(name, port)
+    def make(name: str, port: int | None = None, extra_env: dict[str, str] | None = None) -> Instance:
+        instance = Instance(name, port, extra_env=extra_env)
         created.append(instance)
         return instance
 

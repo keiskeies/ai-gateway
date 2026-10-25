@@ -13,6 +13,7 @@ const Traffic = lazy(() => import('./pages/Traffic'))
 const Models = lazy(() => import('./pages/Models'))
 const ModelDetail = lazy(() => import('./pages/ModelDetail'))
 const Playground = lazy(() => import('./pages/Playground'))
+const Clients = lazy(() => import('./pages/Clients'))
 const Wall = lazy(() => import('./pages/Wall'))
 const Platforms = lazy(() => import('./pages/Platforms'))
 const ProviderDetail = lazy(() => import('./pages/ProviderDetail'))
@@ -110,6 +111,7 @@ export default function App() {
         <Route path="/keys" element={<ApiKeys />} />
         <Route path="/keys/:id" element={<KeyDetail />} />
         <Route path="/playground" element={<Playground />} />
+        <Route path="/clients" element={<Clients />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/platforms" element={<Navigate to="/providers" replace />} />
         <Route path="/proxies" element={<Navigate to="/models" replace />} />

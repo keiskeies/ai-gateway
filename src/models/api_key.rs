@@ -242,6 +242,15 @@ impl StoredApiKey {
     }
 }
 
+/// 生成一条网关 Key 的明文。只在创建/轮换的响应里回显一次；库里落摘要。
+pub fn generate_secret() -> String {
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    format!("sk-aigw-{}", hex::encode(bytes))
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub name: String,

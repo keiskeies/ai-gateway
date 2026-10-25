@@ -15,6 +15,7 @@ PAGES = [
     ("/providers", ".console-shell"),
     ("/keys", ".console-shell"),
     ("/settings", ".console-shell"),
+    ("/clients", ".console-shell"),
     # /wall 不在 AppShell 里，外壳信号是 .wall-root
     ("/wall", ".wall-root"),
 ]

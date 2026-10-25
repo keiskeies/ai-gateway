@@ -1,0 +1,328 @@
+//! Claude Code：只改 `~/.claude/settings.json` 的 `env` 段。
+//!
+//! `permissions`、`hooks`、`mcpServers`、`projects` 等键原样保留；应用前备份整份文件。
+//! 撤销时只回滚"当前值仍等于我们写入值"的环境变量，用户后来改过的不动。
+
+use super::*;
+use serde_json::{json, Map, Value};
+use std::path::PathBuf;
+
+pub struct ClaudeCodeAdapter;
+
+const BASE_KEY: &str = "ANTHROPIC_BASE_URL";
+const TOKEN_KEY: &str = "ANTHROPIC_AUTH_TOKEN";
+
+fn load(path: &std::path::Path) -> AppResult<(Value, Option<Vec<u8>>)> {
+    let original = read_bytes(path)?;
+    let root = match &original {
+        Some(bytes) => serde_json::from_slice::<Value>(bytes).map_err(|error| {
+            AppError::BadRequest(format!("Cannot parse {}: {error}", path.display()))
+        })?,
+        None => json!({}),
+    };
+    if !root.is_object() {
+        return Err(AppError::BadRequest(format!(
+            "{} must contain a JSON object",
+            path.display()
+        )));
+    }
+    Ok((root, original))
+}
+
+fn env_object(root: &Value) -> AppResult<Option<&Map<String, Value>>> {
+    match root.get("env") {
+        None => Ok(None),
+        Some(Value::Object(env)) => Ok(Some(env)),
+        Some(_) => Err(AppError::BadRequest(
+            "settings.json env must be an object".to_string(),
+        )),
+    }
+}
+
+fn ensure_env(root: &mut Value) -> AppResult<&mut Map<String, Value>> {
+    if !root.get("env").is_some_and(Value::is_object) {
+        if root.get("env").is_some() {
+            return Err(AppError::BadRequest(
+                "settings.json env must be an object".to_string(),
+            ));
+        }
+        root.as_object_mut()
+            .expect("root checked by load")
+            .insert("env".to_string(), Value::Object(Map::new()));
+    }
+    Ok(root
+        .get_mut("env")
+        .and_then(Value::as_object_mut)
+        .expect("env just ensured"))
+}
+
+fn model_value(env: Option<&Map<String, Value>>, key: &str) -> Option<String> {
+    env.and_then(|env| env.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn token_from_env(env: Option<&Map<String, Value>>) -> Option<String> {
+    model_value(env, TOKEN_KEY).filter(|token| !token.trim().is_empty())
+}
+
+impl Adapter for ClaudeCodeAdapter {
+    fn id(&self) -> ClientId {
+        ClientId::ClaudeCode
+    }
+
+    fn path(&self, paths: &ClientPaths) -> PathBuf {
+        paths.claude_settings.clone()
+    }
+
+    fn status(&self, paths: &ClientPaths, _managed: Option<&Value>) -> AppResult<ClientStatus> {
+        let path = self.path(paths);
+        let Some(text) = read_text(&path)? else {
+            return Ok(ClientStatus {
+                id: self.id().as_str().into(),
+                name: self.id().display_name().into(),
+                path: path.display().to_string(),
+                exists: false,
+                detected: false,
+                managed: false,
+                backup_path: None,
+                current: ClientCurrent::default(),
+                error: None,
+                warnings: vec![],
+            });
+        };
+        let root: Value = serde_json::from_str(&text).map_err(|error| {
+            AppError::BadRequest(format!("Cannot parse {}: {error}", path.display()))
+        })?;
+        let env = env_object(&root)?;
+        let mut warnings = vec![];
+        if env.is_some_and(|env| env.contains_key("ANTHROPIC_API_KEY")) {
+            warnings.push(
+                "ANTHROPIC_API_KEY is also set; Claude Code may prefer it over ANTHROPIC_AUTH_TOKEN."
+                    .to_string(),
+            );
+        }
+        Ok(ClientStatus {
+            id: self.id().as_str().into(),
+            name: self.id().display_name().into(),
+            path: path.display().to_string(),
+            exists: true,
+            detected: true,
+            managed: false,
+            backup_path: None,
+            current: ClientCurrent {
+                base_url: model_value(env, BASE_KEY),
+                model: model_value(env, "ANTHROPIC_MODEL"),
+                key_present: token_from_env(env).is_some(),
+                provider: None,
+            },
+            error: None,
+            warnings,
+        })
+    }
+
+    fn current_token(&self, paths: &ClientPaths) -> AppResult<Option<String>> {
+        let path = self.path(paths);
+        let Some(text) = read_text(&path)? else {
+            return Ok(None);
+        };
+        let root: Value = serde_json::from_str(&text).map_err(|error| {
+            AppError::BadRequest(format!("Cannot parse {}: {error}", path.display()))
+        })?;
+        Ok(token_from_env(env_object(&root)?))
+    }
+
+    fn plan(
+        &self,
+        paths: &ClientPaths,
+        models: &ResolvedModels,
+        base_url: &str,
+        token: &str,
+        _allow_existing: bool,
+    ) -> AppResult<ClientPlan> {
+        let path = self.path(paths);
+        let (mut root, original) = load(&path)?;
+        let env_existed = root.get("env").is_some();
+        let before_token = env_object(&root).ok().and_then(token_from_env);
+        let env = ensure_env(&mut root)?;
+
+        let values = [
+            (BASE_KEY, base_url.to_string(), false),
+            (TOKEN_KEY, token.to_string(), true),
+            ("ANTHROPIC_MODEL", models.default.clone(), false),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", models.sonnet.clone(), false),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", models.sonnet.clone(), false),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", models.opus.clone(), false),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", models.opus.clone(), false),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", models.haiku.clone(), false),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", models.haiku.clone(), false),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL", models.fable.clone(), false),
+            ("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME", models.fable.clone(), false),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", models.subagent.clone(), false),
+        ];
+
+        let mut changes = Vec::new();
+        let mut managed_env = Map::new();
+        for (key, value, secret) in &values {
+            let before = env.get(*key).cloned();
+            changes.push(change(
+                format!("env.{key}"),
+                before.clone(),
+                json!(value),
+                *secret,
+            ));
+            if !secret {
+                managed_env.insert(
+                    (*key).to_string(),
+                    json!({
+                        "before": before.unwrap_or(Value::Null),
+                        "after": value,
+                    }),
+                );
+            }
+            env.insert((*key).to_string(), json!(value));
+        }
+
+        let mut warnings = Vec::new();
+        if env.contains_key("ANTHROPIC_API_KEY") {
+            warnings.push(
+                "ANTHROPIC_API_KEY is also set; Claude Code may prefer it over ANTHROPIC_AUTH_TOKEN."
+                    .to_string(),
+            );
+        }
+        if before_token.as_deref().is_some_and(|previous| previous != token) {
+            warnings.push(
+                "An existing ANTHROPIC_AUTH_TOKEN was replaced; the previous value is only in the backup."
+                    .to_string(),
+            );
+        }
+
+        let managed = json!({
+            "created_file": original.is_none(),
+            "created_env": !env_existed,
+            "token_key": TOKEN_KEY,
+            "token_before_present": before_token.is_some(),
+            "env": managed_env,
+        });
+        let content = json_pretty(&root)?;
+
+        Ok(ClientPlan {
+            path,
+            original,
+            content,
+            changes,
+            managed,
+            warnings,
+        })
+    }
+
+    fn restore(&self, paths: &ClientPaths, managed: &Value) -> AppResult<RestorePlan> {
+        let path = self.path(paths);
+        let (mut root, original) = load(&path)?;
+        if original.is_none() {
+            return Ok(RestorePlan {
+                path,
+                original,
+                content: vec![],
+                restored: vec![],
+                kept: vec![],
+                warnings: vec!["The config file no longer exists; nothing to restore.".to_string()],
+                remove_file: false,
+                changed: false,
+            });
+        }
+
+        let managed_env = managed
+            .get("env")
+            .and_then(Value::as_object)
+            .ok_or_else(|| AppError::BadRequest("Managed Claude state is invalid".to_string()))?;
+        let token_key = managed
+            .get("token_key")
+            .and_then(Value::as_str)
+            .unwrap_or(TOKEN_KEY);
+        let token_hash = managed.get("token_hash").and_then(Value::as_str);
+        let token_before_present = managed
+            .get("token_before_present")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let mut restored = Vec::new();
+        let mut kept = Vec::new();
+        let mut warnings = Vec::new();
+        {
+            let env = root
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "settings.json env is missing or not an object; restore the backup instead."
+                            .to_string(),
+                    )
+                })?;
+
+            for (key, entry) in managed_env {
+                let Some(after) = entry.get("after") else { continue };
+                if env.get(key) != Some(after) {
+                    kept.push(KeptChange {
+                        path: format!("env.{key}"),
+                        reason: "Value changed after this client was applied.".to_string(),
+                    });
+                    continue;
+                }
+                let before = entry.get("before").cloned().unwrap_or(Value::Null);
+                if before.is_null() {
+                    env.remove(key);
+                } else {
+                    env.insert(key.clone(), before);
+                }
+                restored.push(format!("env.{key}"));
+            }
+
+            if let Some(current) = env.get(token_key).and_then(Value::as_str) {
+                let current = current.trim().to_string();
+                if token_hash.is_some_and(|hash| sha256_hex(&current) == hash) {
+                    env.remove(token_key);
+                    restored.push(format!("env.{token_key}"));
+                    if token_before_present {
+                        warnings.push(
+                            "The previous ANTHROPIC_AUTH_TOKEN cannot be restored in place; use the pre-apply backup if you need the original credential."
+                                .to_string(),
+                        );
+                    }
+                } else if !current.is_empty() {
+                    kept.push(KeptChange {
+                        path: format!("env.{token_key}"),
+                        reason: "Token changed after this client was applied.".to_string(),
+                    });
+                }
+            }
+        }
+
+        let created_env = managed
+            .get("created_env")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if created_env && root.get("env").is_some_and(|env| env.as_object().is_some_and(Map::is_empty)) {
+            root.as_object_mut().expect("root object").remove("env");
+        }
+
+        let created_file = managed
+            .get("created_file")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let remove_file = created_file && root.as_object().is_some_and(Map::is_empty);
+        let content = if remove_file { vec![] } else { json_pretty(&root)? };
+        let changed = remove_file || original.as_deref() != Some(content.as_slice());
+
+        Ok(RestorePlan {
+            path,
+            original,
+            content,
+            restored,
+            kept,
+            warnings,
+            remove_file,
+            changed,
+        })
+    }
+}
