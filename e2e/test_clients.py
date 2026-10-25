@@ -240,3 +240,42 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     assert not violations, json.dumps(violations, ensure_ascii=False)[:1500]
     assert errors == [], errors
     page.close()
+
+def test_codex_extras_render_from_the_server_field_table(clients_setup, browser_factory):
+    """Codex 没有手写表单：字段表由服务端下发，前端通用渲染。"""
+    instance, home = clients_setup
+    console = browser_factory(instance.api, init=INIT)
+    page = console.new_page()
+    console.goto(page, "/clients", ".console-shell")
+    page.wait_for_selector(".console-client", timeout=15000)
+
+    codex = _card(page, "Codex")
+    _click_in(codex, "接入")
+    codex.locator(".console-client-body").wait_for(state="visible", timeout=10000)
+    _click_in(codex, "更多设置")
+    block = codex.locator(".console-client-block-body").last
+    assert "这个客户端的附加项" in codex.locator(".console-client-more").inner_text()
+    # 下拉挂在 body 末尾的 portal 里，按 aria-controls 定位到这一个 Select 的面板
+    choice = codex.locator(".console-client-extra-choice .mantine-Select-input")
+    choice.wait_for(state="visible", timeout=10000)
+    # 只有这一个下拉里有 "high"，按文本取即可（其他下拉的选项都是模型名）
+    choice.evaluate("el => el.click()")
+    option = page.locator("[role=option]", has_text="high").first
+    option.wait_for(state="visible", timeout=10000)
+    option.evaluate("el => el.click()")
+    assert choice.input_value() == "high", "选项没被选中，后面的差异断言就没有意义"
+    diff = _wait_diff_ready(codex)
+    assert "推理强度" in diff and "high" in diff
+
+    _click_in(codex, "接入 AI Gateway")
+    codex.locator(".console-client-result").wait_for(state="visible", timeout=15000)
+    written = (home / ".codex" / "config.toml").read_text(encoding="utf-8")
+    # 顶层键 + 真值：写进 provider 表或写成字符串 Codex 都不认
+    assert 'model_reasoning_effort = "high"' in written, written
+    assert "multi_agent = true" in written, "features 段必须原样保留"
+    assert "[model_providers.ai-gateway]" in written
+    page.screenshot(path=str(SHOTS / "clients-codex-extras.png"), full_page=True)
+
+    violations = console.audit(page)
+    assert not violations, json.dumps(violations, ensure_ascii=False)[:800]
+    page.close()

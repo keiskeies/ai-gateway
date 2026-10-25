@@ -27,17 +27,25 @@ fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
-/// 附加项只有 Claude Code 认：其他客户端传了就明确拒绝，而不是悄悄丢掉。
+/// 附加项按各客户端自己的字段表校验：不在表里的键按名字拒绝，而不是悄悄丢掉。
 fn extras_for(
     id: ClientId,
     request: &ClientApplyRequest,
     managed: Option<Value>,
 ) -> AppResult<ClientExtras> {
-    let extras = request.extras(managed)?;
-    if id != ClientId::ClaudeCode && (!extras.env.is_empty() || !extras.tier_names.is_empty()) {
+    let mut extras = request.extras(managed)?;
+    let specs = adapter(id).extra_specs();
+    extras.env = validate_extras(&specs, &extras.env)?;
+    if specs.is_empty() && !extras.env.is_empty() {
         return Err(AppError::BadRequest(format!(
-            "{id} has no extra settings to manage; only Claude Code does"
+            "{} has no extra settings to manage",
+            id.as_str()
         )));
+    }
+    if id != ClientId::ClaudeCode && !extras.tier_names.is_empty() {
+        return Err(AppError::BadRequest(
+            "Model tier display names belong to Claude Code".to_string(),
+        ));
     }
     Ok(extras)
 }
@@ -195,6 +203,14 @@ fn disable_key(pool: &DbPool, key_id: Option<&str>) -> (Option<String>, bool, Ve
         Ok(_) => (None, false, vec![]),
         Err(error) => (None, false, vec![format!("Failed to look up gateway key: {error}")]),
     }
+}
+
+/// 各客户端可代写的附加字段；前端按它渲染，加字段不用改前端。
+pub fn extras_spec() -> Vec<(String, Vec<ExtraSpec>)> {
+    ClientId::ALL
+        .iter()
+        .map(|id| (id.as_str().to_string(), adapter(*id).extra_specs()))
+        .collect()
 }
 
 pub fn list(pool: &DbPool, paths: &ClientPaths) -> AppResult<Vec<ClientStatus>> {

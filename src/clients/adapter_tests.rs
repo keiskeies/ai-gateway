@@ -470,7 +470,10 @@ fn only_allowlisted_env_keys_are_accepted() {
         )])),
         ..Default::default()
     };
-    let error = request.extras(None).expect_err("unknown key must be refused");
+    let specs = claude_extra_specs();
+    let extras = request.extras(None).expect("extras");
+    let error = validate_extras(&specs, &extras.env)
+        .expect_err("unknown key must be refused");
     assert!(matches!(error, AppError::BadRequest(_)), "{error}");
 
     let numeric = ClientApplyRequest {
@@ -480,8 +483,13 @@ fn only_allowlisted_env_keys_are_accepted() {
             "soon".to_string(),
         )])),
         ..Default::default()
-    };
-    assert!(numeric.extras(None).is_err(), "a numeric knob must be a number");
+    }
+    .extras(None)
+    .expect("extras");
+    assert!(
+        validate_extras(&specs, &numeric.env).is_err(),
+        "a numeric knob must be a number"
+    );
 }
 
 #[test]
@@ -534,4 +542,71 @@ fn raw_config_editing_rejects_empty_and_non_object_content() {
         );
     }
     let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_extras_are_typed_top_level_and_reversible() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &codex::CodexAdapter;
+    write(&adapter.path(&paths), "model = \"gpt-5\"
+
+[features]
+multi_agent = true
+");
+
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("model_reasoning_effort".to_string(), "high".to_string());
+    values.insert("disable_response_storage".to_string(), "1".to_string());
+    let plan = apply_plan_with(
+        adapter,
+        &paths,
+        "sk-aigw-unit-test-token-0123456789",
+        &ClientExtras {
+            tier_names: Default::default(),
+            env: values,
+            managed: None,
+        },
+    );
+    let text = String::from_utf8(plan.content.clone()).expect("utf8");
+    // 顶层键 + 真布尔：写成字符串 "true" Codex 不认
+    assert!(text.contains("model_reasoning_effort = \"high\""), "{text}");
+    assert!(text.contains("disable_response_storage = true"), "{text}");
+    assert!(text.contains("multi_agent = true"), "features 段必须原样保留");
+
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, "sk-aigw-unit-test-token-0123456789"))
+        .expect("restore");
+    let text = String::from_utf8(restored.content).expect("utf8");
+    assert!(!text.contains("model_reasoning_effort"), "{text}");
+    assert!(!text.contains("disable_response_storage"), "{text}");
+    assert!(text.contains("model = \"gpt-5\""), "{text}");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn extras_are_validated_against_the_clients_own_field_table() {
+    let request = ClientApplyRequest {
+        default_model: "agnes".to_string(),
+        env: Some(std::collections::HashMap::from([(
+            "model_reasoning_effort".to_string(),
+            "extreme".to_string(),
+        )])),
+        ..Default::default()
+    };
+    let specs = codex::CodexAdapter.extra_specs();
+    let extras = request.extras(None).expect("extras");
+    let error = validate_extras(&specs, &extras.env).expect_err("choice must be checked");
+    assert!(error.to_string().contains("must be one of"), "{error}");
+
+    let unknown = ClientApplyRequest {
+        default_model: "agnes".to_string(),
+        env: Some(std::collections::HashMap::from([(
+            "sandbox_mode".to_string(),
+            "danger-full-access".to_string(),
+        )])),
+        ..Default::default()
+    };
+    let extras = unknown.extras(None).expect("extras");
+    assert!(validate_extras(&specs, &extras.env).is_err(), "未列入字段表的键要拒绝");
 }

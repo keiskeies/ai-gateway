@@ -121,6 +121,10 @@ impl Adapter for ClaudeCodeAdapter {
         })
     }
 
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        claude_extra_specs()
+    }
+
     fn read_extras(
         &self,
         paths: &ClientPaths,

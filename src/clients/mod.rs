@@ -332,6 +332,160 @@ pub struct ResolvedModels {
     pub subagent: String,
 }
 
+/// 一个可代写的附加字段：类型由服务端说，前端只负责渲染。
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtraSpec {
+    pub key: String,
+    /// "text" | "number" | "bool" | "choice"
+    pub kind: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// 界面文案的 i18n key
+    pub label: String,
+    /// 写入位置的逻辑路径，用于差异行名（`env.API_TIMEOUT_MS`、`model_reasoning_effort`）
+    pub path: String,
+}
+
+impl ExtraSpec {
+    fn text(key: &str, label: &str, path: &str) -> Self {
+        Self {
+            key: key.into(),
+            kind: "text".into(),
+            options: vec![],
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+
+    fn number(key: &str, label: &str, path: &str) -> Self {
+        Self {
+            key: key.into(),
+            kind: "number".into(),
+            options: vec![],
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+
+    fn flag(key: &str, label: &str, path: &str) -> Self {
+        Self {
+            key: key.into(),
+            kind: "bool".into(),
+            options: vec![],
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+
+    fn choice(key: &str, label: &str, path: &str, options: &[&str]) -> Self {
+        Self {
+            key: key.into(),
+            kind: "choice".into(),
+            options: options.iter().map(|option| (*option).to_string()).collect(),
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+}
+
+/// Claude Code 的附加字段：全部落在 settings.json 的 `env` 段。
+pub fn claude_extra_specs() -> Vec<ExtraSpec> {
+    // 标签沿用页面上已有的文案键，避免同一个字段两套叫法
+    let label = |key: &str| -> String { match key {
+        "API_TIMEOUT_MS" => "clientEnvTimeout",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS" => "clientEnvMaxOutput",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS" => "clientEnvMaxContext",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW" => "clientEnvCompactWindow",
+        "ANTHROPIC_SMALL_FAST_MODEL" => "clientSmallFast",
+        "ANTHROPIC_CUSTOM_HEADERS" => "clientEnvHeaders",
+        "DISABLE_AUTOUPDATER" => "clientFlagNoUpdate",
+        "ENABLE_TOOL_SEARCH" => "clientFlagToolSearch",
+        "CLAUDE_CODE_DISABLE_ARTIFACT" => "clientFlagNoArtifact",
+        "CLAUDE_CODE_DISABLE_1M_CONTEXT" => "clientFlagNo1m",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" => "clientFlagNoTraffic",
+        "DISABLE_TELEMETRY" => "clientFlagNoTelemetry",
+        "CLAUDE_CODE_AUTO_MODE_SERVER" => "clientFlagNoAutoMode",
+        "CLAUDE_CODE_ATTRIBUTION_HEADER" => "clientFlagNoAttribution",
+        other => other,
+    }
+    .to_string()
+    };
+    CLAUDE_ENV_KEYS
+        .iter()
+        .map(|key| {
+            let path = format!("env.{key}");
+            if is_numeric_env_key(key) {
+                ExtraSpec::number(key, &label(key), &path)
+            } else if matches!(
+                *key,
+                "ENABLE_TOOL_SEARCH"
+                    | "DISABLE_AUTOUPDATER"
+                    | "CLAUDE_CODE_DISABLE_ARTIFACT"
+                    | "CLAUDE_CODE_DISABLE_1M_CONTEXT"
+                    | "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+                    | "DISABLE_TELEMETRY"
+                    | "CLAUDE_CODE_AUTO_MODE_SERVER"
+                    | "CLAUDE_CODE_ATTRIBUTION_HEADER"
+            ) {
+                ExtraSpec::flag(key, &label(key), &path)
+            } else {
+                ExtraSpec::text(key, &label(key), &path)
+            }
+        })
+        .collect()
+}
+
+/// 按字段表校验：未知键按名字拒绝，数值键必须是数字，选项键必须在选项里。
+pub fn validate_extras(
+    specs: &[ExtraSpec],
+    values: &BTreeMap<String, String>,
+) -> AppResult<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (key, value) in values {
+        let Some(spec) = specs.iter().find(|spec| spec.key == *key) else {
+            return Err(AppError::BadRequest(format!(
+                "{key} is not a managed field here; allowed: {}",
+                if specs.is_empty() {
+                    "none".to_string()
+                } else {
+                    specs
+                        .iter()
+                        .map(|spec| spec.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )));
+        };
+        let value = value.trim();
+        if value.is_empty() || value.len() > 2000 {
+            return Err(AppError::BadRequest(format!("{key} must be 1–2000 characters")));
+        }
+        match spec.kind.as_str() {
+            "number" => {
+                if value.parse::<u64>().is_err() {
+                    return Err(AppError::BadRequest(format!("{key} must be a number")));
+                }
+            }
+            "choice" => {
+                if !spec.options.iter().any(|option| option == value) {
+                    return Err(AppError::BadRequest(format!(
+                        "{key} must be one of {}",
+                        spec.options.join(", ")
+                    )));
+                }
+            }
+            "bool" => {}
+            _ => {
+                if key != "ANTHROPIC_CUSTOM_HEADERS" && value.chars().any(|c| c == '\n' || c == '\r') {
+                    return Err(AppError::BadRequest(format!("{key} must be a single line")));
+                }
+            }
+        }
+        out.insert(key.clone(), value.to_string());
+    }
+    Ok(out)
+}
+
 /// 除「地址 + Key + 模型」之外，一次写入还带着什么。
 #[derive(Debug, Clone, Default)]
 pub struct ClientExtras {
@@ -424,7 +578,11 @@ impl ClientApplyRequest {
     pub fn extras(&self, managed: Option<Value>) -> AppResult<ClientExtras> {
         Ok(ClientExtras {
             tier_names: validate_tier_names(self.tier_names.as_ref().unwrap_or(&HashMap::new()))?,
-            env: validate_env(self.env.as_ref().unwrap_or(&HashMap::new()))?,
+            env: self
+                .env
+                .as_ref()
+                .map(|entries| entries.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                .unwrap_or_default(),
             managed,
         })
     }
@@ -510,6 +668,11 @@ pub trait Adapter: Send + Sync {
         extras: &ClientExtras,
     ) -> AppResult<ClientPlan>;
     fn restore(&self, paths: &ClientPaths, managed: &Value) -> AppResult<RestorePlan>;
+
+    /// 这个客户端有哪些可代写的附加字段；前端按它渲染控件，服务端按它校验。
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        vec![]
+    }
 
     /// 读回附加项当前值（附加环境变量、档位显示名）；除 Claude Code 外都是空的。
     fn read_extras(

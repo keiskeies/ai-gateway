@@ -16,6 +16,14 @@ fn client_paths() -> AppResult<ClientPaths> {
     ClientPaths::from_env()
 }
 
+/// 各客户端可代写的附加字段表（前端按它渲染控件）
+pub async fn extras_spec() -> AppResult<HttpResponse> {
+    let specs = web::block(service::extras_spec)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    Ok(HttpResponse::Ok().json(specs))
+}
+
 pub async fn list(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
     let paths = client_paths()?;
     let db = db.into_inner();

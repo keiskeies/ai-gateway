@@ -115,6 +115,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/config/import", web::post().to(config_transfer::apply))
                 // 客户端接入：检测 / 预览 / 应用 / 撤销 / 恢复备份
                 .route("/clients", web::get().to(client_config::list))
+                    .route("/clients/extras-spec", web::get().to(client_config::extras_spec))
                 .route("/clients/{id}/preview", web::post().to(client_config::preview))
                 .route("/clients/{id}/apply", web::post().to(client_config::apply))
                 .route("/clients/{id}/restore", web::post().to(client_config::restore))

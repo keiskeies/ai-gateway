@@ -14,6 +14,7 @@ import { useNavigate } from 'react-router-dom'
 import {
   applyClient,
   getClientConfig,
+  getClientExtrasSpec,
   getSettings,
   listClients,
   listProxies,
@@ -38,6 +39,7 @@ import type {
   ClientStatus,
 } from '../types/clients'
 import type { ProxyRow } from '../types/stats'
+import type { ExtraSpec } from '../types/clients'
 
 const CLIENT_NAMES: Record<ClientId, string> = {
   claude_code: 'Claude Code',
@@ -142,8 +144,13 @@ const TIER_PATHS: Record<string, { tier: TranslationKey; name: boolean }> = {
   'env.CLAUDE_CODE_SUBAGENT_MODEL': { tier: 'clientSubagent', name: false },
 }
 
-function changeLabel(locale: Locale, path: string, kind: ChangeKind): string {
-  const friendly = FRIENDLY_ENV[path]
+function changeLabel(
+  locale: Locale,
+  path: string,
+  kind: ChangeKind,
+  labels: Record<string, TranslationKey>,
+): string {
+  const friendly = labels[path] ?? FRIENDLY_ENV[path]
   if (friendly) return t(locale, friendly)
   const tier = TIER_PATHS[path]
   if (tier) return t(locale, tier.tier) + (tier.name ? ` ${t(locale, 'clientTierDisplayName')}` : '')
@@ -188,8 +195,8 @@ const CHANGE_LABEL: Record<ChangeKind, TranslationKey> = {
   detail: 'clientChangeDetail',
 }
 
-function classifyChange(path: string): ChangeKind {
-  if (FRIENDLY_ENV[path]) return 'flag'
+function classifyChange(path: string, named: (key: string) => boolean): ChangeKind {
+  if (named(path)) return 'flag'
   const key = path.toUpperCase()
   if (/TOKEN|API_KEY|APIKEY|BEARER/.test(key)) return 'key'
   if (/BASE_URL|BASEURL/.test(key)) return 'url'
@@ -207,12 +214,12 @@ interface ChangeRow {
   secret: boolean
 }
 
-function splitChanges(changes: ClientChange[]) {
+function splitChanges(changes: ClientChange[], named: (key: string) => boolean) {
   // 值本来就等于目标的条目不显示：列出来只会让人以为要改（密钥行永远要写，保留）
   const rows: ChangeRow[] = changes
     .filter(change => change.secret || (change.before ?? '') !== change.after)
     .map(change => ({
-      kind: classifyChange(change.path),
+      kind: classifyChange(change.path, named),
       path: change.path,
       before: change.before ?? '',
       after: change.after,
@@ -290,6 +297,17 @@ function warningText(warning: string, locale: Locale): string {
   return hit ? hit.text : warning
 }
 
+/** 字段表里的 path → 文案键；Claude 的 env.* 也走同一张表 */
+function useExtraLabels(specs: Record<string, ExtraSpec[]> | undefined) {
+  return useCallback(
+    (id: ClientId): Record<string, TranslationKey> =>
+      Object.fromEntries(
+        (specs?.[id] ?? []).map(spec => [spec.path, spec.label as TranslationKey]),
+      ),
+    [specs],
+  )
+}
+
 export default function Clients() {
   const { locale } = useAppContext()
   const navigate = useNavigate()
@@ -306,6 +324,12 @@ export default function Clients() {
     queryKey: ['settings'],
     queryFn: () => getSettings(),
     staleTime: 60_000,
+  })
+
+  const extrasQuery = useQuery({
+    queryKey: ['client-extras-spec'],
+    queryFn: () => getClientExtrasSpec() as Promise<Record<string, ExtraSpec[]>>,
+    staleTime: 600_000,
   })
 
   const clients = clientsQuery.data ?? []
@@ -333,8 +357,10 @@ export default function Clients() {
   const [configBusy, setConfigBusy] = useState(false)
   const previewSeq = useRef(0)
   const seededFor = useRef<ClientId | null>(null)
+  const touched = useRef(false)
 
   const active = clients.find(client => client.id === expanded) ?? null
+  const extraLabels = useExtraLabels(extrasQuery.data)
 
   useEffect(() => {
     if (!modelNames.length) return
@@ -363,6 +389,7 @@ export default function Clients() {
   }, [clientsQuery])
 
   const setEnvKey = (key: string, value: string | null | undefined) => {
+    touched.current = true
     setEnv(current => {
       const next = { ...current }
       const trimmed = (value ?? '').trim()
@@ -385,6 +412,8 @@ export default function Clients() {
     return {
       base_url: baseUrl.trim() || undefined,
       default_model: defaultModel,
+      // 附加键对所有客户端都要发（服务端按各自字段表校验），档位显示名只有 Claude Code 有
+      env: Object.keys(kept).length > 0 ? kept : undefined,
       ...(expanded === 'claude_code'
         ? {
             sonnet_model: tiers.sonnet || undefined,
@@ -393,16 +422,17 @@ export default function Clients() {
             fable_model: tiers.fable || undefined,
             subagent_model: tiers.subagent || undefined,
             tier_names: Object.keys(names).length > 0 ? names : undefined,
-            env: Object.keys(kept).length > 0 ? kept : undefined,
           }
         : {}),
     }
   }
 
-  // 第一次拿到预览时用文件里的真实值回填：不然「没勾」到底是「没开」还是「没读到」，用户无从判断
+  // 第一次拿到预览时用文件里的真实值回填：不然「没勾」到底是「没开」还是「没读到」，用户无从判断。
+  // 用户已经动过表单就不再播种，否则回读会把他刚选的值冲掉。
   useEffect(() => {
     if (!preview || !expanded || seededFor.current === expanded) return
     seededFor.current = expanded
+    if (touched.current) return
     setEnv(preview.env)
     setTierNames(preview.tier_names)
   }, [preview, expanded])
@@ -434,6 +464,7 @@ export default function Clients() {
 
   const openCard = (id: ClientId) => {
     seededFor.current = null
+    touched.current = false
     setNotice(null)
     setShowExtra(false)
     setShowMore(false)
@@ -562,7 +593,9 @@ export default function Clients() {
         {present.map(client => {
           const open = expanded === client.id
           const needs = [client.error, ...client.warnings].filter(Boolean) as string[]
-          const diff = preview ? splitChanges(preview.changes) : null
+          const labels = extraLabels(client.id)
+          const named = (key: string) => key in labels || key in FRIENDLY_ENV
+          const diff = preview ? splitChanges(preview.changes, named) : null
           return (
             <article key={client.id} className={`console-client${open ? ' open' : ''}${client.managed ? ' managed' : ''}${client.error ? ' err' : ''}`}>
               <div className="console-client-head">
@@ -653,6 +686,21 @@ export default function Clients() {
                               <div className="console-client-note">{t(locale, 'clientGatewayUrlDesc')}</div>
                             </div>
                           </div>
+
+                          {client.id !== 'claude_code' && (extrasQuery.data?.[client.id]?.length ?? 0) > 0 && (
+                            <div className="console-client-block">
+                              <div className="console-client-block-head">{t(locale, 'clientExtrasTitle')}</div>
+                              <div className="console-client-block-body">
+                                <ExtraFields
+                                  specs={extrasQuery.data?.[client.id] ?? []}
+                                  values={env}
+                                  onChange={setEnvKey}
+                                  disabled={busy !== null}
+                                  locale={locale}
+                                />
+                              </div>
+                            </div>
+                          )}
 
                           {client.id === 'claude_code' && (
                             <>
@@ -785,6 +833,8 @@ export default function Clients() {
                         showExtra={showExtra}
                         onToggleExtra={() => setShowExtra(value => !value)}
                         locale={locale}
+                        labels={labels}
+                        named={named}
                       />
 
                       <div className="console-client-actions">
@@ -974,6 +1024,65 @@ export default function Clients() {
   )
 }
 
+
+function ExtraFields({
+  specs,
+  values,
+  onChange,
+  disabled,
+  locale,
+}: {
+  specs: ExtraSpec[]
+  values: Record<string, string>
+  onChange: (key: string, value: string | null) => void
+  disabled: boolean
+  locale: Locale
+}) {
+  return (
+    <>
+      {specs.map(spec => {
+        const current = values[spec.key] ?? ''
+        if (spec.kind === 'bool') {
+          return (
+            <Checkbox
+              key={spec.key}
+              size="xs"
+              label={t(locale, spec.label)}
+              checked={current === '1' || current === 'true'}
+              onChange={event => onChange(spec.key, event.currentTarget.checked ? '1' : null)}
+            />
+          )
+        }
+        return (
+          <Field key={spec.key} label={t(locale, spec.label)}>
+            {spec.kind === 'choice' ? (
+              <Select
+                size="xs"
+                className="console-client-extra-choice"
+                data={(spec.options ?? []).map(option => ({ value: option, label: option }))}
+                value={current || null}
+                onChange={value => onChange(spec.key, value)}
+                placeholder={t(locale, 'clientNone')}
+                clearable
+                clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
+                disabled={disabled}
+              />
+            ) : (
+              <TextInput
+                size="xs"
+                inputMode={spec.kind === 'number' ? 'numeric' : undefined}
+                value={current}
+                onChange={event => onChange(spec.key, event.currentTarget.value)}
+                disabled={disabled}
+              />
+            )}
+          </Field>
+        )
+      })}
+    </>
+  )
+}
+
 function ClientDiff({
   diff,
   preview,
@@ -981,6 +1090,8 @@ function ClientDiff({
   showExtra,
   onToggleExtra,
   locale,
+  labels,
+  named,
 }: {
   diff: ReturnType<typeof splitChanges> | null
   preview: ClientPreview | null
@@ -988,6 +1099,8 @@ function ClientDiff({
   showExtra: boolean
   onToggleExtra: () => void
   locale: Locale
+  labels: Record<string, TranslationKey>
+  named: (key: string) => boolean
 }) {
   const changes = diff
   return (
@@ -1008,7 +1121,7 @@ function ClientDiff({
             {changes.primary.map(row => (
               <li key={row.path}>
                 <span className="console-client-diff-label">
-                  {changeLabel(locale, row.path, row.kind)}
+                  {changeLabel(locale, row.path, row.kind, labels)}
                 </span>
                 <span className="console-client-diff-value">
                   {row.before && !row.secret && <span className="console-client-diff-before">{row.before}</span>}
@@ -1040,7 +1153,7 @@ function ClientDiff({
                   <ul className="console-client-diff muted">
                     {changes.extra.map(row => (
                       <li key={row.path}>
-                        <span className="console-client-diff-label">{changeLabel(locale, row.path, row.kind)}</span>
+                        <span className="console-client-diff-label">{changeLabel(locale, row.path, row.kind, labels)}</span>
                         <span className="console-client-diff-value console-mono">
                           {row.secret ? t(locale, 'clientSecretNew') : row.after}
                         </span>

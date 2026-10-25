@@ -8,6 +8,7 @@ use super::*;
 use serde_json::json;
 use std::path::PathBuf;
 use toml_edit::{value, DocumentMut, Item, Table};
+use crate::clients::ExtraSpec;
 
 pub struct CodexAdapter;
 
@@ -43,6 +44,42 @@ fn field(table: Option<&Table>, key: &str) -> Option<String> {
 
 fn bool_field(table: Option<&Table>, key: &str) -> Option<bool> {
     table.and_then(|table| table.get(key)).and_then(Item::as_bool)
+}
+
+/// 顶层附加键的类型由字段表决定：布尔开关必须写成真布尔，否则 Codex 不认。
+fn typed_top(key: &str, setting: &str) -> Value {
+    if key == "disable_response_storage" {
+        json!(setting == "1" || setting == "true")
+    } else {
+        json!(setting)
+    }
+}
+
+fn json_of_item(item: Option<&Item>) -> Option<Value> {
+    match item {
+        Some(Item::Value(toml_edit::Value::String(text))) => Some(json!(text.value().clone())),
+        Some(Item::Value(value)) => {
+            let text = value.to_string();
+            let text = text.trim();
+            if text == "true" || text == "false" {
+                Some(json!(text == "true"))
+            } else if let Ok(number) = text.parse::<i64>() {
+                Some(json!(number))
+            } else {
+                Some(json!(text.trim_matches('"').to_string()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn json_to_toml(value: &Value) -> toml_edit::Value {
+    match value {
+        Value::Bool(flag) => toml_edit::Value::from(*flag),
+        Value::String(text) => toml_edit::Value::from(text.clone()),
+        Value::Number(number) => toml_edit::Value::from(number.as_i64().unwrap_or(0)),
+        other => toml_edit::Value::from(other.to_string()),
+    }
 }
 
 impl Adapter for CodexAdapter {
@@ -115,6 +152,51 @@ impl Adapter for CodexAdapter {
         Ok(field(provider_table(&doc), TOKEN_FIELD).filter(|token| !token.trim().is_empty()))
     }
 
+    /// 顶层键，不是 provider 表里的字段——写错层 Codex 会直接忽略。
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        vec![
+            ExtraSpec::choice(
+                "model_reasoning_effort",
+                "clientCodexReasoning",
+                "model_reasoning_effort",
+                &["minimal", "low", "medium", "high"],
+            ),
+            ExtraSpec::flag(
+                "disable_response_storage",
+                "clientCodexNoStorage",
+                "disable_response_storage",
+            ),
+        ]
+    }
+
+    fn read_extras(
+        &self,
+        paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let Ok(Some(text)) = read_text(&self.path(paths)) else {
+            return (BTreeMap::new(), BTreeMap::new());
+        };
+        let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+            return (BTreeMap::new(), BTreeMap::new());
+        };
+        let read = |key: &str| {
+            doc.get(key).and_then(|item| match item {
+                toml_edit::Item::Value(toml_edit::Value::String(text)) => Some(text.value().clone()),
+                toml_edit::Item::Value(other) => Some(other.to_string().trim().to_string()),
+                _ => None,
+            })
+        };
+        let extras = ["model_reasoning_effort", "disable_response_storage"]
+            .iter()
+            .filter_map(|key| {
+                read(key)
+                    .map(|value| (key.to_string(), value))
+                    .filter(|(_, value)| !value.trim().is_empty() && value != "None")
+            })
+            .collect();
+        (extras, BTreeMap::new())
+    }
+
     fn plan(
         &self,
         paths: &ClientPaths,
@@ -122,7 +204,7 @@ impl Adapter for CodexAdapter {
         base_url: &str,
         token: &str,
         allow_existing: bool,
-        _extras: &ClientExtras,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut doc, original) = load(&path)?;
@@ -154,6 +236,12 @@ impl Adapter for CodexAdapter {
         table.insert(TOKEN_FIELD, value(token));
         table.insert("requires_openai_auth", value(false));
         providers.insert(PROVIDER_ID, Item::Table(table));
+        // 先记下原值再写：写完才读会把"我们刚写的值"当成用户原件，撤销就回不去
+        let mut before_extras = std::collections::BTreeMap::new();
+        for (key, setting) in &extras.env {
+            before_extras.insert(key.clone(), json_of_item(doc.get(key.as_str())));
+            doc.insert(key.as_str(), value(json_to_toml(&typed_top(key, setting))));
+        }
 
         let mut changes = vec![
             change("model", before_model.clone().map(Value::String), json!(models.default), false),
@@ -185,6 +273,22 @@ impl Adapter for CodexAdapter {
             ));
         }
 
+        let mut top_extra = serde_json::Map::new();
+        for (key, setting) in &extras.env {
+            let before = before_extras.get(key).cloned().flatten();
+            let after = typed_top(key, setting);
+            changes.push(change(
+                key.clone(),
+                before.clone(),
+                after.clone(),
+                false,
+            ));
+            top_extra.insert(
+                key.clone(),
+                json!({ "before": before.unwrap_or(Value::Null), "after": after }),
+            );
+        }
+
         let mut warnings = vec![
             "Codex is configured with wire_api = \"chat\"; Responses-only features may be unavailable."
                 .to_string(),
@@ -210,7 +314,8 @@ impl Adapter for CodexAdapter {
             "provider_id": PROVIDER_ID,
             "top": {
                 "model": {"before": before_model, "after": models.default},
-                "model_provider": {"before": before_provider, "after": PROVIDER_ID}
+                "model_provider": {"before": before_provider, "after": PROVIDER_ID},
+                "extra": top_extra
             },
             "provider": {
                 "name": "AI Gateway",
@@ -255,28 +360,39 @@ impl Adapter for CodexAdapter {
         let mut warnings = Vec::new();
 
         if let Some(top) = managed.get("top").and_then(Value::as_object) {
-            for key in ["model", "model_provider"] {
-                let Some(entry) = top.get(key) else { continue };
-                let after = entry.get("after").and_then(Value::as_str);
-                let current = doc.get(key).and_then(Item::as_str);
-                if current != after {
+            let mut entries: Vec<(String, Value)> = ["model", "model_provider"]
+                .iter()
+                .filter_map(|key| top.get(*key).map(|entry| ((*key).to_string(), entry.clone())))
+                .collect();
+            // 附加顶层键是后加的，键名不固定，只能照着记录本身回滚
+            if let Some(extra) = top.get("extra").and_then(Value::as_object) {
+                entries.extend(extra.iter().map(|(key, entry)| (key.clone(), entry.clone())));
+            }
+            for (key, entry) in entries {
+                let after = entry.get("after");
+                let current = json_of_item(doc.get(key.as_str()));
+                let untouched = match after {
+                    None => continue,
+                    Some(after) => current == Some(after.clone()) || (current.is_none() && after.is_null()),
+                };
+                if !untouched {
                     if current.is_some() {
                         kept.push(KeptChange {
-                            path: key.to_string(),
+                            path: key.clone(),
                             reason: "Value changed after this client was applied.".to_string(),
                         });
                     }
                     continue;
                 }
-                match entry.get("before").and_then(Value::as_str) {
-                    Some(before) => {
-                        doc.insert(key, value(before));
+                match entry.get("before") {
+                    Some(before) if !before.is_null() => {
+                        doc.insert(key.as_str(), value(json_to_toml(before)));
                     }
-                    None => {
-                        doc.remove(key);
+                    _ => {
+                        doc.remove(key.as_str());
                     }
                 }
-                restored.push(key.to_string());
+                restored.push(key);
             }
         }
 
