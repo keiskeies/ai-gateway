@@ -80,10 +80,18 @@ def timeline_instance(instances, mock_upstream):
     return instance
 
 
-def _open_single(console, page, api) -> None:
-    console.goto(page, "/wall", ".wall-root")
-    page.wait_for_selector(".wall-mx-model-btn", timeout=15000)
-    # 页头时段：默认「今日」在凌晨可能不覆盖 -3h，固定切到 24h
+def _switch_to_24h(page) -> None:
+    """页头时段先切 24h 再等矩阵。
+
+    默认「今日」的起点是本地零点，而种子在 -3h/-1h：凌晨跑测试时今日窗口里没有行，
+    矩阵不渲染按钮，等 `.wall-mx-model-btn` 只会超时。24h 窗口与本地日界无关。
+    """
+    # Mantine 把 radio 藏起来了（可见的是 label），所以只能等 attached 再 programmatic click
+    page.wait_for_selector(
+        '.wall-page-head .mantine-SegmentedControl-root input[value="24h"]',
+        state="attached",
+        timeout=15000,
+    )
     page.evaluate(
         """() => {
             const input = document.querySelector('.wall-page-head .mantine-SegmentedControl-root input[value="24h"]');
@@ -91,6 +99,12 @@ def _open_single(console, page, api) -> None:
             input.click();
         }"""
     )
+
+
+def _open_single(console, page, api) -> None:
+    console.goto(page, "/wall", ".wall-root")
+    _switch_to_24h(page)
+    page.wait_for_selector(".wall-mx-model-btn", timeout=15000)
     page.wait_for_selector('.wall-trend-panel .mantine-SegmentedControl-root input[value="single"]', state="attached", timeout=15000)
     page.evaluate(
         """() => {
@@ -261,6 +275,7 @@ def test_single_model_failure_is_named_not_zero(timeline_instance, browser_facto
 
     page.route("**/api/stats/model-timeseries*", lambda route: route.abort())
     console.goto(page, "/wall", ".wall-root")
+    _switch_to_24h(page)
     page.wait_for_selector(".wall-mx-model-btn", timeout=15000)
     page.evaluate(
         """() => {

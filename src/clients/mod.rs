@@ -484,7 +484,25 @@ pub fn validate_extras(
                     )));
                 }
             }
-            "bool" | "headers" => {}
+            "bool" => {}
+            "headers" => {
+                // 每行都得是「名称: 值」，否则会被 parse_headers 静默丢掉，最后写出一个空对象
+                let lines = value.lines().filter(|line| !line.trim().is_empty());
+                let mut pairs = 0;
+                for line in lines {
+                    match line.split_once(':') {
+                        Some((name, header)) if !name.trim().is_empty() && !header.trim().is_empty() => pairs += 1,
+                        _ => {
+                            return Err(AppError::BadRequest(format!(
+                                "{key} expects one \"Name: value\" per line, got \"{line}\""
+                            )))
+                        }
+                    }
+                }
+                if pairs == 0 {
+                    return Err(AppError::BadRequest(format!("{key} has no \"Name: value\" line")));
+                }
+            }
             _ => {
                 if key != "ANTHROPIC_CUSTOM_HEADERS" && value.chars().any(|c| c == '\n' || c == '\r') {
                     return Err(AppError::BadRequest(format!("{key} must be a single line")));

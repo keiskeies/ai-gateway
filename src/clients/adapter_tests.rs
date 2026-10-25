@@ -838,3 +838,17 @@ fn codex_drops_a_top_level_extra_when_the_switch_is_turned_off() {
     assert!(text.contains("model = \"gpt-5\""), "{text}");
     let _ = fs::remove_dir_all(&home);
 }
+
+#[test]
+fn header_extras_are_rejected_when_a_line_is_not_name_value() {
+    let specs = pi::PiAdapter.extra_specs();
+    for value in ["garbage", "X-Ok: yes
+broken line", ": empty-name"] {
+        let values = std::collections::BTreeMap::from([("headers".to_string(), value.to_string())]);
+        let error = validate_extras(&specs, &values)
+            .expect_err("a line without \"Name: value\" must be refused, not written as {}");
+        assert!(error.to_string().contains("Name: value"), "{error}");
+    }
+    let good = std::collections::BTreeMap::from([("headers".to_string(), "X-Ok: yes".to_string())]);
+    assert!(validate_extras(&specs, &good).is_ok());
+}
