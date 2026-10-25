@@ -1,6 +1,7 @@
-"""客户端接入页：临时 HOME + 真实格式的 Claude 配置，走“预览 → 应用 → 撤销”。
+"""客户端接入页：临时 HOME + 真实格式的 Claude / Codex 配置，走「接入 → 撤销」。
 
 不碰当前用户的 ~/.claude；AIGW_CLIENT_HOME 把六种客户端的路径全部锁在临时目录。
+截图留在 .dsh-tmp/clients/，用于按第一次使用的人的视角检查排版。
 """
 
 import json
@@ -19,11 +20,13 @@ ORIGINAL = {
     "permissions": {"allow": ["Bash"]},
     "mcpServers": {"fs": {"command": "npx"}},
     "env": {
-        "ANTHROPIC_BASE_URL": "http://old",
+        "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
         "ANTHROPIC_AUTH_TOKEN": "old-token",
         "ANTHROPIC_MODEL": "old-model",
     },
 }
+
+CODEX = 'model = "gpt-5"\n\n[features]\nmulti_agent = true\n'
 
 
 @pytest.fixture(scope="module")
@@ -32,14 +35,15 @@ def clients_setup(instances):
     base.mkdir(parents=True, exist_ok=True)
     home = Path(tempfile.mkdtemp(prefix="aigw-clients-", dir=str(base)))
     (home / ".claude").mkdir(parents=True, exist_ok=True)
-    settings = home / ".claude" / "settings.json"
-    settings.write_text(json.dumps(ORIGINAL, ensure_ascii=False, indent=2), encoding="utf-8")
+    (home / ".claude" / "settings.json").write_text(
+        json.dumps(ORIGINAL, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (home / ".codex").mkdir(parents=True, exist_ok=True)
+    (home / ".codex" / "config.toml").write_text(CODEX, encoding="utf-8")
 
     instance = instances("clients", extra_env={"AIGW_CLIENT_HOME": str(home)})
-    api = instance.api
-    api.setup_admin()
-    db = instance.dir / "data" / "ai-gateway.db"
-    with sqlite3.connect(db) as conn:
+    instance.api.setup_admin()
+    with sqlite3.connect(instance.dir / "data" / "ai-gateway.db") as conn:
         conn.execute(
             "INSERT INTO proxies (id, name, created_at) VALUES ('p-agnes', 'agnes', '2026-01-01T00:00:00Z')"
         )
@@ -48,16 +52,24 @@ def clients_setup(instances):
     shutil.rmtree(home, ignore_errors=True)
 
 
-def _wait_enabled(page, text: str, timeout: int = 15000) -> None:
-    page.wait_for_function(
-        """(text) => [...document.querySelectorAll('button')]
-            .some(button => button.textContent.trim() === text && !button.disabled)""",
-        arg=text,
-        timeout=timeout,
-    )
+def _card(page, name: str):
+    return page.locator(".console-client", has=page.locator(f".console-client-name:text-is('{name}')"))
 
 
-def test_claude_code_apply_and_restore_from_page(clients_setup, browser_factory):
+def _click_in(locator, text: str) -> None:
+    """在指定卡片里按可见文案点按钮，避免同名按钮跨卡片误点。"""
+    button = locator.locator("button", has_text=text).first
+    button.wait_for(state="visible", timeout=10000)
+    button.evaluate("el => el.click()")
+
+
+def _wait_diff_ready(card) -> str:
+    card.locator(".console-client-computing").wait_for(state="detached", timeout=15000)
+    card.locator(".console-client-diff, .console-client-same").first.wait_for(state="visible", timeout=10000)
+    return card.locator(".console-client-changes").inner_text()
+
+
+def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_factory):
     instance, home = clients_setup
     api = instance.api
     console = browser_factory(api, init=INIT)
@@ -67,65 +79,83 @@ def test_claude_code_apply_and_restore_from_page(clients_setup, browser_factory)
     page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
 
     console.goto(page, "/clients", ".console-shell")
-    page.wait_for_selector(".console-clients-table", timeout=15000)
-    _wait_enabled(page, "预览变更")
-
-    table = page.inner_text(".console-clients-table")
-    assert "Claude Code" in table
-    assert "已检测到" in table
-    paths = page.evaluate("() => [...document.querySelectorAll('.console-clients-path')].map(el => el.getAttribute('title'))")
-    assert str(home / ".claude" / "settings.json") in paths
-    assert "未检测到" in table, "the isolated home must not leak the real Hermes config"
-
-    console.click_text(page, "预览变更", "button")
-    page.wait_for_selector(".console-clients-preview", timeout=10000)
-    preview = page.inner_text(".console-clients-preview")
-    assert "env.ANTHROPIC_BASE_URL" in preview
-    assert "env.ANTHROPIC_MODEL" in preview
-    assert "应用时写入新 Key" in preview
-    assert "sk-aigw-" not in preview, "preview must never contain the real gateway secret"
+    page.wait_for_selector(".console-client", timeout=15000)
     SHOTS.mkdir(parents=True, exist_ok=True)
-    page.screenshot(path=str(SHOTS / "clients-preview.png"), full_page=True)
 
-    console.click_text(page, "应用接入", "button")
-    page.wait_for_selector("[role=dialog]", timeout=10000)
-    console.click_text(page, "确认应用", "button")
-    page.wait_for_function(
-        "() => document.body.textContent.includes('已接入')",
-        timeout=15000,
-    )
-    page.wait_for_timeout(700)
+    claude = _card(page, "Claude Code")
+    assert "当前指向 http://127.0.0.1:15721" in claude.locator(".console-client-state").inner_text()
+    assert "old-model" in claude.locator(".console-client-state").inner_text()
+    codex = _card(page, "Codex")
+    assert "还没配置网关地址" in codex.locator(".console-client-state").inner_text()
+    assert "gpt-5" in codex.locator(".console-client-state").inner_text()
+    # 隔离的家目录里不该出现真实安装：未检测到的工具收进底部一行，只留名字
+    absent = page.locator(".console-clients-absent-list").inner_text()
+    assert "Hermes" in absent and "Claude Code" not in absent
+    page.screenshot(path=str(SHOTS / "clients-list.png"), full_page=True)
+
+    _click_in(claude, "接入")
+    claude.locator(".console-client-body").wait_for(state="visible", timeout=10000)
+    diff = _wait_diff_ready(claude)
+    # 主行说人话，不出现 env.* 键名；密钥永不回显明文
+    assert "网关地址" in diff and "专用 Key" in diff and "默认模型" in diff
+    assert "env.ANTHROPIC_BASE_URL" not in diff
+    assert "sk-aigw-" not in page.inner_text("body")
+    page.screenshot(path=str(SHOTS / "clients-expanded.png"), full_page=True)
+
+    # 9 个档位/细节键同值，折成一行；页面上不再出现任何裸 env 键名
+    muted = claude.locator(".console-client-diff.muted").inner_text()
+    assert "9 个模型档位与协议细节" in muted and "agnes" in muted
+    assert "env." not in claude.locator(".console-client-changes").inner_text()
+    # 值本来就等于目标的条目不该出现在「会改这些」里
+    assert "http://127.0.0.1:%d" % instance.port not in diff.splitlines()[-1]
+
+    _click_in(claude, "更多设置")
+    claude.locator(".console-client-tiers").wait_for(state="visible", timeout=10000)
+    page.screenshot(path=str(SHOTS / "clients-more.png"), full_page=True)
+
+    _click_in(claude, "接入 AI Gateway")
+    claude.locator(".console-client-result").wait_for(state="visible", timeout=15000)
+    result = claude.locator(".console-client-result").inner_text()
+    assert "已接入" in result and "怎么确认生效" in result and "新开一个终端" in result
+    page.wait_for_timeout(400)
 
     applied = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert applied["permissions"] == ORIGINAL["permissions"]
     assert applied["mcpServers"] == ORIGINAL["mcpServers"]
     assert applied["env"]["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:{instance.port}"
     assert applied["env"]["ANTHROPIC_MODEL"] == "agnes"
-    token = applied["env"]["ANTHROPIC_AUTH_TOKEN"]
-    assert token.startswith("sk-aigw-")
+    assert applied["env"]["ANTHROPIC_AUTH_TOKEN"].startswith("sk-aigw-")
+    assert "正在走 AI Gateway" in claude.locator(".console-client-state").inner_text()
     page.screenshot(path=str(SHOTS / "clients-applied.png"), full_page=True)
 
-    db = instance.dir / "data" / "ai-gateway.db"
-    with sqlite3.connect(db) as conn:
+    with sqlite3.connect(instance.dir / "data" / "ai-gateway.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM client_configs WHERE client_id = 'claude_code'").fetchone()[0] == 1
-        key = conn.execute("SELECT enabled, key_hash FROM api_keys ORDER BY created_at DESC LIMIT 1").fetchone()
-        assert key and key[0] == 1
+        assert conn.execute("SELECT enabled FROM api_keys ORDER BY created_at DESC LIMIT 1").fetchone()[0] == 1
     backups = list((instance.dir / "data" / "client-backups" / "claude_code").glob("*.bak"))
-    assert backups, "apply must create a pre-apply backup"
+    assert backups, "接入前必须留下备份"
 
-    _wait_enabled(page, "撤销接入")
-    console.click_text(page, "撤销接入", "button")
+    # 接入后卡片保持展开：结果、下一步与「想退回去」就在同一屏
+    secondary = claude.locator(".console-client-secondary")
+    secondary.wait_for(state="visible", timeout=10000)
+    assert "撤销接入" in secondary.inner_text() and "用备份整份覆盖" in secondary.inner_text()
+    page.screenshot(path=str(SHOTS / "clients-managed.png"), full_page=True)
+
+    _click_in(secondary, "撤销")
     page.wait_for_selector("[role=dialog]", timeout=10000)
-    console.click_text(page, "确认撤销", "button")
-    page.wait_for_timeout(900)
+    console.click_text(page, "撤销")
+    page.wait_for_function(
+        "() => document.body.textContent.includes('已撤销接入')",
+        timeout=15000,
+    )
+    page.wait_for_timeout(700)
 
     restored = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert restored["permissions"] == ORIGINAL["permissions"]
     assert restored["mcpServers"] == ORIGINAL["mcpServers"]
-    assert restored["env"]["ANTHROPIC_BASE_URL"] == "http://old"
+    assert restored["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:15721"
     assert restored["env"]["ANTHROPIC_MODEL"] == "old-model"
-    assert "ANTHROPIC_AUTH_TOKEN" not in restored["env"], "old credential is only in the backup"
-    with sqlite3.connect(db) as conn:
+    assert "ANTHROPIC_AUTH_TOKEN" not in restored["env"], "旧凭据只存在于备份里"
+    with sqlite3.connect(instance.dir / "data" / "ai-gateway.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM client_configs").fetchone()[0] == 0
         assert conn.execute("SELECT enabled FROM api_keys").fetchone()[0] == 0
 
