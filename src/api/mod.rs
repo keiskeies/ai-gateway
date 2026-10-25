@@ -119,5 +119,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/clients/{id}/apply", web::post().to(client_config::apply))
                 .route("/clients/{id}/restore", web::post().to(client_config::restore))
                 .route("/clients/{id}/restore-backup", web::post().to(client_config::restore_backup))
+                    .route("/clients/{id}/config", web::get().to(client_config::read_config))
+                    .route("/clients/{id}/config", web::put().to(client_config::write_config))
         );
 }

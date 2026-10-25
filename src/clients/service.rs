@@ -551,6 +551,91 @@ pub fn restore(
     })
 }
 
+/// 读配置文件原文。文件不存在时返回空内容，让前端可以据此新建。
+pub fn read_config_file(paths: &ClientPaths, id: ClientId) -> AppResult<ConfigFile> {
+    let path = adapter(id).path(paths);
+    let content = match std::fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(AppError::Internal(error.to_string())),
+    };
+    Ok(ConfigFile {
+        id: id.as_str().to_string(),
+        path: path.display().to_string(),
+        exists: path.exists(),
+        content,
+    })
+}
+
+/// 直接写配置文件：只校验"这个客户端还读得懂"，不解释内容，写前照例备份。
+/// 用户手改过的值，撤销接入时不会被我们覆盖回去（restore 只回滚值仍等于我们写入内容的字段）。
+pub fn write_config_file(
+    paths: &ClientPaths,
+    backup_root: &Path,
+    id: ClientId,
+    content: &str,
+) -> AppResult<ConfigFileWrite> {
+    if content.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "Config content must not be empty".to_string(),
+        ));
+    }
+    if content.len() > 512 * 1024 {
+        return Err(AppError::BadRequest(
+            "Config content is too large (512 KB limit)".to_string(),
+        ));
+    }
+    validate_config_text(id, content)?;
+    let path = adapter(id).path(paths);
+    let original = read_bytes(&path)?;
+    let backup_path = match &original {
+        Some(bytes) => Some(write_backup(backup_root, id, &path, bytes)?.display().to_string()),
+        None => None,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if let Err(error) = write_config(&path, content.as_bytes()) {
+        restore_original(&path, &original);
+        return Err(error);
+    }
+    Ok(ConfigFileWrite {
+        path: path.display().to_string(),
+        backup_path,
+        replaced: original.is_some(),
+    })
+}
+
+fn validate_config_text(id: ClientId, text: &str) -> AppResult<()> {
+    let message = match id {
+        ClientId::ClaudeCode => serde_json::from_str::<Value>(text)
+            .err()
+            .map(|error| format!("settings.json is not valid JSON: {error}"))
+            .or_else(|| {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .filter(|value| !value.is_object())
+                    .map(|_| "settings.json must contain a JSON object".to_string())
+            }),
+        ClientId::Codex => text
+            .parse::<toml_edit::DocumentMut>()
+            .err()
+            .map(|error| format!("config.toml is not valid TOML: {error}")),
+        ClientId::Opencode | ClientId::Openclaw | ClientId::Pi => {
+            json5::from_str::<Value>(text)
+                .err()
+                .map(|error| format!("config is not valid JSON5: {error}"))
+        }
+        ClientId::Hermes => serde_yaml::from_str::<serde_yaml::Value>(text)
+            .err()
+            .map(|error| format!("config.yaml is not valid YAML: {error}")),
+    };
+    match message {
+        None => Ok(()),
+        Some(text) => Err(AppError::BadRequest(text)),
+    }
+}
+
 pub fn restore_backup(
     pool: &DbPool,
     paths: &ClientPaths,

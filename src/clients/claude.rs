@@ -139,10 +139,14 @@ impl Adapter for ClaudeCodeAdapter {
             return empty;
         };
         let read = |key: &str| {
-            env.get(key)
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .filter(|value| !value.trim().is_empty())
+            env.get(key).and_then(|value| match value {
+                Value::String(text) => Some(text.clone()),
+                // 数值键在文件里是不带引号的数字
+                Value::Number(number) => Some(number.to_string()),
+                Value::Bool(flag) => Some(if *flag { "1".to_string() } else { "0".to_string() }),
+                _ => None,
+            })
+            .filter(|value| !value.trim().is_empty())
         };
         let extras = CLAUDE_ENV_KEYS
             .iter()
@@ -253,19 +257,32 @@ impl Adapter for ClaudeCodeAdapter {
             changes.push(change(
                 format!("env.{key}"),
                 before.clone(),
-                json!(value),
+                if is_numeric_env_key(key) {
+                    value.parse::<i64>().map(|number| json!(number)).unwrap_or_else(|_| json!(value))
+                } else {
+                    json!(value)
+                },
                 *secret,
             ));
+            // 数值键写数字：写成字符串的话 Claude Code 当作没设
+            let typed = if is_numeric_env_key(key) {
+                value
+                    .parse::<i64>()
+                    .map(|number| json!(number))
+                    .unwrap_or_else(|_| json!(value))
+            } else {
+                json!(value)
+            };
             if !secret {
                 managed_env.insert(
                     key.clone(),
                     json!({
-                        "before": before.unwrap_or(Value::Null),
-                        "after": value,
+                        "before": before.clone().unwrap_or(Value::Null),
+                        "after": typed,
                     }),
                 );
             }
-            env.insert(key.clone(), json!(value));
+            env.insert(key.clone(), typed);
         }
         for key in &removals {
             let current = env.remove(key.as_str());

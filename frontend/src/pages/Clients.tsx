@@ -6,16 +6,19 @@ import {
   IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconBraces,
   IconHistory,
   IconRefresh,
 } from '@tabler/icons-react'
 import { useNavigate } from 'react-router-dom'
 import {
   applyClient,
+  getClientConfig,
   getSettings,
   listClients,
   listProxies,
   previewClient,
+  putClientConfig,
   restoreClient,
   restoreClientBackup,
 } from '../api'
@@ -26,6 +29,7 @@ import { useAppContext } from '../ThemeContext'
 import { t, type Locale, type TranslationKey } from '../i18n'
 import type {
   ClientApplyBody,
+  ClientConfigFile,
   ClientApplyResult,
   ClientChange,
   ClientId,
@@ -95,6 +99,24 @@ const CLAUDE_FLAGS: { key: string; value: string; label: TranslationKey; desc: T
     label: 'clientFlagNoAttribution',
     desc: 'clientFlagNoAttributionDesc',
   },
+  {
+    key: 'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+    value: '1',
+    label: 'clientFlagNo1m',
+    desc: 'clientFlagNo1mDesc',
+  },
+  {
+    key: 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    value: '1',
+    label: 'clientFlagNoTraffic',
+    desc: 'clientFlagNoTrafficDesc',
+  },
+  {
+    key: 'DISABLE_TELEMETRY',
+    value: '1',
+    label: 'clientFlagNoTelemetry',
+    desc: 'clientFlagNoTelemetryDesc',
+  },
 ]
 
 /** 允许代写的附加键 → 界面文案；也是「会改这些」里的行名 */
@@ -133,6 +155,7 @@ const CLAUDE_NUMBERS: { key: string; label: TranslationKey; placeholder: string 
   { key: 'API_TIMEOUT_MS', label: 'clientEnvTimeout', placeholder: '300000' },
   { key: 'CLAUDE_CODE_MAX_OUTPUT_TOKENS', label: 'clientEnvMaxOutput', placeholder: '8192' },
   { key: 'CLAUDE_CODE_MAX_CONTEXT_TOKENS', label: 'clientEnvMaxContext', placeholder: '200000' },
+  { key: 'CLAUDE_CODE_AUTO_COMPACT_WINDOW', label: 'clientEnvCompactWindow', placeholder: '160000' },
 ]
 
 const CLAUDE_TIERS: [string, TranslationKey][] = [
@@ -304,6 +327,10 @@ export default function Clients() {
   const [busy, setBusy] = useState<Busy>(null)
   const [confirmKind, setConfirmKind] = useState<'restore' | 'restore-backup' | null>(null)
   const [notice, setNotice] = useState<ResultNotice | null>(null)
+  const [config, setConfig] = useState<ClientConfigFile | null>(null)
+  const [configText, setConfigText] = useState('')
+  const [configError, setConfigError] = useState('')
+  const [configBusy, setConfigBusy] = useState(false)
   const previewSeq = useRef(0)
   const seededFor = useRef<ClientId | null>(null)
 
@@ -411,6 +438,42 @@ export default function Clients() {
     setShowExtra(false)
     setShowMore(false)
     setExpanded(current => (current === id ? null : id))
+  }
+
+  const openConfig = async (id: ClientId) => {
+    setConfigError('')
+    setConfigBusy(true)
+    try {
+      const file = await getClientConfig(id)
+      setConfig(file)
+      setConfigText(file.content || '{\n  \n}')
+    } catch (error) {
+      showError(error)
+    } finally {
+      setConfigBusy(false)
+    }
+  }
+
+  const saveConfig = async () => {
+    if (!active) return
+    setConfigBusy(true)
+    try {
+      const result = await putClientConfig(active.id, configText)
+      setConfig(null)
+      setNotice({
+        kind: 'restore',
+        text: t(locale, 'clientConfigSaved', shortPath(result.path)),
+        warnings: result.backup_path
+          ? [`${t(locale, 'clientConfigBackup')} ${shortPath(result.backup_path)}`]
+          : [],
+      })
+      await refresh()
+    } catch (error) {
+      // 语法不过时把服务端的原因原样显示在编辑器里，别让它飘成一条 toast
+      setConfigError(errorMessage(error, locale))
+    } finally {
+      setConfigBusy(false)
+    }
   }
 
   const runApply = async () => {
@@ -734,6 +797,15 @@ export default function Clients() {
                         >
                           {client.managed ? t(locale, 'clientSave') : t(locale, 'clientTakeoverApply')}
                         </Button>
+                        <Button
+                          size="xs"
+                          variant="subtle"
+                          leftSection={<IconBraces size={14} />}
+                          disabled={busy !== null || configBusy}
+                          onClick={() => void openConfig(client.id)}
+                        >
+                          {t(locale, 'clientEditConfig')}
+                        </Button>
                       </div>
                       <div className="console-client-foot">
                         {client.backup_path
@@ -828,6 +900,42 @@ export default function Clients() {
           <div className="console-clients-absent-note">{t(locale, 'clientAbsentNote')}</div>
         </div>
       )}
+
+      <Modal
+        opened={config !== null}
+        size="lg"
+        closeButtonProps={{ 'aria-label': t(locale, 'close') }}
+        onClose={() => setConfig(null)}
+        title={config ? `${t(locale, 'clientEditConfig')} · ${shortPath(config.path)}` : ''}
+        centered
+        closeOnClickOutside={false}
+      >
+        {config && (
+          <>
+            <div className="console-client-note">{t(locale, 'clientEditConfigDesc')}</div>
+            <Textarea
+              className="console-client-editor"
+              minRows={16}
+              maxRows={22}
+              value={configText}
+              onChange={event => {
+                setConfigText(event.currentTarget.value)
+                setConfigError('')
+              }}
+              aria-label={t(locale, 'clientEditConfig')}
+              error={configError || undefined}
+            />
+            <Group justify="flex-end" mt="md">
+              <Button size="xs" variant="default" onClick={() => setConfig(null)}>
+                {t(locale, 'cancel')}
+              </Button>
+              <Button size="xs" loading={configBusy} onClick={() => void saveConfig()}>
+                {t(locale, 'clientConfigSave')}
+              </Button>
+            </Group>
+          </>
+        )}
+      </Modal>
 
       <Modal
         opened={confirmKind === 'restore'}

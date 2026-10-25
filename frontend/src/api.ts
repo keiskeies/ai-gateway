@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { ClientApplyBody, ClientApplyResult, ClientPreview, ClientRestoreResult, ClientStatus } from './types/clients'
+import type { ClientApplyBody, ClientApplyResult, ClientConfigFile, ClientConfigWrite, ClientPreview, ClientRestoreResult, ClientStatus } from './types/clients'
 
 // Detect Tauri desktop mode
 const isTauri = !!(window as any).__TAURI_INTERNALS__
@@ -368,5 +368,9 @@ export const applyClient = (id: string, body: ClientApplyBody): Promise<ClientAp
   api.post(`/clients/${id}/apply`, body).then(r => r.data)
 export const restoreClient = (id: string): Promise<ClientRestoreResult> =>
   api.post(`/clients/${id}/restore`).then(r => r.data)
+export const getClientConfig = (id: string): Promise<ClientConfigFile> =>
+  api.get(`/clients/${id}/config`).then(r => r.data)
+export const putClientConfig = (id: string, content: string): Promise<ClientConfigWrite> =>
+  api.put(`/clients/${id}/config`, { content }).then(r => r.data)
 export const restoreClientBackup = (id: string): Promise<ClientRestoreResult> =>
   api.post(`/clients/${id}/restore-backup`).then(r => r.data)

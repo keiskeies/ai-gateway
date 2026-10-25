@@ -400,7 +400,8 @@ fn claude_code_writes_display_names_separately_from_requested_models() {
     assert_eq!(env["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"], json!("Opus 4.5"));
     assert_eq!(env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"], json!("agnes"));
     assert_eq!(env["DISABLE_AUTOUPDATER"], json!("1"));
-    assert_eq!(env["API_TIMEOUT_MS"], json!("300000"));
+    // 数值键写数字：写成字符串 Claude Code 会当成没设
+    assert_eq!(env["API_TIMEOUT_MS"], json!(300000));
     let _ = fs::remove_dir_all(&home);
 }
 
@@ -481,4 +482,56 @@ fn only_allowlisted_env_keys_are_accepted() {
         ..Default::default()
     };
     assert!(numeric.extras(None).is_err(), "a numeric knob must be a number");
+}
+
+#[test]
+fn raw_config_editing_validates_backs_up_and_preserves_unmanaged_fields() {
+    let home = home();
+    let backups = home.join("backups");
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &claude::ClaudeCodeAdapter;
+    write(
+        &adapter.path(&paths),
+        "{\"env\":{\"ANTHROPIC_MODEL\":\"keep-me\"},\"includeCoAuthoredBy\":false}",
+    );
+
+    // 语法不过就一行都不写
+    assert!(service::write_config_file(&paths, &backups, ClientId::ClaudeCode, "{\"env\":")
+        .unwrap_err()
+        .to_string()
+        .contains("not valid JSON"));
+    let untouched: Value =
+        serde_json::from_slice(&fs::read(adapter.path(&paths)).expect("read")).expect("json");
+    assert_eq!(untouched["includeCoAuthoredBy"], json!(false));
+
+    let edited = "{\"env\":{\"ANTHROPIC_MODEL\":\"keep-me\",\"API_TIMEOUT_MS\":120000},\"includeCoAuthoredBy\":true,\"maxTokens\":200000}";
+    let written = service::write_config_file(&paths, &backups, ClientId::ClaudeCode, edited).expect("write");
+    assert!(written.replaced, "an existing file must report as replaced");
+    let backup = PathBuf::from(written.backup_path.expect("backup recorded"));
+    assert!(backup.exists(), "raw editing must back the file up first");
+
+    let on_disk: Value =
+        serde_json::from_slice(&fs::read(adapter.path(&paths)).expect("read")).expect("json");
+    assert_eq!(on_disk["env"]["API_TIMEOUT_MS"], json!(120000));
+    assert_eq!(on_disk["maxTokens"], json!(200000));
+    assert_eq!(on_disk["includeCoAuthoredBy"], json!(true));
+
+    let read_back = service::read_config_file(&paths, ClientId::ClaudeCode).expect("read");
+    assert_eq!(read_back.content, edited);
+    assert!(read_back.exists);
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn raw_config_editing_rejects_empty_and_non_object_content() {
+    let home = home();
+    let backups = home.join("backups");
+    let paths = ClientPaths::for_home(&home);
+    for content in ["", "   ", "[1, 2, 3]"] {
+        assert!(
+            service::write_config_file(&paths, &backups, ClientId::ClaudeCode, content).is_err(),
+            "{content:?} must be refused"
+        );
+    }
+    let _ = fs::remove_dir_all(&home);
 }

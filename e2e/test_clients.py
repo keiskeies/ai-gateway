@@ -76,7 +76,13 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     page = console.new_page()
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.on("console", lambda message: errors.append(message.text) if message.type == "error" else None)
+    # 故意送过一次非法 JSON，浏览器会为这条 400 记一条资源日志——那是被测行为，不是缺陷
+    page.on(
+        "console",
+        lambda message: errors.append(message.text)
+        if message.type == "error" and "400 (Bad Request)" not in message.text
+        else None,
+    )
 
     console.goto(page, "/clients", ".console-shell")
     page.wait_for_selector(".console-client", timeout=15000)
@@ -167,7 +173,7 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     assert applied["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "agnes", "显示名不该改动实际请求模型"
     assert applied["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"] == "Opus 4.5"
     assert applied["env"]["DISABLE_AUTOUPDATER"] == "1"
-    assert applied["env"]["API_TIMEOUT_MS"] == "300000"
+    assert applied["env"]["API_TIMEOUT_MS"] == 300000, "数值键必须写成 JSON 数字"
     assert "正在走 AI Gateway" in claude.locator(".console-client-state").inner_text()
     page.screenshot(path=str(SHOTS / "clients-applied.png"), full_page=True)
 
@@ -205,7 +211,32 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
         assert conn.execute("SELECT COUNT(*) FROM client_configs").fetchone()[0] == 0
         assert conn.execute("SELECT enabled FROM api_keys").fetchone()[0] == 0
 
+    # 逃生口：语法不过就一行都不写；写进去的内容由用户自己负责
+    _click_in(claude, "直接编辑配置文件")
+    editor = page.locator(".console-client-editor textarea")
+    editor.wait_for(state="visible", timeout=10000)
+    dialog = page.locator("[role=dialog]")
+    editor.fill('{"env": {"ANTHROPIC_MODEL": "agnes",')
+    _click_in(dialog, "保存文件")
+    assert "not valid JSON" in dialog.inner_text()
+    untouched = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert untouched["permissions"] == ORIGINAL["permissions"], "a rejected save must not touch the file"
+    editor.fill('{"env": {"ANTHROPIC_MODEL": "agnes"}, "maxTokens": 200000}')
+    _click_in(dialog, "保存文件")
+    page.wait_for_selector(".console-client-editor", state="detached", timeout=10000)
+    hand = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert hand["maxTokens"] == 200000 and "permissions" not in hand
+    page.screenshot(path=str(SHOTS / "clients-editor.png"), full_page=True)
+
+    # 撤销/保存后按钮会从禁用淡回启用，等过渡结束再审计，否则 axe 量到的是半透明中间态
+    # 差异算完后按钮会从禁用淡回启用；等它稳定再审计，否则 axe 量到的是过渡中间色
+    page.wait_for_function(
+        "() => { const b = document.querySelector('.console-client-actions button');"
+        " return !!b && !b.disabled; }",
+        timeout=15000,
+    )
+    page.wait_for_timeout(500)
     violations = console.audit(page)
-    assert not violations, violations
+    assert not violations, json.dumps(violations, ensure_ascii=False)[:1500]
     assert errors == [], errors
     page.close()

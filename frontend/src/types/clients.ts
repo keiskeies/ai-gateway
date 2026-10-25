@@ -80,3 +80,17 @@ export interface ClientRestoreResult {
   disabled_key?: string | null
   warnings: string[]
 }
+
+/** 配置文件原文（逃生口） */
+export interface ClientConfigFile {
+  id: string
+  path: string
+  exists: boolean
+  content: string
+}
+
+export interface ClientConfigWrite {
+  path: string
+  backup_path?: string | null
+  replaced: boolean
+}

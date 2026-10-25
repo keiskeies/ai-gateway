@@ -276,6 +276,28 @@ pub struct ClientRestoreResult {
     pub warnings: Vec<String>,
 }
 
+/// 配置文件原文（白名单之外还有大量客户端自己的键，这是逃生口）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigFile {
+    pub id: String,
+    pub path: String,
+    pub exists: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigFileBody {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigFileWrite {
+    pub path: String,
+    pub backup_path: Option<String>,
+    /// false 表示这是新建的文件
+    pub replaced: bool,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ClientApplyRequest {
     /// 网关根地址；为空时服务层按当前 admin_port 生成 `http://127.0.0.1:<port>`。
@@ -332,18 +354,28 @@ pub const CLAUDE_ENV_KEYS: &[&str] = &[
     "API_TIMEOUT_MS",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     "ENABLE_TOOL_SEARCH",
     "DISABLE_AUTOUPDATER",
     "CLAUDE_CODE_DISABLE_ARTIFACT",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
     "CLAUDE_CODE_AUTO_MODE_SERVER",
     "CLAUDE_CODE_ATTRIBUTION_HEADER",
 ];
 
-const NUMERIC_CLAUDE_ENV_KEYS: &[&str] = &[
+/// 这些键在 settings.json 里是数字而不是字符串——写错类型，Claude Code 会当成没设。
+pub const NUMERIC_CLAUDE_ENV_KEYS: &[&str] = &[
     "API_TIMEOUT_MS",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
 ];
+
+pub fn is_numeric_env_key(key: &str) -> bool {
+    NUMERIC_CLAUDE_ENV_KEYS.contains(&key)
+}
 
 const TIER_KEYS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 

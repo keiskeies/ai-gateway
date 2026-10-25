@@ -2238,6 +2238,13 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   color: var(--text-3);
 }
 
+.console-client-editor textarea {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre;
+}
+
 .console-client-secondary {
   margin-top: 16px;
   padding-top: 10px;

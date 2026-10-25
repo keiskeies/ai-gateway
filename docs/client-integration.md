@@ -116,6 +116,8 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 
 **由 cc-switch 自己的代理消费，不进配置文件（不抄）**：上游格式（OpenAI Chat ↔ Anthropic 转换）、完整 URL 开关、User-Agent、Header/Body 覆盖。这些在我们的架构里对应「平台/后端」的协议转换与 `param_overrides`；搬到客户端页等于同一件事摆两个地方，两边都能改就没人知道哪边生效。
 
+**逃生口：直接编辑配置文件**。白名单永远会漏键（`CLAUDE_CODE_DISABLE_1M_CONTEXT` 就是一开始没收录的），所以卡片动作行里有「直接编辑配置文件」：读原文、按该客户端的格式校验（JSON / TOML / JSON5 / YAML）、备份后整体写回。它**绕过托管**——写进去的内容不进 `managed`，不出现在差异预览里，撤销接入也不会替你还原；语法不过一律 400 拒绝，一个字节都不写。
+
 **需要网关侧先配合（暂缓）**：「声明支持 1M」。cc-switch 的做法是给模型 id 加 `[1m]` 后缀，Claude Code 原样发出；我们的虚拟模型按名字精确匹配，直接写后缀会让请求打不到模型。要做，得先在解析时剥掉 `[1m]` 并把它当成上下文窗口标记——属于后端改动，先只开放 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 这个全局窗口值。
 
 ## 3. 代码落点
@@ -124,7 +126,7 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 - `src/clients/{claude,codex,opencode,openclaw,pi,hermes}.rs`：各端 plan/status/restore。
 - `src/clients/service.rs`：模型/地址校验、Key 复用或创建、备份、原子写入、状态、撤销。
 - `src/db/client_config.rs` + V22 迁移：托管状态表。
-- `src/api/client_config.rs`：`/api/clients` 列表、`/preview`、`/apply`、`/restore`、`/restore-backup`。
+- `src/api/client_config.rs`：`/api/clients` 列表、`/preview`、`/apply`、`/restore`、`/restore-backup`、`/config`（读写原文）。
 - `frontend/src/pages/Clients.tsx`：卡片列表、就地展开、自动差异（语义化 + 同值合并）、结果与「想退回去」。
 - `e2e/test_clients.py`：临时 HOME + 真实格式 Claude 配置的端到端走查。
 
@@ -133,7 +135,7 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 ## 4. 验证
 
 - `cargo test`：125 个 lib 测试（含六适配器、服务层 Key 生命周期、V22 迁移）。
-- `python -m pytest e2e -q`：26 条（客户端接入 1 条：展开即算差异且不含密钥、裸 `env.*` 键名不出现、应用后权限/MCP 保留、备份存在、撤销后 Key 停用、axe 0 违规；截图留在 `.dsh-tmp/clients/`）。
+- `python -m pytest e2e -q`：26 条（客户端接入 1 条：展开即算差异且不含密钥、裸 `env.*` 键名不出现、数值键写成 JSON 数字、应用后权限/MCP 保留、备份存在、撤销后 Key 停用、直接编辑拒绝非法 JSON 且不动文件、排版对齐探针、axe 0 违规；截图留在 `.dsh-tmp/clients/`）。
 - a11y/键盘矩阵已加入 `/clients`，明暗两套都通过。
 
 ---

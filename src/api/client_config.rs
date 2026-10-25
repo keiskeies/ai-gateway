@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::api::settings::SharedAppConfig;
 use crate::cache::RouteCache;
-use crate::clients::{service, ClientApplyRequest, ClientId, ClientPaths};
+use crate::clients::{service, ClientApplyRequest, ClientId, ClientPaths, ConfigFileBody};
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 
@@ -112,6 +112,36 @@ pub async fn restore_backup(
         cache.refresh_api_keys();
     }
     Ok(HttpResponse::Ok().json(outcome.result))
+}
+
+/// 读配置文件原文（逃生口：白名单之外还有大量客户端自己的键）
+pub async fn read_config(
+    path: web::Path<String>,
+    settings: web::Data<SharedAppConfig>,
+) -> AppResult<HttpResponse> {
+    let id = parse_id(path)?;
+    let paths = client_paths()?;
+    let _settings = settings;
+    let file = web::block(move || service::read_config_file(&paths, id))
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))??;
+    Ok(HttpResponse::Ok().json(file))
+}
+
+/// 直接写配置文件：先校验这个客户端还读得懂，再备份、再写。
+pub async fn write_config(
+    path: web::Path<String>,
+    body: web::Json<ConfigFileBody>,
+    settings: web::Data<SharedAppConfig>,
+) -> AppResult<HttpResponse> {
+    let id = parse_id(path)?;
+    let paths = client_paths()?;
+    let backup_root = backup_root(&settings);
+    let content = body.into_inner().content;
+    let result = web::block(move || service::write_config_file(&paths, &backup_root, id, &content))
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))??;
+    Ok(HttpResponse::Ok().json(result))
 }
 
 fn backup_root(settings: &SharedAppConfig) -> PathBuf {
