@@ -101,6 +101,11 @@ All screenshots are from the current desktop app (dark theme).
 <p align="center"><em>Playground — pick a virtual model and protocol (OpenAI / Anthropic) and send a real request to verify routing and the upstream; mint a temporary key in place, or copy the equivalent cURL</em></p>
 
 <p align="center">
+  <img src="doc/console-clients.png" width="92%" alt="Client Access" />
+</p>
+<p align="center"><em>Client Access — card-based takeover for Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes local configs; expanding shows the diff, every apply is backed up, and disconnect rolls back</em></p>
+
+<p align="center">
   <img src="doc/console-settings.png" width="92%" alt="Settings" />
 </p>
 <p align="center"><em>Settings — port and bind address, request-policy defaults, account security, data statistics (rows / attempt traces / alerts / dangling rows / body retention), config export &amp; import, and whole-database backup and restore</em></p>
@@ -211,7 +216,7 @@ These are implementation boundaries that are easy to over-assume:
 |---|---|---|---|---|
 | **Form** | Desktop app + single-binary server | General-purpose reverse proxy | Server | Python service |
 | **Visual management** | ✅ Built-in console | ❌ | ✅ Web console | ⚠️ Admin UI must be enabled |
-| **Load balancing** | ✅ 4 strategies | ✅ Upstream round robin / hashing | ⚠️ Basic | ✅ |
+| **Load balancing** | ✅ 4 effective strategies + latency option | ✅ Upstream round robin / hashing | ⚠️ Basic | ✅ |
 | **OpenAI protocol** | ✅ | ✅ Pass-through | ✅ | ✅ |
 | **Anthropic protocol** | ✅ Native | ❌ Pass-through only, no conversion | ✅ Conversion | ✅ Conversion |
 | **Failure retries** | ✅ 429 / 5xx / 408 | ⚠️ Requires `proxy_next_upstream` | ✅ | ✅ Retries + fallbacks |
@@ -231,8 +236,9 @@ These are implementation boundaries that are easy to over-assume:
 - 🔗 **reasoning_content support**: chain-of-thought output from platforms such as NVIDIA NIM; OpenAI / Anthropic reasoning parameters translated both ways
 - 📡 **Custom forwarded headers**: append arbitrary headers per platform, overriding `Authorization` / `x-api-key` by name
 - 🎛️ **Playground**: pick a model and protocol, send a real request to verify routing and the upstream, mint a temporary key, or copy the equivalent cURL
+- 🔌 **Client access**: one-click takeover and rollback for Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes local configs; only AI Gateway-owned fields are touched, every apply is backed up, with diff preview and a raw-config editor
 - 🌙 **Light / dark / system themes**; UI available in Chinese and English
-- 🧭 **Seven pages**: Traffic · Monitoring Wall · Virtual Models · Platforms · API Keys · Playground · Settings. On the Traffic page, filters, paging and time ranges live in the URL, so refresh and back/forward keep state
+- 🧭 **Eight pages**: Traffic · Monitoring Wall · Virtual Models · Platforms · API Keys · Playground · Client Access · Settings. On the Traffic page, filters, paging and time ranges live in the URL, so refresh and back/forward keep state
 - 🧾 **Attempt traces and replay**: every backend try of a request is recorded; request-body retention is off by default, and once enabled a stored request can be replayed verbatim
 - 🔔 **Notification centre**: expiring keys, repeated platform failures, quota breaches and stale backups are persisted, reachable from the header bell
 - 💰 **Cost estimation and budgets**: per-request cost from the price table with a coverage ratio; key quotas support rolling windows and over-limit rejection
@@ -246,7 +252,7 @@ These are implementation boundaries that are easy to over-assume:
 
 ## 🔐 Authentication
 
-The dashboard (traffic and stats, virtual models, platforms, API keys, Playground, settings) requires signing in:
+The dashboard (traffic and stats, virtual models, platforms, API keys, Playground, client access, settings) requires signing in:
 
 - **First launch**: the dashboard opens the "Create admin account" screen. Initial setup only accepts requests from the local machine (127.0.0.1), so a LAN peer cannot claim the account first
 - **Sessions**: stored in an HttpOnly, SameSite=Strict cookie, valid for 7 days. Sign out from the user menu in the top-right corner
@@ -259,7 +265,7 @@ The dashboard (traffic and stats, virtual models, platforms, API keys, Playgroun
 | `/v1/models` | Public |
 | `/health` | Public |
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Public (`setup` is effectively local-only) |
-| All other `/api/*` (platforms / models / virtual models / API keys / settings / stats / backups) | Admin session |
+| All other `/api/*` (platforms / models / virtual models / API keys / client access / settings / stats / backups) | Admin session |
 
 > With no API keys configured, the gateway does not validate the key value, but requests must still carry an `Authorization` or `x-api-key` header (the value is not validated); once a key exists, a valid key is required. Credentials live in SQLite (Argon2id hashes); `admin_token` in `config.toml` is a legacy reserved field.
 
@@ -472,6 +478,7 @@ ai-gateway/
 │   ├── proxy/            # Proxy handlers, stream conversion, signature cache
 │   ├── lb/               # Load-balancing selector
 │   ├── protocol/         # OpenAI / Anthropic adapters and reasoning parameters
+│   ├── clients/          # Local client config takeover (Claude Code / Codex / ...)
 │   └── models/           # Data models
 ├── frontend/             # React frontend (builds to ../static/)
 ├── src-tauri/            # Tauri desktop wrapper

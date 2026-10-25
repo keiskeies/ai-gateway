@@ -101,6 +101,11 @@ Toutes les captures proviennent de l'application de bureau actuelle (thème somb
 <p align="center"><em>Playground — choisissez un modèle virtuel et un protocole (OpenAI / Anthropic), envoyez une vraie requête pour vérifier le routage et l'upstream ; créez une clé temporaire sur place ou copiez le cURL équivalent</em></p>
 
 <p align="center">
+  <img src="doc/console-clients.png" width="92%" alt="Accès clients" />
+</p>
+<p align="center"><em>Accès clients — prise en charge par cartes des configurations locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes ; le dépliage affiche le diff, chaque application est sauvegardée et la déconnexion restaure l'état</em></p>
+
+<p align="center">
   <img src="doc/console-settings.png" width="92%" alt="Réglages" />
 </p>
 <p align="center"><em>Réglages — port et adresse d'écoute, valeurs par défaut de la politique de requête, sécurité du compte, statistiques de données (lignes / traces de tentatives / alertes / lignes orphelines / rétention des corps de requête), export et import de configuration, sauvegarde et restauration complètes de la base</em></p>
@@ -211,7 +216,7 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 |---|---|---|---|---|
 | **Forme** | Application de bureau + serveur mono-binaire | Reverse proxy généraliste | Serveur | Service Python |
 | **Gestion visuelle** | ✅ Console intégrée | ❌ | ✅ Console web | ⚠️ Admin UI à activer |
-| **Répartition de charge** | ✅ 4 stratégies | ✅ Round robin / hachage upstream | ⚠️ Basique | ✅ |
+| **Répartition de charge** | ✅ 4 stratégies effectives + option latence | ✅ Round robin / hachage upstream | ⚠️ Basique | ✅ |
 | **Protocole OpenAI** | ✅ | ✅ Transmission | ✅ | ✅ |
 | **Protocole Anthropic** | ✅ Natif | ❌ Transmission seule, sans conversion | ✅ Conversion | ✅ Conversion |
 | **Nouvelles tentatives** | ✅ 429 / 5xx / 408 | ⚠️ Nécessite `proxy_next_upstream` | ✅ | ✅ Retries + fallbacks |
@@ -231,8 +236,9 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 - 🔗 **Prise en charge de reasoning_content** : sorties de chaîne de pensée de plateformes comme NVIDIA NIM ; paramètres de raisonnement OpenAI / Anthropic traduits dans les deux sens
 - 📡 **En-têtes transférés personnalisés** : ajoutez des en-têtes arbitraires par plateforme, en écrasant `Authorization` / `x-api-key` à nom égal
 - 🎛️ **Playground** : choisissez un modèle et un protocole, envoyez une vraie requête pour vérifier le routage et l'upstream, créez une clé temporaire ou copiez le cURL équivalent
+- 🔌 **Accès clients** : prise en charge et restauration en un clic des configurations locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes ; seuls les champs gérés par AI Gateway sont modifiés, chaque application est sauvegardée, avec aperçu du diff et éditeur de configuration brute
 - 🌙 **Thèmes clair / sombre / système** ; interface en chinois et en anglais
-- 🧭 **Sept pages** : Trafic · Supervision · Modèles virtuels · Plateformes · Clés API · Playground · Réglages. Sur la page Trafic, les filtres, la pagination et les plages de temps vivent dans l'URL : actualiser et naviguer avant/arrière conservent l'état
+- 🧭 **Huit pages** : Trafic · Supervision · Modèles virtuels · Plateformes · Clés API · Playground · Accès clients · Réglages. Sur la page Trafic, les filtres, la pagination et les plages de temps vivent dans l'URL : actualiser et naviguer avant/arrière conservent l'état
 - 🧾 **Traces de tentatives et rejeu** : chaque essai de backend d'une requête est enregistré ; la rétention des corps de requête est désactivée par défaut, et une fois activée, une requête stockée peut être rejouée mot pour mot
 - 🔔 **Centre de notifications** : clés qui expirent, échecs répétés de plateformes, dépassements de quota et sauvegardes obsolètes sont persistés et accessibles depuis la cloche de l'en-tête
 - 💰 **Estimation des coûts et budgets** : coût par requête à partir de la table de prix avec un taux de couverture ; les quotas de clé prennent en charge les fenêtres glissantes et le rejet en cas de dépassement
@@ -246,7 +252,7 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 
 ## 🔐 Authentification
 
-Le tableau de bord (trafic et statistiques, modèles virtuels, plateformes, clés API, Playground, réglages) exige une connexion :
+Le tableau de bord (trafic et statistiques, modèles virtuels, plateformes, clés API, Playground, accès clients, réglages) exige une connexion :
 
 - **Premier lancement** : le tableau de bord ouvre « Créer le compte administrateur ». L'initialisation n'accepte que les requêtes de la machine locale (127.0.0.1), afin qu'un pair du LAN ne puisse pas revendiquer le compte en premier
 - **Sessions** : stockées dans un cookie HttpOnly SameSite=Strict, valable 7 jours. Déconnexion via le menu utilisateur en haut à droite
@@ -259,7 +265,7 @@ Le tableau de bord (trafic et statistiques, modèles virtuels, plateformes, clé
 | `/v1/models` | Public |
 | `/health` | Public |
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Public (`setup` de fait limité à la machine locale) |
-| Tous les autres `/api/*` (plateformes / modèles / modèles virtuels / clés API / réglages / statistiques / sauvegardes) | Session administrateur |
+| Tous les autres `/api/*` (plateformes / modèles / modèles virtuels / clés API / accès clients / réglages / statistiques / sauvegardes) | Session administrateur |
 
 > Sans aucune clé API configurée, la passerelle ne valide pas la valeur, mais les requêtes doivent tout de même porter un en-tête `Authorization` ou `x-api-key` (la valeur n'est pas validée) ; dès qu'une clé existe, une clé valide est requise. Les identifiants sont stockés dans SQLite (hachages Argon2id) ; `admin_token` dans `config.toml` est un champ historique réservé.
 
@@ -472,6 +478,7 @@ ai-gateway/
 │   ├── proxy/            # Handlers proxy, conversion de flux, cache de signatures
 │   ├── lb/               # Sélecteur de répartition de charge
 │   ├── protocol/         # Adaptateurs OpenAI / Anthropic et paramètres de raisonnement
+│   ├── clients/          # Prise en charge des configurations client locales (Claude Code / Codex / …)
 │   └── models/           # Modèles de données
 ├── frontend/             # Frontend React (compilé vers ../static/)
 ├── src-tauri/            # Enveloppe de bureau Tauri

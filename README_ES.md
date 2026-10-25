@@ -101,6 +101,11 @@ Todas las capturas son de la aplicación de escritorio actual (tema oscuro).
 <p align="center"><em>Playground — elige un modelo virtual y un protocolo (OpenAI / Anthropic) y envía una petición real para verificar el enrutado y el upstream; crea una clave temporal al momento o copia el cURL equivalente</em></p>
 
 <p align="center">
+  <img src="doc/console-clients.png" width="92%" alt="Acceso de clientes" />
+</p>
+<p align="center"><em>Acceso de clientes — toma por tarjetas de las configuraciones locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; al expandir se muestra el diff, cada aplicación se respalda y la desconexión restaura el estado</em></p>
+
+<p align="center">
   <img src="doc/console-settings.png" width="92%" alt="Ajustes" />
 </p>
 <p align="center"><em>Ajustes — puerto y dirección de escucha, valores por defecto de la política de peticiones, seguridad de la cuenta, estadísticas de datos (filas / trazas de intentos / alertas / filas huérfanas / retención de cuerpos de petición), exportación e importación de configuración, y copia de seguridad y restauración completas de la base</em></p>
@@ -211,7 +216,7 @@ Estos son límites de implementación fáciles de sobreestimar:
 |---|---|---|---|---|
 | **Forma** | App de escritorio + servidor mono-binario | Proxy inverso generalista | Servidor | Servicio Python |
 | **Gestión visual** | ✅ Consola integrada | ❌ | ✅ Consola web | ⚠️ Hay que activar la Admin UI |
-| **Balanceo de carga** | ✅ 4 estrategias | ✅ Turno rotatorio / hashing de upstream | ⚠️ Básico | ✅ |
+| **Balanceo de carga** | ✅ 4 estrategias efectivas + opción de latencia | ✅ Turno rotatorio / hashing de upstream | ⚠️ Básico | ✅ |
 | **Protocolo OpenAI** | ✅ | ✅ Reenvío | ✅ | ✅ |
 | **Protocolo Anthropic** | ✅ Nativo | ❌ Solo reenvío, sin conversión | ✅ Conversión | ✅ Conversión |
 | **Reintentos ante fallos** | ✅ 429 / 5xx / 408 | ⚠️ Requiere `proxy_next_upstream` | ✅ | ✅ Reintentos + fallbacks |
@@ -231,8 +236,9 @@ Estos son límites de implementación fáciles de sobreestimar:
 - 🔗 **Compatibilidad con reasoning_content**: salidas de cadena de pensamiento de plataformas como NVIDIA NIM; parámetros de razonamiento OpenAI / Anthropic traducidos en ambos sentidos
 - 📡 **Cabeceras reenviadas personalizadas**: añade cabeceras arbitrarias por plataforma, sobrescribiendo `Authorization` / `x-api-key` cuando coinciden
 - 🎛️ **Playground**: elige un modelo y un protocolo, envía una petición real para verificar el enrutado y el upstream, crea una clave temporal o copia el cURL equivalente
+- 🔌 **Acceso de clientes**: toma y restauración con un clic de las configuraciones locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; solo se tocan los campos gestionados por AI Gateway, cada aplicación se respalda, con vista previa del diff y editor de configuración sin formato
 - 🌙 **Temas claro / oscuro / sistema**; interfaz en chino e inglés
-- 🧭 **Siete páginas**: Tráfico · Monitorización · Modelos virtuales · Plataformas · Claves API · Playground · Ajustes. En la página Tráfico, los filtros, la paginación y los rangos de tiempo viven en la URL, así que actualizar y navegar adelante/atrás conservan el estado
+- 🧭 **Ocho páginas**: Tráfico · Monitorización · Modelos virtuales · Plataformas · Claves API · Playground · Acceso de clientes · Ajustes. En la página Tráfico, los filtros, la paginación y los rangos de tiempo viven en la URL, así que actualizar y navegar adelante/atrás conservan el estado
 - 🧾 **Trazas de intentos y repetición**: cada intento de backend de una petición queda registrado; la retención de cuerpos de petición está desactivada por defecto y, una vez activada, una petición guardada puede repetirse tal cual
 - 🔔 **Centro de notificaciones**: claves que caducan, fallos repetidos de plataformas, excesos de cuota y copias de seguridad obsoletas se guardan y son accesibles desde la campana de la cabecera
 - 💰 **Estimación de costes y presupuestos**: coste por petición desde la tabla de precios con ratio de cobertura; las cuotas de clave admiten ventanas deslizantes y rechazo al superar el límite
@@ -246,7 +252,7 @@ Estos son límites de implementación fáciles de sobreestimar:
 
 ## 🔐 Autenticación
 
-El panel (tráfico y estadísticas, modelos virtuales, plataformas, claves API, Playground, ajustes) requiere iniciar sesión:
+El panel (tráfico y estadísticas, modelos virtuales, plataformas, claves API, Playground, acceso de clientes, ajustes) requiere iniciar sesión:
 
 - **Primer arranque**: el panel abre «Crear cuenta de administrador». La inicialización solo acepta peticiones desde la máquina local (127.0.0.1), para que un par de la LAN no pueda reclamar la cuenta primero
 - **Sesiones**: guardadas en una cookie HttpOnly SameSite=Strict, válida 7 días. Cerrar sesión desde el menú de usuario arriba a la derecha
@@ -259,7 +265,7 @@ El panel (tráfico y estadísticas, modelos virtuales, plataformas, claves API, 
 | `/v1/models` | Pública |
 | `/health` | Pública |
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Pública (`setup` queda de hecho limitado a la máquina local) |
-| El resto de `/api/*` (plataformas / modelos / modelos virtuales / claves API / ajustes / estadísticas / copias) | Sesión de administrador |
+| El resto de `/api/*` (plataformas / modelos / modelos virtuales / claves API / acceso de clientes / ajustes / estadísticas / copias) | Sesión de administrador |
 
 > Sin ninguna clave API configurada, la pasarela no valida el valor, pero las peticiones deben llevar igualmente una cabecera `Authorization` o `x-api-key` (el valor no se valida); en cuanto existe una clave, se exige una clave válida. Las credenciales se guardan en SQLite (hashes Argon2id); `admin_token` en `config.toml` es un campo histórico reservado.
 
@@ -472,6 +478,7 @@ ai-gateway/
 │   ├── proxy/            # Handlers de proxy, conversión de streaming, caché de firmas
 │   ├── lb/               # Selector de balanceo de carga
 │   ├── protocol/         # Adaptadores OpenAI / Anthropic y parámetros de razonamiento
+│   ├── clients/          # Toma de configuración de clientes locales (Claude Code / Codex / …)
 │   └── models/           # Modelos de datos
 ├── frontend/             # Frontend React (compila a ../static/)
 ├── src-tauri/            # Envoltorio de escritorio Tauri

@@ -101,6 +101,11 @@ AI Gateway 把这些放进一个本地进程：**一个入口、一套 Key、一
 <p align="center"><em>Playground — 选虚拟模型和协议（OpenAI / Anthropic）发一笔真实请求，验证路由与上游；可就地生成一把临时密钥并填好，或复制等价 cURL</em></p>
 
 <p align="center">
+  <img src="doc/console-clients.png" width="92%" alt="客户端接入" />
+</p>
+<p align="center"><em>客户端接入 — Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes 六家本地配置的卡片式接入；展开后自动显示差异，应用前备份，接入后可一键撤销</em></p>
+
+<p align="center">
   <img src="doc/console-settings.png" width="92%" alt="设置" />
 </p>
 <p align="center"><em>设置 — 服务端口与监听地址、请求策略默认值、账号安全、数据统计（行数 / 尝试轨迹 / 告警 / 悬空行 / 正文留存）、配置导出导入、整库备份与恢复</em></p>
@@ -211,7 +216,7 @@ Anthropic SDK ─────────────────→ POST /v1/me
 |---|---|---|---|---|
 | **形态** | 桌面 App + 单可执行文件服务 | 通用反向代理 | 服务端 | Python 服务 |
 | **可视化管理** | ✅ 内置控制台 | ❌ | ✅ Web 控制台 | ⚠️ 需启用 Admin UI |
-| **负载均衡** | ✅ 4 种策略 | ✅ upstream 轮询 / 哈希 | ⚠️ 基础 | ✅ |
+| **负载均衡** | ✅ 4 种有效策略 + 延迟选项 | ✅ upstream 轮询 / 哈希 | ⚠️ 基础 | ✅ |
 | **OpenAI 协议** | ✅ | ✅ 透传 | ✅ | ✅ |
 | **Anthropic 协议** | ✅ 原生 | ❌ 只透传不转换 | ✅ 转换 | ✅ 转换 |
 | **失败重试** | ✅ 429 / 5xx / 408 | ⚠️ 需配置 `proxy_next_upstream` | ✅ | ✅ 重试 + fallback |
@@ -231,8 +236,9 @@ Anthropic SDK ─────────────────→ POST /v1/me
 - 🔗 **reasoning_content 兼容**：支持 NVIDIA NIM 等平台的思维链输出；OpenAI / Anthropic 思考参数双向翻译
 - 📡 **自定义转发头**：在平台级追加任意请求头，同名时覆盖 `Authorization` / `x-api-key`
 - 🎛️ **Playground**：选模型、选协议、发真实请求，验证路由与上游；可就地生成临时 Key，或复制等价 cURL
+- 🔌 **客户端接入**：Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes 六家本地配置一键接管与回滚；只改 AI Gateway 拥有的字段，应用前自动备份，支持差异预览与直接编辑配置文件
 - 🌙 **浅色 / 深色 / 跟随系统**三种主题；界面提供中文和英文
-- 🧭 **七个页面**：流量 · 监控大屏 · 虚拟模型 · 平台 · API 密钥 · Playground · 设置。流量页的筛选、分页和时段写进地址，刷新与前进 / 后退不丢状态
+- 🧭 **八个页面**：流量 · 监控大屏 · 虚拟模型 · 平台 · API 密钥 · Playground · 客户端接入 · 设置。流量页的筛选、分页和时段写进地址，刷新与前进 / 后退不丢状态
 - 🧾 **请求轨迹与正文重放**：一次请求的每次后端尝试逐条可查；正文留存默认关闭，开启后可原样重放某一笔请求
 - 🔔 **通知中心**：Key 即将过期、平台连续失败、配额超阈值、备份过期都会落库，顶栏铃铛直接进入
 - 💰 **成本估算与预算**：按定价表计算每次请求成本并给出覆盖率；Key 配额支持滚动窗口与超额拦截
@@ -246,7 +252,7 @@ Anthropic SDK ─────────────────→ POST /v1/me
 
 ## 🔐 登录鉴权
 
-管理后台（流量与统计、虚拟模型、平台、API 密钥、Playground、设置）需要登录：
+管理后台（流量与统计、虚拟模型、平台、API 密钥、Playground、客户端接入、设置）需要登录：
 
 - **首次启动**：打开管理页面会进入「初始化管理员账号」。初始化只接受来自本机（127.0.0.1）的请求，避免局域网内被他人抢先注册
 - **会话**：登录状态保存在 HttpOnly、SameSite=Strict 的 Cookie 中，默认 7 天有效；右上角用户菜单可退出
@@ -259,7 +265,7 @@ Anthropic SDK ─────────────────→ POST /v1/me
 | `/v1/models` | 公开 |
 | `/health` | 公开 |
 | `/api/auth/status`、`/api/auth/login`、`/api/auth/setup` | 公开（`setup` 实际仅限本机） |
-| 其余 `/api/*`（平台 / 模型 / 虚拟模型 / API Key / 设置 / 统计 / 备份） | 管理员登录会话 |
+| 其余 `/api/*`（平台 / 模型 / 虚拟模型 / API Key / 客户端接入 / 设置 / 统计 / 备份） | 管理员登录会话 |
 
 > 尚未创建任何 API Key 时，网关不校验 Key 的内容，但请求仍必须携带 `Authorization` 或 `x-api-key` 请求头（内容不校验）；创建 Key 之后必须使用有效 Key。账号密码保存在 SQLite 中（Argon2id 哈希），`config.toml` 的 `admin_token` 是历史保留字段。
 
@@ -471,6 +477,7 @@ ai-gateway/
 │   ├── proxy/            # 代理 handler、流式转换、签名缓存
 │   ├── lb/               # 负载均衡选择器
 │   ├── protocol/         # OpenAI / Anthropic 协议适配与思考参数
+│   ├── clients/          # 本地客户端配置接管（Claude Code / Codex / …）
 │   └── models/           # 数据模型
 ├── frontend/             # React 前端（构建到 ../static/）
 ├── src-tauri/            # Tauri 桌面封装

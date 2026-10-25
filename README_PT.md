@@ -101,6 +101,11 @@ Todas as capturas são do aplicativo desktop atual (tema escuro).
 <p align="center"><em>Playground — escolha um modelo virtual e um protocolo (OpenAI / Anthropic) e envie uma requisição real para verificar o roteamento e o upstream; crie uma chave temporária na hora ou copie o cURL equivalente</em></p>
 
 <p align="center">
+  <img src="doc/console-clients.png" width="92%" alt="Acesso de clientes" />
+</p>
+<p align="center"><em>Acesso de clientes — assunção por cartões das configurações locais de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; ao expandir o diff aparece, cada aplicação é copiada para backup e a desconexão restaura o estado</em></p>
+
+<p align="center">
   <img src="doc/console-settings.png" width="92%" alt="Configurações" />
 </p>
 <p align="center"><em>Configurações — porta e endereço de escuta, padrões da política de requisições, segurança da conta, estatísticas de dados (linhas / trilhas de tentativas / alertas / linhas órfãs / retenção de corpos de requisição), exportação e importação de configuração, e backup e restauração completos do banco</em></p>
@@ -211,7 +216,7 @@ Estes são limites de implementação fáceis de superestimar:
 |---|---|---|---|---|
 | **Forma** | App desktop + servidor binário único | Proxy reverso de uso geral | Servidor | Serviço Python |
 | **Gestão visual** | ✅ Console integrado | ❌ | ✅ Console web | ⚠️ Admin UI precisa ser ativada |
-| **Balanceamento de carga** | ✅ 4 estratégias | ✅ Rodízio / hash de upstream | ⚠️ Básico | ✅ |
+| **Balanceamento de carga** | ✅ 4 estratégias efetivas + opção de latência | ✅ Rodízio / hash de upstream | ⚠️ Básico | ✅ |
 | **Protocolo OpenAI** | ✅ | ✅ Repasse | ✅ | ✅ |
 | **Protocolo Anthropic** | ✅ Nativo | ❌ Apenas repasse, sem conversão | ✅ Conversão | ✅ Conversão |
 | **Novas tentativas em falhas** | ✅ 429 / 5xx / 408 | ⚠️ Requer `proxy_next_upstream` | ✅ | ✅ Retries + fallbacks |
@@ -231,8 +236,9 @@ Estes são limites de implementação fáceis de superestimar:
 - 🔗 **Suporte a reasoning_content**: saídas de cadeia de pensamento de plataformas como NVIDIA NIM; parâmetros de raciocínio OpenAI / Anthropic traduzidos nos dois sentidos
 - 📡 **Cabeçalhos repassados personalizados**: adicione cabeçalhos arbitrários por plataforma, sobrescrevendo `Authorization` / `x-api-key` quando os nomes coincidem
 - 🎛️ **Playground**: escolha um modelo e um protocolo, envie uma requisição real para verificar o roteamento e o upstream, crie uma chave temporária ou copie o cURL equivalente
+- 🔌 **Acesso de clientes**: assumir e restaurar com um clique as configurações locais de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; apenas os campos gerenciados pelo AI Gateway são alterados, cada aplicação é copiada para backup, com prévia do diff e editor de configuração bruta
 - 🌙 **Temas claro / escuro / sistema**; interface em chinês e inglês
-- 🧭 **Sete páginas**: Tráfego · Monitoramento · Modelos virtuais · Plataformas · Chaves de API · Playground · Configurações. Na página Tráfego, filtros, paginação e faixas de tempo vivem na URL, então atualizar e navegar para frente/trás preservam o estado
+- 🧭 **Oito páginas**: Tráfego · Monitoramento · Modelos virtuais · Plataformas · Chaves de API · Playground · Acesso de clientes · Configurações. Na página Tráfego, filtros, paginação e faixas de tempo vivem na URL, então atualizar e navegar para frente/trás preservam o estado
 - 🧾 **Trilhas de tentativas e replay**: cada tentativa de backend de uma requisição é registrada; a retenção de corpos de requisição fica desligada por padrão e, quando ativada, uma requisição armazenada pode ser reenviada palavra por palavra
 - 🔔 **Central de notificações**: chaves expirando, falhas repetidas de plataformas, estouros de cota e backups desatualizados são persistidos e acessíveis pelo sino no cabeçalho
 - 💰 **Estimativa de custos e orçamentos**: custo por requisição a partir da tabela de preços com taxa de cobertura; as cotas de chave suportam janelas deslizantes e rejeição ao ultrapassar o limite
@@ -246,7 +252,7 @@ Estes são limites de implementação fáceis de superestimar:
 
 ## 🔐 Autenticação
 
-O painel (tráfego e estatísticas, modelos virtuais, plataformas, chaves de API, Playground, configurações) exige login:
+O painel (tráfego e estatísticas, modelos virtuais, plataformas, chaves de API, Playground, acesso de clientes, configurações) exige login:
 
 - **Primeiro início**: o painel abre «Criar conta de administrador». A inicialização só aceita requisições da máquina local (127.0.0.1), para que alguém na LAN não reivindique a conta primeiro
 - **Sessões**: guardadas em cookie HttpOnly SameSite=Strict, válido por 7 dias. Saia pelo menu de usuário no canto superior direito
@@ -259,7 +265,7 @@ O painel (tráfego e estatísticas, modelos virtuais, plataformas, chaves de API
 | `/v1/models` | Público |
 | `/health` | Público |
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Público (`setup` é, na prática, restrito à máquina local) |
-| Todos os outros `/api/*` (plataformas / modelos / modelos virtuais / chaves de API / configurações / estatísticas / backups) | Sessão de administrador |
+| Todos os outros `/api/*` (plataformas / modelos / modelos virtuais / chaves de API / acesso de clientes / configurações / estatísticas / backups) | Sessão de administrador |
 
 > Sem nenhuma chave de API configurada, o gateway não valida o valor, mas as requisições ainda precisam levar um cabeçalho `Authorization` ou `x-api-key` (o valor não é validado); assim que uma chave existe, uma chave válida é exigida. As credenciais ficam no SQLite (hashes Argon2id); `admin_token` em `config.toml` é um campo histórico reservado.
 
@@ -472,6 +478,7 @@ ai-gateway/
 │   ├── proxy/            # Handlers de proxy, conversão de streaming, cache de assinaturas
 │   ├── lb/               # Seletor de balanceamento de carga
 │   ├── protocol/         # Adaptadores OpenAI / Anthropic e parâmetros de raciocínio
+│   ├── clients/          # Assunção de configurações locais de clientes (Claude Code / Codex / …)
 │   └── models/           # Modelos de dados
 ├── frontend/             # Frontend React (compila para ../static/)
 ├── src-tauri/            # Wrapper desktop Tauri
