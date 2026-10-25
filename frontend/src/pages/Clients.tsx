@@ -465,6 +465,13 @@ export default function Clients() {
   const openCard = (id: ClientId) => {
     seededFor.current = null
     touched.current = false
+    if (id !== expanded) {
+      // 换卡先清掉上一张的附加项：否则 Claude 的 env 键会被发给 Codex，
+      // 服务端按 Codex 的字段表校验，直接以「不是可托管字段」拒绝整次预览
+      setEnv({})
+      setTierNames({})
+      setTiers({})
+    }
     setNotice(null)
     setShowExtra(false)
     setShowMore(false)

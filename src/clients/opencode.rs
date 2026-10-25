@@ -160,15 +160,17 @@ impl Adapter for OpenCodeAdapter {
         let Some(entry) = root.get("provider").and_then(|p| p.get(PROVIDER_ID)) else {
             return empty;
         };
+        // 只回读字段表里的键：用户自己塞进 settings 的其他键一旦被塞回请求，
+        // 校验会以"不是可托管字段"拒绝整次接入，那张卡就点不动了
+        let allowed = self.extra_specs();
         let out = entry
             .get("settings")
             .and_then(Value::as_object)
             .map(|settings| {
                 settings
                     .iter()
-                    .filter_map(|(key, value)| {
-                        extra_text_from(value).map(|text| (key.clone(), text))
-                    })
+                    .filter(|(key, _)| allowed.iter().any(|spec| spec.key == **key))
+                    .filter_map(|(key, value)| extra_text_from(value).map(|text| (key.clone(), text)))
                     .collect()
             })
             .unwrap_or_default();

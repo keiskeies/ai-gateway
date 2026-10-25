@@ -3210,14 +3210,15 @@ h4,
 
 /* 禁用态的实心按钮：Mantine 用 --button-bg + 透明度压暗，深墨字会掉到 2.5:1。
    变量写在 style 属性里，只能 !important 覆盖成中性面板底 + 次级文字。 */
-.mantine-Button-root:disabled {
+/* Mantine 不给默认变体写 data-variant，所以「没有该属性」就是实心按钮 */
+.mantine-Button-root:not([data-variant]):disabled {
   opacity: 1;
   background: var(--panel-bg-2) !important;
   border-color: var(--line) !important;
   color: var(--text-2) !important;
 }
 
-.mantine-Button-root:disabled .mantine-Button-label {
+.mantine-Button-root:not([data-variant]):disabled .mantine-Button-label {
   color: inherit;
 }
 

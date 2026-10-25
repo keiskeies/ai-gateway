@@ -714,3 +714,127 @@ X-Tier: top"),
         .is_some_and(|text| text.contains("X-Client: ai-gateway")));
     let _ = fs::remove_dir_all(&home);
 }
+
+#[test]
+fn reapplying_claude_keeps_the_key_as_self_created_so_restore_deletes_it() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &claude::ClaudeCodeAdapter;
+    write(&adapter.path(&paths), "{\"env\":{}}");
+    let token = "sk-aigw-unit-test-token-0123456789";
+
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("API_TIMEOUT_MS".to_string(), "300000".to_string());
+    let extras = ClientExtras {
+        tier_names: Default::default(),
+        env,
+        managed: None,
+    };
+    let first = apply_plan_with(adapter, &paths, token, &extras);
+    // 第二次接入同样的键：托管记录里的 before 必须仍是 null（= 我们自己建的键）
+    let second = adapter
+        .plan(
+            &paths,
+            &models(),
+            "http://127.0.0.1:1994",
+            token,
+            true,
+            &ClientExtras {
+                tier_names: Default::default(),
+                env: extras.env.clone(),
+                managed: Some(first.managed.clone()),
+            },
+        )
+        .expect("second plan");
+    assert_eq!(
+        second.managed["env"]["API_TIMEOUT_MS"]["before"],
+        Value::Null,
+        "重复接入不能把上次代写的值当成用户原件"
+    );
+    fs::write(adapter.path(&paths), &second.content).expect("apply");
+    let restored = adapter.restore(&paths, &with_hash(&second.managed, token)).expect("restore");
+    let root: Value = serde_json::from_slice(&restored.content).expect("json");
+    assert!(
+        !claude_env(&root).contains_key("API_TIMEOUT_MS"),
+        "自己创建的键撤销后应当消失，而不是留下我们写过的值"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn opencode_read_extras_ignores_settings_the_table_does_not_own() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = opencode::OpenCodeAdapter;
+    write(
+        &adapter.path(&paths),
+        "{\"provider\":{\"ai-gateway\":{\"settings\":{\"timeout\":45000,\"chunkTimeout\":9000}}}}",
+    );
+    let (values, _) = Adapter::read_extras(&adapter, &paths);
+    assert_eq!(values.get("timeout").map(String::as_str), Some("45000"));
+    assert!(
+        !values.contains_key("chunkTimeout"),
+        "字段表之外的键一旦被回读，就会被当成请求发回去并整次被拒"
+    );
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn codex_drops_a_top_level_extra_when_the_switch_is_turned_off() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = &codex::CodexAdapter;
+    write(&adapter.path(&paths), "model = \"gpt-5\"
+");
+    let token = "sk-aigw-unit-test-token-0123456789";
+
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("model_reasoning_effort".to_string(), "high".to_string());
+    let first = apply_plan_with(
+        adapter,
+        &paths,
+        token,
+        &ClientExtras {
+            tier_names: Default::default(),
+            env,
+            managed: None,
+        },
+    );
+    let text = String::from_utf8(first.content.clone()).expect("utf8");
+    assert!(text.contains("model_reasoning_effort = \"high\""));
+
+    // 第二次把开关关掉：托管记录里有这个键，文件里就必须没有它
+    let second = adapter
+        .plan(
+            &paths,
+            &models(),
+            "http://127.0.0.1:1994",
+            token,
+            true,
+            &ClientExtras {
+                tier_names: Default::default(),
+                env: Default::default(),
+                managed: Some(first.managed.clone()),
+            },
+        )
+        .expect("second plan");
+    let text = String::from_utf8(second.content.clone()).expect("utf8");
+    assert!(!text.contains("model_reasoning_effort"), "{text}");
+    assert!(second
+        .changes
+        .iter()
+        .any(|change| change.path == "model_reasoning_effort" && change.after.is_empty()));
+    // 这个键是第一代接入创建的，所以原件仍是 null：撤销时要"删掉"而不是写回某个值
+    assert_eq!(
+        second.managed["top"]["extra"]["model_reasoning_effort"]["before"],
+        Value::Null
+    );
+    fs::write(adapter.path(&paths), &second.content).expect("apply second");
+    let restored = adapter
+        .restore(&paths, &with_hash(&second.managed, token))
+        .expect("restore");
+    let text = String::from_utf8(restored.content).expect("utf8");
+    assert!(!text.contains("model_reasoning_effort"), "{text}");
+    assert!(text.contains("model = \"gpt-5\""), "{text}");
+    let _ = fs::remove_dir_all(&home);
+}

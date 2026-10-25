@@ -251,16 +251,15 @@ impl Adapter for ClaudeCodeAdapter {
         let mut managed_env = Map::new();
         for (key, value, secret) in &desired {
             let current = env.get(key.as_str()).cloned();
-            // 同一个键被反复代写时，托管记录里要一直是用户最初的那个值
-            let before = previous
-                .and_then(|entries| entries.get(key.as_str()))
-                .and_then(|entry| entry.get("before"))
-                .cloned()
-                .filter(|value| !value.is_null())
-                .or(current);
+            // 同一个键被反复代写时，托管记录里要一直是用户最初的那个值。
+            // 记录里出现过、但 before 是 null，表示"这个键是我们创建的"，撤销要删掉而不是写回。
+            let before = match previous.and_then(|entries| entries.get(key.as_str())) {
+                Some(entry) => Some(entry.get("before").cloned().unwrap_or(Value::Null)),
+                None => current.clone(),
+            };
             changes.push(change(
                 format!("env.{key}"),
-                before.clone(),
+                before.clone().filter(|value| !value.is_null()),
                 if is_numeric_env_key(key) {
                     value.parse::<i64>().map(|number| json!(number)).unwrap_or_else(|_| json!(value))
                 } else {
@@ -291,21 +290,19 @@ impl Adapter for ClaudeCodeAdapter {
         for key in &removals {
             let current = env.remove(key.as_str());
             // 记住的是"用户原来的值"，不是上一次代写留下的值——否则撤销会把我们的值当原件还回去
-            let before = previous
-                .and_then(|entries| entries.get(key.as_str()))
-                .and_then(|entry| entry.get("before"))
-                .cloned()
-                .filter(|value| !value.is_null())
-                .or(current);
+            let before = match previous.and_then(|entries| entries.get(key.as_str())) {
+                Some(entry) => entry.get("before").cloned().unwrap_or(Value::Null),
+                None => current.unwrap_or(Value::Null),
+            };
             changes.push(ClientChange {
                 path: format!("env.{key}"),
-                before: before.as_ref().and_then(Value::as_str).map(str::to_string),
+                before: before.as_str().map(str::to_string),
                 after: String::new(),
                 secret: false,
             });
             managed_env.insert(
                 key.clone(),
-                json!({ "before": before.unwrap_or(Value::Null), "after": null }),
+                json!({ "before": before, "after": null }),
             );
         }
 

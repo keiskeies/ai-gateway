@@ -543,30 +543,6 @@ pub fn is_numeric_env_key(key: &str) -> bool {
 
 const TIER_KEYS: &[&str] = &["sonnet", "opus", "haiku", "fable"];
 
-fn validate_env(env: &HashMap<String, String>) -> AppResult<BTreeMap<String, String>> {
-    let mut out = BTreeMap::new();
-    for (key, value) in env {
-        if !CLAUDE_ENV_KEYS.contains(&key.as_str()) {
-            return Err(AppError::BadRequest(format!(
-                "env key {key} is not managed by AI Gateway; allowed: {}",
-                CLAUDE_ENV_KEYS.join(", ")
-            )));
-        }
-        let value = value.trim();
-        if value.is_empty() || value.len() > 2000 {
-            return Err(AppError::BadRequest(format!("env {key} must be 1–2000 characters")));
-        }
-        if key != "ANTHROPIC_CUSTOM_HEADERS" && value.chars().any(|c| c == '\n' || c == '\r') {
-            return Err(AppError::BadRequest(format!("env {key} must be a single line")));
-        }
-        if NUMERIC_CLAUDE_ENV_KEYS.contains(&key.as_str()) && value.parse::<u64>().is_err() {
-            return Err(AppError::BadRequest(format!("env {key} must be a number")));
-        }
-        out.insert(key.clone(), value.to_string());
-    }
-    Ok(out)
-}
-
 fn validate_tier_names(names: &HashMap<String, String>) -> AppResult<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
     for (tier, name) in names {

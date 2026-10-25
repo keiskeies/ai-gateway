@@ -215,8 +215,24 @@ impl Adapter for CodexAdapter {
             )));
         }
 
-        let before_model = doc.get("model").and_then(Item::as_str).map(str::to_string);
-        let before_provider = doc.get("model_provider").and_then(Item::as_str).map(str::to_string);
+        // 重复接入时 before 要沿用第一次记录里的用户原件，不能把上一次代写的值当成原件
+        let carried = extras
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.get("top"))
+            .cloned();
+        let carried_before = |key: &str| {
+            carried
+                .as_ref()
+                .and_then(|top| top.get(key))
+                .and_then(|entry| entry.get("before"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        let before_model = carried_before("model")
+            .or_else(|| doc.get("model").and_then(Item::as_str).map(str::to_string));
+        let before_provider = carried_before("model_provider")
+            .or_else(|| doc.get("model_provider").and_then(Item::as_str).map(str::to_string));
         let before_token = field(existing_table.as_ref(), TOKEN_FIELD).filter(|token| !token.trim().is_empty());
         let openai_base = openai_base(base_url);
 
@@ -241,6 +257,29 @@ impl Adapter for CodexAdapter {
         for (key, setting) in &extras.env {
             before_extras.insert(key.clone(), json_of_item(doc.get(key.as_str())));
             doc.insert(key.as_str(), value(json_to_toml(&typed_top(key, setting))));
+        }
+        // 上次代写、这次取消勾选的顶层键要删掉：只插不删的话，关掉开关它其实还在生效
+        let stale: Vec<(String, Option<Value>)> = extras
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.get("top"))
+            .and_then(|top| top.get("extra"))
+            .and_then(Value::as_object)
+            .map(|entries| {
+                entries
+                    .keys()
+                    .filter(|key| !extras.env.contains_key(*key))
+                    .cloned()
+                    .map(|key| {
+                        let previous = json_of_item(doc.get(key.as_str()));
+                        (key, previous)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (key, previous) in &stale {
+            doc.remove(key.as_str());
+            before_extras.insert(key.clone(), previous.clone());
         }
 
         let mut changes = vec![
@@ -274,19 +313,39 @@ impl Adapter for CodexAdapter {
         }
 
         let mut top_extra = serde_json::Map::new();
+        // 上一次代写的原件记录：重复接入时 before 要一直是用户最初的值，
+        // 记录里是 null 表示"这个键是我们创建的"，撤销要删掉而不是把我们写的值当原件还回去
+        let carried = extras
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.get("top"))
+            .and_then(|top| top.get("extra"))
+            .and_then(Value::as_object)
+            .cloned();
         for (key, setting) in &extras.env {
-            let before = before_extras.get(key).cloned().flatten();
+            let before = match carried.as_ref().and_then(|entries| entries.get(key)) {
+                Some(entry) => entry.get("before").cloned().filter(|value| !value.is_null()),
+                None => before_extras.get(key).cloned().flatten(),
+            };
             let after = typed_top(key, setting);
-            changes.push(change(
-                key.clone(),
-                before.clone(),
-                after.clone(),
-                false,
-            ));
+            changes.push(change(key.clone(), before.clone(), after.clone(), false));
             top_extra.insert(
                 key.clone(),
                 json!({ "before": before.unwrap_or(Value::Null), "after": after }),
             );
+        }
+        for (key, previous) in &stale {
+            let before = match carried.as_ref().and_then(|entries| entries.get(key)) {
+                Some(entry) => entry.get("before").cloned().filter(|value| !value.is_null()),
+                None => previous.clone(),
+            };
+            changes.push(ClientChange {
+                path: key.clone(),
+                before: before.as_ref().and_then(Value::as_str).map(str::to_string),
+                after: String::new(),
+                secret: false,
+            });
+            top_extra.insert(key.clone(), json!({ "before": before.unwrap_or(Value::Null), "after": null }));
         }
 
         let mut warnings = vec![
