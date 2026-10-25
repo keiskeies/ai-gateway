@@ -575,117 +575,141 @@ export default function Clients() {
 
                       {showMore && (
                         <div className="console-client-more">
-                          <Field full label={t(locale, 'clientGatewayUrl')}>
-                            <TextInput
-                              size="xs"
-                              value={baseUrl}
-                              onChange={event => setBaseUrl(event.currentTarget.value)}
-                              placeholder={gatewayUrl}
-                              disabled={busy !== null}
-                            />
-                          </Field>
-                          <div className="console-client-tier-note">{t(locale, 'clientGatewayUrlDesc')}</div>
+                          <div className="console-client-block">
+                            <div className="console-client-block-head">{t(locale, 'clientGatewayUrl')}</div>
+                            <div className="console-client-block-body">
+                              <TextInput
+                                size="xs"
+                                className="console-client-url"
+                                aria-label={t(locale, 'clientGatewayUrl')}
+                                value={baseUrl}
+                                onChange={event => setBaseUrl(event.currentTarget.value)}
+                                placeholder={gatewayUrl}
+                                disabled={busy !== null}
+                              />
+                              <div className="console-client-note">{t(locale, 'clientGatewayUrlDesc')}</div>
+                            </div>
+                          </div>
 
                           {client.id === 'claude_code' && (
                             <>
-                              <div className="console-client-subhead">{t(locale, 'clientTiersTitle')}</div>
-                              <div className="console-client-tiers">
-                                {CLAUDE_TIERS.map(([field, label]) => (
-                                  <div className="console-client-tier" key={field}>
-                                    <Field label={t(locale, label)}>
+                              <div className="console-client-block">
+                                <div className="console-client-block-head">{t(locale, 'clientTiersTitle')}</div>
+                                <div className="console-client-block-body">
+                                  <div className="console-client-tiers">
+                                    <div className="console-client-trow head">
+                                      <span aria-hidden="true" />
+                                      <span>{t(locale, 'clientTierColumnModel')}</span>
+                                      <span>{t(locale, 'clientTierDisplayName')}</span>
+                                    </div>
+                                    {CLAUDE_TIERS.map(([field, label]) => (
+                                      <div className="console-client-trow" key={field}>
+                                        <span className="console-client-tname">{t(locale, label)}</span>
+                                        <Select
+                                          size="xs"
+                                          aria-label={`${t(locale, label)} ${t(locale, 'clientTierColumnModel')}`}
+                                          data={modelNames.map(model => ({ value: model, label: model }))}
+                                          value={tiers[field] ?? null}
+                                          onChange={value => setTiers(current => ({ ...current, [field]: value }))}
+                                          placeholder={t(locale, 'clientFollowDefault')}
+                                          clearable
+                                          clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
+                                          searchable
+                                          disabled={busy !== null}
+                                        />
+                                        {field === 'subagent' ? (
+                                          <span className="console-client-tdash">—</span>
+                                        ) : (
+                                          <TextInput
+                                            size="xs"
+                                            aria-label={`${t(locale, label)} ${t(locale, 'clientTierDisplayName')}`}
+                                            value={tierNames[field] ?? ''}
+                                            onChange={event =>
+                                              setTierNames(current => ({
+                                                ...current,
+                                                [field]: event.currentTarget.value,
+                                              }))
+                                            }
+                                            placeholder={tiers[field] || defaultModel}
+                                            disabled={busy !== null}
+                                          />
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div className="console-client-note">{t(locale, 'clientTierNote')}</div>
+                                </div>
+                              </div>
+
+                              <div className="console-client-block">
+                                <div className="console-client-block-head">{t(locale, 'clientFlagsTitle')}</div>
+                                <div className="console-client-block-body">
+                                  <div className="console-client-flags">
+                                    {CLAUDE_FLAGS.map(flag => (
+                                      <Checkbox
+                                        key={flag.key}
+                                        size="xs"
+                                        label={t(locale, flag.label)}
+                                        description={t(locale, flag.desc)}
+                                        checked={env[flag.key] === flag.value}
+                                        onChange={event =>
+                                          setEnvKey(flag.key, event.currentTarget.checked ? flag.value : null)
+                                        }
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="console-client-block">
+                                <div className="console-client-block-head">{t(locale, 'clientNumbersTitle')}</div>
+                                <div className="console-client-block-body">
+                                  <div className="console-client-fields">
+                                    {CLAUDE_NUMBERS.map(item => (
+                                      <Field key={item.key} label={t(locale, item.label)}>
+                                        <TextInput
+                                          size="xs"
+                                          inputMode="numeric"
+                                          value={env[item.key] ?? ''}
+                                          onChange={event => setEnvKey(item.key, event.currentTarget.value)}
+                                          placeholder={item.placeholder}
+                                          disabled={busy !== null}
+                                        />
+                                      </Field>
+                                    ))}
+                                  </div>
+                                  <div className="console-client-fields stacked">
+                                    <Field label={t(locale, 'clientSmallFast')}>
                                       <Select
                                         size="xs"
                                         data={modelNames.map(model => ({ value: model, label: model }))}
-                                        value={tiers[field] ?? null}
-                                        onChange={value => setTiers(current => ({ ...current, [field]: value }))}
-                                        placeholder={t(locale, 'clientFollowDefault')}
+                                        value={env.ANTHROPIC_SMALL_FAST_MODEL ?? null}
+                                        onChange={value => setEnvKey('ANTHROPIC_SMALL_FAST_MODEL', value)}
+                                        placeholder={t(locale, 'clientNone')}
                                         clearable
                                         clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
                                         searchable
                                         disabled={busy !== null}
                                       />
                                     </Field>
-                                    {field !== 'subagent' && (
-                                      <Field label={t(locale, 'clientTierDisplayName')}>
-                                        <TextInput
-                                          size="xs"
-                                          value={tierNames[field] ?? ''}
-                                          onChange={event =>
-                                            setTierNames(current => ({
-                                              ...current,
-                                              [field]: event.currentTarget.value,
-                                            }))
-                                          }
-                                          placeholder={tiers[field] || defaultModel}
-                                          disabled={busy !== null}
-                                        />
-                                      </Field>
-                                    )}
+                                    <Field label={t(locale, 'clientEnvHeaders')}>
+                                      <Textarea
+                                        size="xs"
+                                        autosize
+                                        minRows={2}
+                                        value={env.ANTHROPIC_CUSTOM_HEADERS ?? ''}
+                                        onChange={event =>
+                                          setEnvKey('ANTHROPIC_CUSTOM_HEADERS', event.currentTarget.value)
+                                        }
+                                        placeholder="X-Client: ai-gateway"
+                                        disabled={busy !== null}
+                                      />
+                                    </Field>
                                   </div>
-                                ))}
+                                  <div className="console-client-note">{t(locale, 'clientNumbersDesc')}</div>
+                                  <div className="console-client-note">{t(locale, 'clientHeadersDesc')}</div>
+                                </div>
                               </div>
-                              <div className="console-client-tier-note">{t(locale, 'clientTierNote')}</div>
-
-                              <div className="console-client-subhead">{t(locale, 'clientFlagsTitle')}</div>
-                              <div className="console-client-flags">
-                                {CLAUDE_FLAGS.map(flag => (
-                                  <Checkbox
-                                    key={flag.key}
-                                    size="xs"
-                                    label={t(locale, flag.label)}
-                                    description={t(locale, flag.desc)}
-                                    checked={env[flag.key] === flag.value}
-                                    onChange={event =>
-                                      setEnvKey(flag.key, event.currentTarget.checked ? flag.value : null)
-                                    }
-                                  />
-                                ))}
-                              </div>
-
-                              <div className="console-client-subhead">{t(locale, 'clientNumbersTitle')}</div>
-                              <div className="console-client-numbers">
-                                {CLAUDE_NUMBERS.map(item => (
-                                  <Field key={item.key} label={t(locale, item.label)}>
-                                    <TextInput
-                                      size="xs"
-                                      inputMode="numeric"
-                                      value={env[item.key] ?? ''}
-                                      onChange={event => setEnvKey(item.key, event.currentTarget.value)}
-                                      placeholder={item.placeholder}
-                                      disabled={busy !== null}
-                                    />
-                                  </Field>
-                                ))}
-                                <Field label={t(locale, 'clientSmallFast')}>
-                                  <Select
-                                    size="xs"
-                                    data={modelNames.map(model => ({ value: model, label: model }))}
-                                    value={env.ANTHROPIC_SMALL_FAST_MODEL ?? null}
-                                    onChange={value => setEnvKey('ANTHROPIC_SMALL_FAST_MODEL', value)}
-                                    placeholder={t(locale, 'clientNone')}
-                                    clearable
-                                    clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
-                                    searchable
-                                    disabled={busy !== null}
-                                  />
-                                </Field>
-                              </div>
-                              <div className="console-client-tier-note">{t(locale, 'clientNumbersDesc')}</div>
-
-                              <Field full label={t(locale, 'clientEnvHeaders')}>
-                                <Textarea
-                                  size="xs"
-                                  autosize
-                                  minRows={2}
-                                  value={env.ANTHROPIC_CUSTOM_HEADERS ?? ''}
-                                  onChange={event =>
-                                    setEnvKey('ANTHROPIC_CUSTOM_HEADERS', event.currentTarget.value)
-                                  }
-                                  placeholder={'X-Client: ai-gateway'}
-                                  disabled={busy !== null}
-                                />
-                              </Field>
-                              <div className="console-client-tier-note">{t(locale, 'clientHeadersDesc')}</div>
                             </>
                           )}
                         </div>

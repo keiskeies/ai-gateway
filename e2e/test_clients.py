@@ -112,6 +112,34 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     _click_in(claude, "更多设置")
     claude.locator(".console-client-tiers").wait_for(state="visible", timeout=10000)
 
+    # 排版探针：三列必须真的对齐——同一行两个控件中心 y 相同，跨行左右边线相同
+    rows = claude.locator(".console-client-trow:not(.head)").evaluate_all(
+        """rows => [...rows].map(row => [...row.children]
+            .map(el => {
+                const r = el.getBoundingClientRect();
+                return { x: r.x, y: r.y, w: r.width, mid: r.y + r.height / 2 };
+            })
+            // Mantine 会在行里留一个 0 尺寸节点，它不参与对齐
+            .filter(box => box.w > 0 && box.mid > 0))"""
+    )
+    assert len(rows) == 5, rows
+    for index, row in enumerate(rows):
+        assert len(row) == 3, f"row {index} lost a column: {row}"
+        assert abs(row[1]["mid"] - row[2]["mid"]) <= 2, f"row {index} 的两个控件没对齐：{row}"
+    for column in (0, 1, 2):
+        edges = {round(row[column]["x"], 1) for row in rows}
+        widths = {round(row[column]["w"], 1) for row in rows if column > 0}
+        assert len(edges) == 1, f"column {column} 左边线不齐：{edges}"
+        assert len(widths) <= 1, f"column {column} 宽度不一：{widths}"
+    rail = claude.locator(".console-client-block-head").evaluate_all(
+        "els => [...new Set(els.map(el => Math.round(el.getBoundingClientRect().x)))]"
+    )
+    assert len(rail) == 1, f"标签栏没对齐在同一条左边线：{rail}"
+    widest = claude.locator(".console-client-more input, .console-client-more textarea").evaluate_all(
+        "els => Math.max(...els.map(el => el.getBoundingClientRect().width))"
+    )
+    assert widest <= 620, f"控件被拉满整屏（{widest}px）"
+
     # 档位显示名、开关、请求参数：都写进 Claude Code 自己的环境变量
     # 按 label 定位：Mantine Select 会多带一个隐藏 input，按序号取会打进下拉的搜索框
     claude.get_by_label("显示名称").nth(1).fill("Opus 4.5")

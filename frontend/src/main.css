@@ -1910,7 +1910,12 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   display: flex;
   align-items: flex-end;
   flex-wrap: wrap;
-  gap: 10px 14px;
+  gap: 10px 16px;
+}
+
+.console-client-row .console-field {
+  margin-bottom: 0;
+  width: 260px;
 }
 
 .console-client-disclose {
@@ -1937,11 +1942,9 @@ html.wall-fullscreen .wall-timeline-lane-chart {
 }
 
 .console-client-more {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin: 4px 0 2px;
-  padding: 12px;
+  margin: 6px 0 2px;
+  padding: 0 14px;
+  max-width: 1060px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-bg);
@@ -1953,20 +1956,43 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   gap: 10px 14px;
 }
 
-.console-client-tier-note {
-  grid-column: 1 / -1;
+
+/* 附加设置：左侧一条标签栏，右侧所有控件共用同一条左边线 */
+.console-client-block {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding: 13px 0;
+  border-top: 1px solid var(--line);
+}
+
+.console-client-block:first-child {
+  border-top: none;
+}
+
+.console-client-block-head {
+  padding-top: 3px;
+  font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1.6;
+  letter-spacing: 0.08em;
   color: var(--text-3);
 }
 
-.console-client-subhead {
-  padding-top: 4px;
-  border-top: 1px solid var(--line);
-  margin-top: 4px;
+.console-client-block-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.console-client-url {
+  max-width: 420px;
+}
+
+.console-client-note {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  line-height: 1.6;
   color: var(--text-3);
 }
 
@@ -1976,31 +2002,74 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   gap: 8px;
 }
 
-.console-client-tier {
+.console-client-trow {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 10px 12px;
-  align-items: end;
+  grid-template-columns: 104px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px 14px;
+  align-items: center;
+}
+
+.console-client-trow.head > span {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.console-client-tname {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.console-client-tdash {
+  color: var(--text-3);
+  text-align: center;
 }
 
 .console-client-flags {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 9px;
 }
 
 .console-client-flags .mantine-Checkbox-root {
   align-items: flex-start;
 }
 
-.console-client-numbers {
+.console-client-fields {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 10px 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.console-client-fields .console-field {
+  margin-bottom: 0;
+}
+
+.console-client-fields.stacked {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: 520px;
 }
 
 @media (max-width: 899px) {
-  .console-client-tier {
+  .console-client-block {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .console-client-trow {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+
+  .console-client-trow > :last-child {
+    grid-column: 2 / -1;
+  }
+
+  .console-client-trow.head > :last-child {
+    grid-column: 2 / -1;
+  }
+
+  .console-client-fields {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -2011,6 +2080,8 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel-bg);
+  /* 与上面的附加设置面板同宽，右侧留白才不像是漏了什么 */
+  max-width: 1060px;
 }
 
 .console-client-changes-head {
