@@ -23,7 +23,7 @@ mod service_tests;
 use crate::error::{AppError, AppResult};
 use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -377,6 +377,16 @@ impl ExtraSpec {
         }
     }
 
+    fn headers(key: &str, label: &str, path: &str) -> Self {
+        Self {
+            key: key.into(),
+            kind: "headers".into(),
+            options: vec![],
+            label: label.into(),
+            path: path.into(),
+        }
+    }
+
     fn choice(key: &str, label: &str, path: &str, options: &[&str]) -> Self {
         Self {
             key: key.into(),
@@ -474,7 +484,7 @@ pub fn validate_extras(
                     )));
                 }
             }
-            "bool" => {}
+            "bool" | "headers" => {}
             _ => {
                 if key != "ANTHROPIC_CUSTOM_HEADERS" && value.chars().any(|c| c == '\n' || c == '\r') {
                     return Err(AppError::BadRequest(format!("{key} must be a single line")));
@@ -691,6 +701,54 @@ pub fn adapter(id: ClientId) -> &'static dyn Adapter {
         ClientId::Openclaw => &openclaw::OpenClawAdapter,
         ClientId::Pi => &pi::PiAdapter,
         ClientId::Hermes => &hermes::HermesAdapter,
+    }
+}
+
+/// 附加键的值按字段表说的类型落成 JSON：数字就是数字、布尔就是布尔、headers 是对象。
+pub fn typed_extra_value(kind: &str, value: &str) -> Value {
+    match kind {
+        "number" => value
+            .parse::<i64>()
+            .map(|number| json!(number))
+            .or_else(|_| value.parse::<f64>().map(|number| json!(number)))
+            .unwrap_or_else(|_| json!(value)),
+        "bool" => json!(matches!(value, "1" | "true")),
+        "headers" => Value::Object(parse_headers(value)),
+        _ => json!(value),
+    }
+}
+
+/// `名称: 值` 每行一条，与 Claude 的 ANTHROPIC_CUSTOM_HEADERS 同一种写法。
+pub fn parse_headers(value: &str) -> Map<String, Value> {
+    value
+        .lines()
+        .filter_map(|line| {
+            let (name, header) = line.split_once(':')?;
+            let name = name.trim();
+            let header = header.trim();
+            if name.is_empty() || header.is_empty() {
+                return None;
+            }
+            Some((name.to_string(), json!(header)))
+        })
+        .collect()
+}
+
+pub fn render_headers(map: &Map<String, Value>) -> String {
+    map.iter()
+        .filter_map(|(name, value)| value.as_str().map(|text| format!("{name}: {text}")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 从 JSON 读回字符串，供表单播种
+pub fn extra_text_from(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(flag) => Some(if *flag { "1".to_string() } else { "0".to_string() }),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Object(map) if !map.is_empty() => Some(render_headers(map)),
+        _ => None,
     }
 }
 

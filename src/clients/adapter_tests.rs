@@ -610,3 +610,107 @@ fn extras_are_validated_against_the_clients_own_field_table() {
     let extras = unknown.extras(None).expect("extras");
     assert!(validate_extras(&specs, &extras.env).is_err(), "未列入字段表的键要拒绝");
 }
+
+fn extras_of(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect()
+}
+
+#[test]
+fn opencode_timeout_lands_in_the_provider_settings() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = opencode::OpenCodeAdapter;
+    write(&adapter.path(&paths), "{}");
+    let plan = apply_plan_with(
+        &adapter,
+        &paths,
+        "sk-aigw-unit-test-token-0123456789",
+        &ClientExtras {
+            tier_names: Default::default(),
+            env: extras_of(&[("timeout", "45000")]),
+            managed: None,
+        },
+    );
+    let root = parse_json5(&String::from_utf8_lossy(&plan.content));
+    let entry = &root["provider"]["ai-gateway"];
+    // 数字，不是字符串；且只在 settings 里
+    assert_eq!(entry["settings"]["timeout"], json!(45000));
+    assert!(entry.get("timeout").is_none(), "timeout 不该出现在 provider 顶层");
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn openclaw_model_entry_carries_window_output_and_reasoning() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = openclaw::OpenClawAdapter;
+    write(&adapter.path(&paths), "{}");
+    let plan = apply_plan_with(
+        &adapter,
+        &paths,
+        "sk-aigw-unit-test-token-0123456789",
+        &ClientExtras {
+            tier_names: Default::default(),
+            env: extras_of(&[("contextWindow", "200000"), ("maxTokens", "8192"), ("reasoning", "1")]),
+            managed: None,
+        },
+    );
+    let root = parse_json5(&String::from_utf8_lossy(&plan.content));
+    let model = &root["models"]["providers"]["ai-gateway"]["models"][0];
+    assert_eq!(model["contextWindow"], json!(200000));
+    assert_eq!(model["maxTokens"], json!(8192));
+    assert_eq!(model["reasoning"], json!(true), "推理标记必须是布尔");
+
+    // 撤销把整个 provider 摘掉，附加字段跟着走
+    let restored = adapter
+        .restore(&paths, &with_hash(&plan.managed, "sk-aigw-unit-test-token-0123456789"))
+        .expect("restore");
+    let gone = parse_json5(&String::from_utf8_lossy(&restored.content));
+    assert!(gone
+        .get("models")
+        .and_then(|m| m.get("providers"))
+        .and_then(|p| p.get("ai-gateway"))
+        .is_none());
+    let _ = fs::remove_dir_all(&home);
+}
+
+#[test]
+fn pi_splits_model_fields_from_provider_headers() {
+    let home = home();
+    let paths = ClientPaths::for_home(&home);
+    let adapter = pi::PiAdapter;
+    write(&adapter.path(&paths), "{}");
+    let plan = apply_plan_with(
+        &adapter,
+        &paths,
+        "sk-aigw-unit-test-token-0123456789",
+        &ClientExtras {
+            tier_names: Default::default(),
+            env: extras_of(&[
+                ("maxTokens", "32000"),
+                ("reasoning", "1"),
+                ("headers", "X-Client: ai-gateway
+X-Tier: top"),
+            ]),
+            managed: None,
+        },
+    );
+    let root = parse_json5(&String::from_utf8_lossy(&plan.content));
+    let entry = &root["providers"]["ai-gateway"];
+    let model = &entry["models"][0];
+    assert_eq!(model["maxTokens"], json!(32000));
+    assert_eq!(model["reasoning"], json!(true));
+    // headers 是对象，不是把两行文本塞成一个字符串
+    assert_eq!(entry["headers"], json!({"X-Client": "ai-gateway", "X-Tier": "top"}));
+
+    let (values, _) = adapter.read_extras(&paths);
+    assert_eq!(values.get("maxTokens").map(String::as_str), Some("32000"));
+    assert_eq!(values.get("reasoning").map(String::as_str), Some("1"));
+    assert!(values
+        .get("headers")
+        .is_some_and(|text| text.contains("X-Client: ai-gateway")));
+    let _ = fs::remove_dir_all(&home);
+}

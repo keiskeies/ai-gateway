@@ -40,6 +40,12 @@ def clients_setup(instances):
     )
     (home / ".codex").mkdir(parents=True, exist_ok=True)
     (home / ".codex" / "config.toml").write_text(CODEX, encoding="utf-8")
+    for relative in (".config/opencode", ".openclaw", ".pi/agent"):
+        directory = home.joinpath(*relative.split("/"))
+        directory.mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "opencode" / "opencode.json").write_text('{"$schema": "x"}' + chr(10), encoding="utf-8")
+    (home / ".openclaw" / "openclaw.json").write_text('{"models": {"mode": "merge"}}' + chr(10), encoding="utf-8")
+    (home / ".pi" / "agent" / "models.json").write_text('{"providers": {}}' + chr(10), encoding="utf-8")
 
     instance = instances("clients", extra_env={"AIGW_CLIENT_HOME": str(home)})
     instance.api.setup_admin()
@@ -278,4 +284,34 @@ def test_codex_extras_render_from_the_server_field_table(clients_setup, browser_
 
     violations = console.audit(page)
     assert not violations, json.dumps(violations, ensure_ascii=False)[:800]
+    page.close()
+
+@pytest.mark.parametrize(
+    ("client", "labels"),
+    [
+        ("OpenCode", ["请求超时 (ms)"]),
+        ("OpenClaw", ["上下文窗口", "最大输出 Token", "支持推理"]),
+        ("Pi", ["最大输出 Token", "支持推理", "自定义 Header"]),
+    ],
+)
+def test_extras_render_per_client(clients_setup, browser_factory, client, labels):
+    """字段表按客户端下发：同一套渲染器，各自的字段与各自的落点。"""
+    instance, _home = clients_setup
+    console = browser_factory(instance.api, init=INIT)
+    page = console.new_page()
+    console.goto(page, "/clients", ".console-shell")
+    page.wait_for_selector(".console-client", timeout=15000)
+
+    card = _card(page, client)
+    _click_in(card, "接入")
+    card.locator(".console-client-body").wait_for(state="visible", timeout=10000)
+    _click_in(card, "更多设置")
+    more = card.locator(".console-client-more")
+    more.wait_for(state="visible", timeout=10000)
+    text = more.inner_text()
+    assert "这个客户端的附加项" in text, text
+    for label in labels:
+        assert label in text, f"{client} 的字段表里少了 {label}：{text}"
+    # 别家客户端的字段不能串味
+    assert "禁用自动升级" not in text and "Sonnet 档" not in text
     page.close()

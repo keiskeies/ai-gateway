@@ -138,6 +138,43 @@ impl Adapter for OpenCodeAdapter {
         Ok(token_of(entry(&root)))
     }
 
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        vec![ExtraSpec::number(
+            "timeout",
+            "clientEnvTimeout",
+            &format!("provider.{PROVIDER_ID}.settings.timeout"),
+        )]
+    }
+
+    fn read_extras(
+        &self,
+        paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let empty = (BTreeMap::new(), BTreeMap::new());
+        let Some(text) = read_text(&self.path(paths)).expect("read") else {
+            return empty;
+        };
+        let Ok(root) = json5::from_str::<Value>(&text) else {
+            return empty;
+        };
+        let Some(entry) = root.get("provider").and_then(|p| p.get(PROVIDER_ID)) else {
+            return empty;
+        };
+        let out = entry
+            .get("settings")
+            .and_then(Value::as_object)
+            .map(|settings| {
+                settings
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        extra_text_from(value).map(|text| (key.clone(), text))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (out, BTreeMap::new())
+    }
+
     fn plan(
         &self,
         paths: &ClientPaths,
@@ -145,7 +182,7 @@ impl Adapter for OpenCodeAdapter {
         base_url: &str,
         token: &str,
         allow_existing: bool,
-        _extras: &ClientExtras,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut root, original) = load(&path)?;
@@ -159,12 +196,35 @@ impl Adapter for OpenCodeAdapter {
         let openai_base = openai_base(base_url);
         let mut model_map = Map::new();
         model_map.insert(models.default.clone(), json!({ "name": models.default }));
-        let provider = json!({
+        let mut provider = json!({
             "npm": "@ai-sdk/openai-compatible",
             "name": "AI Gateway",
             "options": { "baseURL": openai_base, "apiKey": token },
             "models": Value::Object(model_map)
         });
+        // OpenCode 的超时在 provider 的 settings 里，数字或 false
+        let mut extra_rows = Vec::new();
+        let specs = self.extra_specs();
+        for (key, value) in &extras.env {
+            let Some(spec) = specs.iter().find(|spec| spec.key == *key) else {
+                continue;
+            };
+            let typed = typed_extra_value(&spec.kind, value);
+            provider
+                .as_object_mut()
+                .expect("provider object")
+                .entry("settings".to_string())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .expect("settings object")
+                .insert(key.clone(), typed.clone());
+            let previous = before
+                .as_ref()
+                .and_then(|entry| entry.get("settings"))
+                .and_then(|settings| settings.get(key))
+                .cloned();
+            extra_rows.push((spec.path.clone(), previous, typed));
+        }
 
         let root_obj = root.as_object_mut().expect("root checked by load");
         let providers_obj = root_obj
@@ -175,7 +235,7 @@ impl Adapter for OpenCodeAdapter {
             .ok_or_else(|| AppError::BadRequest("provider must be an object".to_string()))?;
         providers_obj.insert(PROVIDER_ID.to_string(), provider.clone());
 
-        let changes = vec![
+        let mut changes = vec![
             change(
                 format!("provider.{PROVIDER_ID}.npm"),
                 before.as_ref().and_then(|entry| entry.get("npm")).cloned(),
@@ -228,6 +288,10 @@ impl Adapter for OpenCodeAdapter {
                 "An existing provider.ai-gateway API key was replaced; the previous value is only in the backup."
                     .to_string(),
             );
+        }
+
+        for (path, previous, typed) in extra_rows {
+            changes.push(change(path, previous, typed, false));
         }
 
         let managed = json!({

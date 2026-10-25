@@ -98,7 +98,7 @@ export interface ClientConfigWrite {
 /** 服务端下发的附加字段：类型由后端说，前端只渲染 */
 export interface ExtraSpec {
   key: string
-  kind: 'text' | 'number' | 'bool' | 'choice'
+  kind: 'text' | 'number' | 'bool' | 'choice' | 'headers'
   options?: string[]
   /** i18n 键；服务端只下发键名，文案仍在前端 */
   label: import('../i18n').TranslationKey

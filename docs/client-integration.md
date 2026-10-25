@@ -118,7 +118,7 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 
 **逃生口：直接编辑配置文件**。白名单永远会漏键（`CLAUDE_CODE_DISABLE_1M_CONTEXT` 就是一开始没收录的），所以卡片动作行里有「直接编辑配置文件」：读原文、按该客户端的格式校验（JSON / TOML / JSON5 / YAML）、备份后整体写回。它**绕过托管**——写进去的内容不进 `managed`，不出现在差异预览里，撤销接入也不会替你还原；语法不过一律 400 拒绝，一个字节都不写。
 
-**其他客户端的附加项走字段表**。`Adapter::extra_specs()` 声明每个客户端允许代写什么（类型 + 选项 + 文案键），`GET /api/clients/extras-spec` 下发，前端用同一个 `ExtraFields` 渲染——给已有客户端加字段不再动前端。目前落地的是 Codex：`model_reasoning_effort`（choice）与 `disable_response_storage`（bool），两者都是 **config.toml 顶层键**，写进 provider 表会被 Codex 忽略；撤销时按 `managed.top.extra` 记录删回去。OpenCode / OpenClaw / Pi 的对应字段（`timeout`、`maxTokens`、`reasoning`、`headers`）还没做，缺的是逐个确认它们在各自格式里的落点，不是机制。
+**其他客户端的附加项走字段表**。`Adapter::extra_specs()` 声明每个客户端允许代写什么（类型 + 选项 + 文案键），`GET /api/clients/extras-spec` 下发，前端用同一个 `ExtraFields` 渲染——给已有客户端加字段不再动前端。目前落地的是 Codex：`model_reasoning_effort`（choice）与 `disable_response_storage`（bool），两者都是 **config.toml 顶层键**，写进 provider 表会被 Codex 忽略；撤销时按 `managed.top.extra` 记录删回去。同一机制下已接上 OpenCode / OpenClaw / Pi，落点逐个核实：OpenCode 的 `timeout` 在 `provider.ai-gateway.settings`（数字）；OpenClaw 的 `contextWindow` / `maxTokens` / `reasoning` 与 Pi 的 `maxTokens` / `reasoning` 在**模型条目**上；Pi 的 `headers` 是供应商级的对象，表单收 `名称: 值` 多行文本。Hermes 没有可核实的附加字段，走原文编辑。
 
 **需要网关侧先配合（暂缓）**：「声明支持 1M」。cc-switch 的做法是给模型 id 加 `[1m]` 后缀，Claude Code 原样发出；我们的虚拟模型按名字精确匹配，直接写后缀会让请求打不到模型。要做，得先在解析时剥掉 `[1m]` 并把它当成上下文窗口标记——属于后端改动，先只开放 `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 这个全局窗口值。
 

@@ -1067,6 +1067,16 @@ function ExtraFields({
                 clearButtonProps={{ 'aria-label': t(locale, 'clientClearTier') }}
                 disabled={disabled}
               />
+            ) : spec.kind === 'headers' ? (
+              <Textarea
+                size="xs"
+                autosize
+                minRows={2}
+                value={current}
+                onChange={event => onChange(spec.key, event.currentTarget.value)}
+                placeholder="X-Client: ai-gateway"
+                disabled={disabled}
+              />
             ) : (
               <TextInput
                 size="xs"

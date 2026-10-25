@@ -126,6 +126,53 @@ impl Adapter for PiAdapter {
         Ok(token_of(entry(&root)))
     }
 
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        let model = format!("providers.{PROVIDER_ID}.models[0]");
+        vec![
+            ExtraSpec::number("maxTokens", "clientEnvMaxOutput", &format!("{model}.maxTokens")),
+            ExtraSpec::flag("reasoning", "clientReasoning", &format!("{model}.reasoning")),
+            ExtraSpec::headers(
+                "headers",
+                "clientEnvHeaders",
+                &format!("providers.{PROVIDER_ID}.headers"),
+            ),
+        ]
+    }
+
+    fn read_extras(
+        &self,
+        paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let empty = (BTreeMap::new(), BTreeMap::new());
+        let Ok(Some(text)) = read_text(&self.path(paths)) else {
+            return empty;
+        };
+        let Ok(root) = json5::from_str::<Value>(&text) else {
+            return empty;
+        };
+        let Some(entry) = root.get("providers").and_then(|p| p.get(PROVIDER_ID)) else {
+            return empty;
+        };
+        let mut out = BTreeMap::new();
+        if let Some(headers) = entry.get("headers").and_then(Value::as_object) {
+            if !headers.is_empty() {
+                out.insert("headers".to_string(), render_headers(headers));
+            }
+        }
+        if let Some(model) = entry
+            .get("models")
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+        {
+            for key in ["maxTokens", "reasoning"] {
+                if let Some(value) = model.get(key).and_then(extra_text_from) {
+                    out.insert(key.to_string(), value);
+                }
+            }
+        }
+        (out, BTreeMap::new())
+    }
+
     fn plan(
         &self,
         paths: &ClientPaths,
@@ -133,7 +180,7 @@ impl Adapter for PiAdapter {
         base_url: &str,
         token: &str,
         allow_existing: bool,
-        _extras: &ClientExtras,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut root, original) = load(&path)?;
@@ -145,13 +192,47 @@ impl Adapter for PiAdapter {
         }
         let before_token = token_of(before.as_ref());
         let openai_base = openai_base(base_url);
-        let provider = json!({
+        // Pi 的 maxTokens/reasoning 是模型级，headers 是供应商级
+        let mut provider = json!({
             "name": "AI Gateway",
             "baseUrl": openai_base,
             "api": "openai-completions",
             "apiKey": token,
             "models": [{ "id": models.default }]
         });
+        let mut extra_rows = Vec::new();
+        let specs = self.extra_specs();
+        for (key, value) in &extras.env {
+            let Some(spec) = specs.iter().find(|spec| spec.key == *key) else {
+                continue;
+            };
+            let typed = typed_extra_value(&spec.kind, value);
+            let previous = if key == "headers" {
+                provider
+                    .as_object_mut()
+                    .expect("provider object")
+                    .insert(key.clone(), typed.clone());
+                before.as_ref().and_then(|entry| entry.get("headers")).cloned()
+            } else {
+                if let Some(model) = provider
+                    .get_mut("models")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|list| list.first_mut())
+                {
+                    model
+                        .as_object_mut()
+                        .expect("model object")
+                        .insert(key.clone(), typed.clone());
+                }
+                before
+                    .as_ref()
+                    .and_then(|entry| entry.get("models"))
+                    .and_then(Value::as_array)
+                    .and_then(|list| list.first().cloned())
+                    .and_then(|model| model.get(key).cloned())
+            };
+            extra_rows.push((spec.path.clone(), previous, typed));
+        }
 
         let root_obj = root.as_object_mut().expect("root checked by load");
         let providers_obj = root_obj
@@ -162,7 +243,7 @@ impl Adapter for PiAdapter {
             .ok_or_else(|| AppError::BadRequest("providers must be an object".to_string()))?
             .insert(PROVIDER_ID.to_string(), provider.clone());
 
-        let changes = vec![
+        let mut changes = vec![
             change(
                 format!("providers.{PROVIDER_ID}.name"),
                 before.as_ref().and_then(|entry| entry.get("name")).cloned(),
@@ -211,6 +292,10 @@ impl Adapter for PiAdapter {
                 "An existing AI Gateway API key was replaced; the previous value is only in the backup."
                     .to_string(),
             );
+        }
+
+        for (path, previous, typed) in extra_rows {
+            changes.push(change(path, previous, typed, false));
         }
 
         let managed = json!({

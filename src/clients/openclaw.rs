@@ -162,6 +162,55 @@ impl Adapter for OpenClawAdapter {
         Ok(token_of(entry(&root)))
     }
 
+    fn extra_specs(&self) -> Vec<ExtraSpec> {
+        let model = format!("models.providers.{PROVIDER_ID}.models[0]");
+        vec![
+            ExtraSpec::number(
+                "contextWindow",
+                "clientEnvMaxContext",
+                &format!("{model}.contextWindow"),
+            ),
+            ExtraSpec::number("maxTokens", "clientEnvMaxOutput", &format!("{model}.maxTokens")),
+            ExtraSpec::flag("reasoning", "clientReasoning", &format!("{model}.reasoning")),
+        ]
+    }
+
+    fn read_extras(
+        &self,
+        paths: &ClientPaths,
+    ) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+        let empty = (BTreeMap::new(), BTreeMap::new());
+        let Ok(Some(text)) = read_text(&self.path(paths)) else {
+            return empty;
+        };
+        let Ok(root) = json5::from_str::<Value>(&text) else {
+            return empty;
+        };
+        let Some(model) = root
+            .get("models")
+            .and_then(|models| models.get("providers"))
+            .and_then(|providers| providers.get(PROVIDER_ID))
+            .and_then(|entry| entry.get("models"))
+            .and_then(Value::as_array)
+            .and_then(|list| list.first())
+        else {
+            return empty;
+        };
+        let out = model
+            .as_object()
+            .map(|object| {
+                object
+                    .iter()
+                    .filter(|(key, _)| {
+                        matches!(key.as_str(), "contextWindow" | "maxTokens" | "reasoning")
+                    })
+                    .filter_map(|(key, value)| extra_text_from(value).map(|text| (key.clone(), text)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (out, BTreeMap::new())
+    }
+
     fn plan(
         &self,
         paths: &ClientPaths,
@@ -169,7 +218,7 @@ impl Adapter for OpenClawAdapter {
         base_url: &str,
         token: &str,
         allow_existing: bool,
-        _extras: &ClientExtras,
+        extras: &ClientExtras,
     ) -> AppResult<ClientPlan> {
         let path = self.path(paths);
         let (mut root, original) = load(&path)?;
@@ -183,12 +232,38 @@ impl Adapter for OpenClawAdapter {
         let before_primary = primary(&root);
         let openai_base = openai_base(base_url);
         let primary_value = format!("{PROVIDER_ID}/{}", models.default);
-        let provider = json!({
+        // OpenClaw 的窗口/输出上限与推理标记挂在模型条目上
+        let mut provider = json!({
             "baseUrl": openai_base,
             "apiKey": token,
             "api": "openai-completions",
             "models": [{ "id": models.default, "name": models.default }]
         });
+        let mut extra_rows = Vec::new();
+        let specs = self.extra_specs();
+        for (key, value) in &extras.env {
+            let Some(spec) = specs.iter().find(|spec| spec.key == *key) else {
+                continue;
+            };
+            let typed = typed_extra_value(&spec.kind, value);
+            if let Some(model) = provider
+                .get_mut("models")
+                .and_then(Value::as_array_mut)
+                .and_then(|list| list.first_mut())
+            {
+                model
+                    .as_object_mut()
+                    .expect("model object")
+                    .insert(key.clone(), typed.clone());
+            }
+            let previous = before
+                .as_ref()
+                .and_then(|entry| entry.get("models"))
+                .and_then(Value::as_array)
+                .and_then(|list| list.first().cloned())
+                .and_then(|model| model.get(key).cloned());
+            extra_rows.push((spec.path.clone(), previous, typed));
+        }
 
         let root_obj = root.as_object_mut().expect("root checked by load");
         let models_obj = root_obj
@@ -225,7 +300,7 @@ impl Adapter for OpenClawAdapter {
             .ok_or_else(|| AppError::BadRequest("agents.defaults.model must be an object".to_string()))?
             .insert("primary".to_string(), json!(primary_value));
 
-        let changes = vec![
+        let mut changes = vec![
             change(
                 format!("models.providers.{PROVIDER_ID}.baseUrl"),
                 before.as_ref().and_then(|entry| entry.get("baseUrl")).cloned(),
@@ -272,6 +347,10 @@ impl Adapter for OpenClawAdapter {
                 "An existing AI Gateway API key was replaced; the previous value is only in the backup."
                     .to_string(),
             );
+        }
+
+        for (path, previous, typed) in extra_rows {
+            changes.push(change(path, previous, typed, false));
         }
 
         let managed = json!({
