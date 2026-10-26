@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 25;
+pub const CURRENT_SCHEMA_VERSION: i64 = 27;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -211,6 +211,22 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V25 (shared model catalog + cache/peak pricing)");
     }
 
+    if current_version < 26 {
+        // 缓存价差必须按请求发生时的单价冻结：用今天的价格回算历史行会改写已发生的成本。
+        add_column_if_missing(conn, "request_stats", "cache_savings",
+            "ALTER TABLE request_stats ADD COLUMN cache_savings REAL")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 26)", [])?;
+        tracing::info!("Database migrated to V26 (request_stats.cache_savings frozen cache price delta)");
+    }
+
+    if current_version < 27 {
+        // 正文超限时改存前缀并标记，详情页仍能看到内容；重放只认完整正文。
+        add_column_if_missing(conn, "request_bodies", "truncated",
+            "ALTER TABLE request_bodies ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 27)", [])?;
+        tracing::info!("Database migrated to V27 (request_bodies.truncated for partial capture)");
+    }
+
     Ok(())
 }
 
@@ -287,7 +303,7 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, ddl: &str
 }
 
 /// V23：请求详情。路径与转发地址是元数据，始终记录；请求头/请求正文/响应正文受采集开关控制。
-/// 请求头单独成表：正文超过 64KB 时不存正文，但请求头仍然有价值，挂在正文行上会一起丢。
+/// 请求头单独成表：正文超限时仍保存前缀（V27 起），但请求头不该跟着正文的存储策略走。
 /// 响应正文同样单独成表：`request_bodies` 是重放入口，语义只限“客户端发来的原始请求”。
 const SCHEMA_V23_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS request_headers (
@@ -963,6 +979,56 @@ mod tests {
         assert_eq!(conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='request_bodies'",
             [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        cleanup_db(&path);
+    }
+
+    /// V26 只加一列：旧行回填成 NULL（"当时没有这个读数"），不能补 0 说"没省到钱"
+    #[test]
+    fn v26_adds_cache_savings_as_null_for_history() {
+        let (pool, path) = test_db("v26");
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, created_at) \
+                 VALUES ('p','r','b',200,1,'2026-01-01T00:00:00Z')",
+                [],
+            ).expect("legacy row");
+            conn.execute("UPDATE _schema_version SET value = 25 WHERE id = 1", [])
+                .expect("rewind to 25");
+            run_migrations(&conn).expect("V26 runs alone");
+            assert_eq!(version(&conn), CURRENT_SCHEMA_VERSION);
+            assert_eq!(conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('request_stats') WHERE name='cache_savings'",
+                [], |r| r.get::<_, i64>(0)).unwrap(), 1, "列必须已经加上");
+            let savings: Option<f64> = conn.query_row(
+                "SELECT cache_savings FROM request_stats LIMIT 1", [], |r| r.get(0)).unwrap();
+            assert_eq!(savings, None, "历史行是未知，不是 0");
+        }
+        cleanup_db(&path);
+    }
+
+    /// V27 只加一列：已有正文都是完整写入的，迁移后必须是 truncated=0
+    #[test]
+    fn v27_marks_existing_bodies_as_complete() {
+        let (pool, path) = test_db("v27");
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO request_bodies (request_id, protocol, body, bytes, created_at) \
+                 VALUES ('req-old', 'openai', '{}', 2, '2026-01-01T00:00:00Z')",
+                [],
+            ).expect("legacy body");
+            conn.execute("UPDATE _schema_version SET value = 26 WHERE id = 1", [])
+                .expect("rewind to 26");
+            run_migrations(&conn).expect("V27 runs alone");
+            assert_eq!(version(&conn), CURRENT_SCHEMA_VERSION);
+            assert_eq!(conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('request_bodies') WHERE name='truncated'",
+                [], |r| r.get::<_, i64>(0)).unwrap(), 1, "列必须已经加上");
+            let truncated: i64 = conn.query_row(
+                "SELECT truncated FROM request_bodies WHERE request_id = 'req-old'", [], |r| r.get(0)).unwrap();
+            assert_eq!(truncated, 0, "老正文是完整写入的，不能标成截断");
+        }
         cleanup_db(&path);
     }
 

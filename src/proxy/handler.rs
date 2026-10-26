@@ -41,8 +41,9 @@ const CAPTURED_HEADER_NAMES: [&str; 8] = [
 ];
 const MAX_CAPTURED_HEADERS_BYTES: usize = 8 * 1024;
 
-/// 响应正文上限：与请求正文同一量级。流式 SSE 也只留前 64KB，只用于排查。
-pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 64 * 1024;
+/// 响应正文上限：流式 SSE 也只留前 1MB，只用于排查。
+/// 超限标记 `truncated`，详情页会解析已收到的部分并在顶部提示不完整。
+pub const MAX_CAPTURED_RESPONSE_BYTES: usize = 1024 * 1024;
 
 fn inbound_meta(req: &HttpRequest, capture_headers: bool) -> InboundMeta {
     let path = Some(req.path().to_string());
@@ -158,7 +159,7 @@ fn capture_response_body(
         protocol: protocol.to_string(),
         status_code,
         content_type,
-        bytes: body.len() as i64,
+        bytes: bytes.len() as i64,
         body,
         truncated,
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -173,6 +174,8 @@ pub struct StreamCapture {
     status_code: i64,
     content_type: Option<String>,
     buf: Vec<u8>,
+    /// 收到过的总字节数（不受截断影响，详情页用它说明原始大小）
+    total_bytes: usize,
     truncated: bool,
     sent: bool,
 }
@@ -192,12 +195,14 @@ impl StreamCapture {
             status_code,
             content_type,
             buf: Vec::new(),
+            total_bytes: 0,
             truncated: false,
             sent: false,
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
+        self.total_bytes += bytes.len();
         if self.buf.len() >= MAX_CAPTURED_RESPONSE_BYTES {
             self.truncated = true;
             return;
@@ -222,7 +227,7 @@ impl StreamCapture {
             protocol: self.protocol.clone(),
             status_code: self.status_code,
             content_type: self.content_type.clone(),
-            bytes: body.len() as i64,
+            bytes: self.total_bytes as i64,
             body,
             truncated: self.truncated,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -281,9 +286,20 @@ pub async fn anthropic_messages(
     handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, Some(raw), None, meta).await
 }
 
-/// 正文采集上限：再长的上下文也不该让正文表无限膨胀，而且超长请求也不是
-/// "点一下重放看看"的那种。超限就不存，重放按钮对那一行保持不可用。
-pub const MAX_CAPTURED_BODY_BYTES: usize = 64 * 1024;
+/// 正文采集上限：超过时保留前缀并标记 `truncated`，详情仍可阅读；截断的正文不能重放。
+pub const MAX_CAPTURED_REQUEST_BYTES: usize = 512 * 1024;
+
+/// 按 UTF-8 字符边界截断，避免把多字节字符切成半个导致详情里出现乱码。
+fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
 
 /// 采集开着时把入站正文投进异步通道；关着时什么都不做。
 /// 默认不存正文是硬口径（§2 原则 10），所以这里只有"显式开启才写"一条路径，
@@ -301,16 +317,21 @@ fn capture_body(
         return;
     }
     let text = value.to_string();
-    let bytes = text.len() as i64;
-    if bytes > MAX_CAPTURED_BODY_BYTES as i64 {
-        tracing::debug!("请求正文 {} 字节超过上限，未存正文（request_id={}）", bytes, request_id);
-        return;
+    let bytes = text.len();
+    let truncated = bytes > MAX_CAPTURED_REQUEST_BYTES;
+    if truncated {
+        tracing::debug!(
+            "请求正文 {} 字节超过上限，只保存前 {} 字节（request_id={}）",
+            bytes, MAX_CAPTURED_REQUEST_BYTES, request_id
+        );
     }
+    let stored = truncate_utf8(&text, MAX_CAPTURED_REQUEST_BYTES);
     state.stats_writer.record_body(crate::models::stats::RequestBody {
         request_id: request_id.to_string(),
         protocol: protocol.to_string(),
-        body: text,
-        bytes,
+        body: stored.to_string(),
+        bytes: bytes as i64,
+        truncated,
         created_at: chrono::Utc::now().to_rfc3339(),
     });
 }
@@ -471,6 +492,7 @@ fn make_stat(
         api_key_id: api_key_id.map(|s| s.to_string()),
         // 成本/积分由调用方在拿到 token 或确认扣费后填写；这里还不知道用量
         cost: None,
+        cache_savings: None,
         credits: None,
         path: path.map(str::to_string),
         request_id: Some(request_id.to_string()),
@@ -880,13 +902,14 @@ async fn handle_request(
                     );
                     stat.cache_read_tokens = cache_read;
                     stat.cache_write_tokens = cache_write;
-                    stat.cost = backend.estimate_cost_detailed(
-                        token_input,
-                        token_output,
-                        cache_read,
-                        cache_write,
-                        pricing_at,
-                    );
+                    // 一次快照同时算出成本与缓存价差：两者必须用同一档位（高峰/空闲）
+                    let pricing = backend.pricing_snapshot();
+                    stat.cost = pricing.as_ref().and_then(|pricing| {
+                        pricing.cost(token_input, token_output, cache_read, cache_write, pricing_at)
+                    });
+                    stat.cache_savings = pricing
+                        .as_ref()
+                        .and_then(|pricing| pricing.cache_savings(cache_read, pricing_at));
                     stat.credits = charge;
                     state.stats_writer.record(stat);
 
@@ -1162,6 +1185,10 @@ impl StreamStatCtx {
         stat.cost = self.pricing.as_ref().and_then(|pricing| {
             pricing.cost(stat.token_input, stat.token_output, Some(cr), Some(cw), self.pricing_at)
         });
+        stat.cache_savings = self
+            .pricing
+            .as_ref()
+            .and_then(|pricing| pricing.cache_savings(Some(cr), self.pricing_at));
         // 缓存命中仅在流内出现过 usage 时非 0
         stat.cache_read_tokens = if cr > 0 { Some(cr) } else { None };
         stat.cache_write_tokens = if cw > 0 { Some(cw) } else { None };
@@ -1435,7 +1462,17 @@ fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> Http
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_forward_url;
+    use super::{sanitize_forward_url, truncate_utf8};
+
+    #[test]
+    fn utf8_truncation_never_splits_a_character() {
+        let text = "ab汉字cd";
+        // "ab" 后正好是 3 字节的汉字；上限落在字符中间时回退到边界
+        assert_eq!(truncate_utf8(text, 3), "ab");
+        assert_eq!(truncate_utf8(text, 4), "ab");
+        assert_eq!(truncate_utf8(text, 5), "ab汉");
+        assert_eq!(truncate_utf8(text, 99), text);
+    }
 
     #[test]
     fn forward_url_redacts_query_credentials_and_secrets() {

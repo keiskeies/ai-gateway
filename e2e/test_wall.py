@@ -2,7 +2,7 @@
 
 /wall 不在 AppShell 里：它自己就是一屏，没有侧栏与顶栏，退出靠右下角那颗固定按钮，
 所以别的页面钉不住它，要单独审两件事：
-① 数据真的上屏（7 张 KPI 卡都有读数、矩阵里有那一笔请求的模型行、热力格在）；
+① 数据真的上屏（8 张 KPI 卡都有读数、矩阵里有那一笔请求的模型行、热力格在）；
 ② 三个宽度 × 两套配色下不横向溢出、读数不被裁、响应式断点真的按 CSS 的媒体查询换列数。
 断点期望用页面里的 matchMedia 反推，不自己写死宽度边界——1280 正好压在
 `.wall-pair` 的 max-width: 1279px 上，视口宽度算不算滚动条会决定这一格走哪个分支。
@@ -50,7 +50,7 @@ LAYOUT_PROBE = """() => {
 
     const tracks = (sel) => getComputedStyle(document.querySelector(sel)).gridTemplateColumns.split(' ').length;
     const expectedKpi = window.matchMedia('(max-width: 767px)').matches ? 2
-        : window.matchMedia('(max-width: 1279px)').matches ? 4 : 7;
+        : window.matchMedia('(max-width: 1279px)').matches ? 4 : 8;
     if (tracks('.wall-readouts') !== expectedKpi)
         problems.push(`.wall-readouts 列数 ${tracks('.wall-readouts')}，期望 ${expectedKpi}`);
     const stacked = window.matchMedia('(max-width: 1279px)').matches ? 1 : 2;
@@ -107,7 +107,7 @@ def test_wall_shows_data_and_exits(console, page, api, errors, mock_stack):
             value: k.querySelector('.console-readout-value')?.textContent.trim(),
         }))"""
     )
-    assert len(kpis) == 7, f"KPI 卡 {len(kpis)} 张：{kpis}"
+    assert len(kpis) == 8, f"KPI 卡 {len(kpis)} 张：{kpis}"
     assert all(k["value"] for k in kpis), f"有 KPI 卡没有读数：{kpis}"
     assert page.locator(".wall-heat-cell").count() == 7 * 24
 
@@ -155,7 +155,7 @@ def test_wall_names_what_failed_and_recovers(api, mock_stack, browser_factory, s
         assert ok not in bar, f"取到了的模块被误报：{bar!r}"
 
     # 局部失败不该塌成整页：KPI 与矩阵还在
-    assert page.locator(".wall-readouts .console-readout").count() == 7
+    assert page.locator(".wall-readouts .console-readout").count() == 8
     assert page.locator(".wall-mx-model").count() >= 1
 
     # 面板不能退回"暂无数据"：那是把"没取到"说成"确实没有"
@@ -182,8 +182,12 @@ def test_wall_names_what_failed_and_recovers(api, mock_stack, browser_factory, s
     console.click(page, ".wall-failbar button")
     page.wait_for_selector(".wall-failbar", state="detached", timeout=15000)
     assert page.locator(".wall-heat-cell").count() == 7 * 24
-    # 重试取到了就退回真读数，不留 —
-    dashes = page.evaluate("""() => [...document.querySelectorAll('.wall-readouts .console-readout-value')].filter(el => el.textContent.trim() === '—').length""")
+    # 重试取到了就退回真读数，不留 —；成本卡例外——未定价是真实的"不知道"，不是失败态
+    dashes = page.evaluate(
+        """() => [...document.querySelectorAll('.wall-readouts .console-readout')]
+            .filter(k => k.querySelector('.console-readout-label')?.textContent.trim() !== '成本估算')
+            .filter(k => k.querySelector('.console-readout-value')?.textContent.trim() === '—').length"""
+    )
     assert dashes == 0, f"重试后仍有 {dashes} 个 — 读数"
     assert "成功 —" not in page.inner_text(".wall-readouts")
 

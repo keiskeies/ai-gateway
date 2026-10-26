@@ -64,6 +64,7 @@ import type {
   RequestTrace,
 } from '../types/stats'
 import { Field } from '../components/Field'
+import { RequestPayloadView, ResponsePayloadView } from '../components/PayloadViewer'
 
 type StatusFilter = 'all' | 'success' | 'fail'
 
@@ -951,41 +952,36 @@ export default function Traffic() {
                       <summary>
                         {t(locale, 'requestHeaders')}
                         {!payload.request.headers_captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                        {payload.request.headers_captured && payload.request.headers_truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
                       {payload.request.headers ? (
                         <pre className="console-payload-body">{JSON.stringify(payload.request.headers, null, 2)}</pre>
                       ) : (
                         <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
                       )}
-                      {payload.request.truncated && <div className="console-note warn">{t(locale, 'payloadTruncated')}</div>}
+                      {payload.request.headers_truncated && <div className="console-note warn">{t(locale, 'payloadTruncated')}</div>}
                     </details>
-                    <details className="console-payload-block">
+                    <details className="console-payload-block" open>
                       <summary>
                         {t(locale, 'requestBody')}
-                        {!payload.request.body_captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                        {!payload.request.body_captured
+                          ? ` · ${payload.request_capture_enabled ? t(locale, 'payloadNotRecordedShort') : t(locale, 'payloadCaptureOffShort')}`
+                          : payload.request.body_truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
-                      {payload.request.body ? (
-                        <pre className="console-payload-body">{payload.request.body}</pre>
-                      ) : (
-                        <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
-                      )}
+                      <RequestPayloadView payload={payload} locale={locale} />
                     </details>
-                    <details className="console-payload-block">
+                    <details className="console-payload-block" open>
                       <summary>
                         {t(locale, 'responseBody')}
-                        {!payload.response.captured ? ` · ${t(locale, 'payloadNotCaptured')}` : ''}
+                        {!payload.response.captured
+                          ? ` · ${payload.response_capture_enabled ? t(locale, 'payloadNotRecordedShort') : t(locale, 'payloadCaptureOffShort')}`
+                          : payload.response.truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
-                      {payload.response.captured ? (
-                        <>
-                          <div className="console-note">
-                            {t(locale, 'payloadRawUpstream')} · {payload.response.protocol ?? '—'} · {payload.response.status_code ?? '—'} · {payload.response.content_type ?? '—'}
-                          </div>
-                          <pre className="console-payload-body">{payload.response.body ?? ''}</pre>
-                          {payload.response.truncated && <div className="console-note warn">{t(locale, 'payloadTruncated')}</div>}
-                        </>
-                      ) : (
-                        <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
-                      )}
+                      <ResponsePayloadView
+                        response={payload.response}
+                        captureEnabled={payload.response_capture_enabled}
+                        locale={locale}
+                      />
                     </details>
                   </>
                 ) : null}

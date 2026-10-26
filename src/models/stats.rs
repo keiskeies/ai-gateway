@@ -25,6 +25,9 @@ pub struct RequestStat {
     /// 成本估算：单价齐备（入与出都按每 100 万 token 定价）且 token 数齐备时才算得出，
     /// 否则为 None（未定价模型、只填一侧、上游没回 usage、失败请求、V15 之前的旧行）
     pub cost: Option<f64>,
+    /// 缓存命中相对未命中价的价差（V26，请求时冻结）：正数=节省，负数=命中反而更贵。
+    /// 上游没回缓存数据 / 模型未定价 → None；有定价但零命中 → Some(0)。
+    pub cache_savings: Option<f64>,
     /// 网关侧请求 ID（V16）：同一次请求的所有尝试共享，用于关联 `request_attempts`；
     /// 迁移前写入的旧行为 None，前端据此显示"轨迹不可用"而不是伪造链路
     pub request_id: Option<String>,
@@ -41,14 +44,16 @@ pub struct RequestStat {
 /// 入站请求正文，仅在 `defaults.capture_request_bodies` 开启时落库（V21）。
 /// 存的是调用方送来的原始 JSON，不是转换后的上游请求——重放要还原的是"客户端发了什么"，
 /// 上游那一份每次重放都会按当时的路由与后端重新生成。
+/// 超过采集上限时只存前缀（V27，`truncated = true`）：详情仍可读，但这份正文不能重放。
 #[derive(Debug, Clone)]
 pub struct RequestBody {
     pub request_id: String,
     /// 入站协议（`openai` / `anthropic`）：决定重放时用哪个解析器
     pub protocol: String,
     pub body: String,
-    /// 正文 UTF-8 字节数，用于设置页读数与上限判断（不靠 LENGTH()，那是字符数）
+    /// 原始正文的字节数（截断时大于 `body.len()`）
     pub bytes: i64,
+    pub truncated: bool,
     pub created_at: String,
 }
 
@@ -99,6 +104,7 @@ pub struct ResponseBody {
     pub status_code: i64,
     pub content_type: Option<String>,
     pub body: String,
+    /// 上游响应的原始字节数（截断时大于实际存下的长度）
     pub bytes: i64,
     pub truncated: bool,
     pub created_at: String,
@@ -113,8 +119,10 @@ pub struct RequestPayloadRequest {
     pub protocol: Option<String>,
     pub headers: Option<serde_json::Value>,
     pub body: Option<String>,
+    /// 请求正文原始字节数（截断时大于实际存下的长度）
     pub bytes: i64,
-    pub truncated: bool,
+    pub headers_truncated: bool,
+    pub body_truncated: bool,
 }
 
 /// 详情接口里“响应侧”的读数；未采集时 body 为 None。
@@ -133,6 +141,9 @@ pub struct RequestPayloadResponse {
 pub struct RequestPayload {
     pub request: RequestPayloadRequest,
     pub response: RequestPayloadResponse,
+    /// 当前采集开关：用来区分“这次没记”和“开关没开”，前端才能给出正确提示
+    pub request_capture_enabled: bool,
+    pub response_capture_enabled: bool,
 }
 
 /// 一次请求的尝试轨迹：某条 `request_stats` 行对应的全部尝试
@@ -176,8 +187,17 @@ pub struct OverviewStats {
     pub cache_hit_rate: f64,
     /// 成本估算合计：范围内所有已定价请求的 cost 之和；一条都没有时为 None（区别于 0）
     pub total_cost: Option<f64>,
+    /// 缓存价差合计：命中相对未命中价省下的钱（负数=命中反而更贵）；
+    /// 范围内没有可比较的请求（未定价/上游没回缓存）时为 None
+    pub total_cache_savings: Option<f64>,
     /// 参与成本估算的请求数（cost 非 NULL 的行数）；覆盖率 = priced_requests / total_requests
     pub priced_requests: i64,
+    /// 配了高峰价（且启用）的模型数；用于大屏说明"高峰价覆盖了几个模型"
+    pub peak_priced_models: i64,
+    /// 当前正落在高峰窗口里的模型数（0 = 全部按基础价）
+    pub peak_active_models: i64,
+    /// 下一次计费档位切换的本地时刻 HH:MM；没有任何高峰配置时为 None
+    pub peak_next_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +318,8 @@ pub struct ModelSummary {
     pub cache_hit_rate: f64,
     /// 成本估算合计（该模型的行全部未定价时为 None）
     pub total_cost: Option<f64>,
+    /// 缓存价差合计（正数=节省，负数=加价）；该模型没有可比较的请求时为 None
+    pub cache_savings: Option<f64>,
     /// 参与成本估算的请求数
     pub priced_requests: i64,
 }

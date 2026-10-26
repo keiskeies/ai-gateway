@@ -47,6 +47,18 @@ export function formatCostCoverage(priced?: number | null, total?: number | null
   return percent > 0 ? `${percent}%` : '<1%'
 }
 
+/// KPI 大数字用的紧凑成本：宽屏一行放 8 张卡时 "123,456.78" 放不下，
+/// 千级用 K、百万级用 M；精确值放在 title / 明细里，不在这里丢精度展示。
+export function formatCostCompact(value?: number | null): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  const abs = Math.abs(value)
+  const sign = value < 0 ? '-' : ''
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M`
+  if (abs >= 10_000) return `${sign}${(abs / 1_000).toFixed(1)}K`
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(2)}K`
+  return formatCost(value)
+}
+
 export function deltaPercent(current?: number, previous?: number): number | null {  // 小样本或异常跳变会让百分比失去意义，宁可不显示。
   if (previous === undefined || previous < 10) return null
   const value = ((current ?? 0) - previous) / previous * 100

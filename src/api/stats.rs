@@ -307,12 +307,23 @@ pub async fn request_trace(
 /// 三者各自判断是否存在；长请求可以只有头、没有正文，响应采集也可以独立开启。
 pub async fn request_payload(
     db: web::Data<DbPool>,
+    config: web::Data<crate::api::settings::SharedAppConfig>,
     path: web::Path<i64>,
 ) -> AppResult<HttpResponse> {
     let stat_id = path.into_inner();
+    let (request_capture_enabled, response_capture_enabled) = {
+        let cfg = config.read();
+        (
+            cfg.defaults.capture_request_bodies,
+            cfg.defaults.capture_response_bodies,
+        )
+    };
     let db = db.into_inner();
-    let payload = web::block(move || crate::db::stats::payload_for_stat(&db, stat_id))
+    let mut payload = web::block(move || crate::db::stats::payload_for_stat(&db, stat_id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    // 采集开关是当前配置，不是这条请求写入时的快照；前端用它区分"开关没开"与"这条没记"
+    payload.request_capture_enabled = request_capture_enabled;
+    payload.response_capture_enabled = response_capture_enabled;
     Ok(HttpResponse::Ok().json(payload))
 }
 
@@ -401,10 +412,16 @@ pub async fn replay_request(
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
     let Some(stored) = stored else {
         return Err(crate::error::AppError::Conflict(format!(
-            "request {} has no stored body; body capture is off, the row predates V21, or its body exceeded the size limit",
+            "request {} has no stored body; body capture is off or the row predates V21",
             stat_id
         )));
     };
+    if stored.truncated {
+        return Err(crate::error::AppError::Conflict(format!(
+            "request {} only has a truncated body ({} bytes original); it can be viewed but not replayed",
+            stat_id, stored.bytes
+        )));
+    }
     let response = crate::proxy::handler::replay_request(&state, stat_id, &stored).await?;
     Ok(response)
 }

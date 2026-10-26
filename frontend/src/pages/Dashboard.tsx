@@ -44,7 +44,7 @@ import {
   IconAlertTriangle,
   IconX,
 } from '@tabler/icons-react'
-import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs } from '../api'
+import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs, listAlerts, type AlertItem } from '../api'
 import { ModelTimeline } from '../components/ModelTimeline'
 import { ChartAltTable, peakOf } from '../components/ui/ChartAlt'
 import { Readout } from '../components/ui/Readout'
@@ -54,7 +54,7 @@ import { t, type Locale, type TranslationKey } from '../i18n'
 import { getPresetName, platformPresets } from '../presets'
 import { useNavigate } from 'react-router-dom'
 // 成本格式化与大屏/控制台共用同一套规则：NULL 渲染成 —，绝不显示 0
-import { formatCost, formatCostCoverage } from '../lib/format'
+import { formatCost, formatCostCompact, formatCostCoverage } from '../lib/format'
 
 // ============================================================
 // 概览监控大屏 · Quiet Analytics + Wall Display
@@ -86,7 +86,13 @@ interface OverviewStats {
   cache_hit_rate?: number
   // 成本估算（V15）：NULL = 窗口内没有任何"两侧都定价"的请求，与"成本为 0"是两件事
   total_cost?: number | null
+  // 缓存价差（V26）：正数=缓存命中省下，负数=命中反而更贵；无可比较请求时为 null
+  total_cache_savings?: number | null
   priced_requests?: number
+  // 高峰计费状态（后端按模型的高峰窗口实时计算）
+  peak_priced_models?: number
+  peak_active_models?: number
+  peak_next_at?: string | null
 }
 
 interface ProxyWithStats {
@@ -98,6 +104,8 @@ interface ProxyWithStats {
     avg_latency_ms: number
     total_token_input: number
     total_token_output: number
+    total_cost?: number | null
+    priced_requests?: number
   }
 }
 
@@ -112,6 +120,8 @@ interface PlatformWithStats {
     avg_latency_ms: number
     total_token_input: number
     total_token_output: number
+    total_cost?: number | null
+    priced_requests?: number
   }
 }
 
@@ -186,7 +196,7 @@ interface LatencyPercentiles {
   max: number
 }
 
-type Metric = 'requests' | 'failed_requests' | 'token_input' | 'token_output' | 'avg_latency_ms' | 'avg_ttft_ms' | 'output_speed_tps' | 'cache_read_tokens'
+type Metric = 'requests' | 'failed_requests' | 'token_input' | 'token_output' | 'avg_latency_ms' | 'avg_ttft_ms' | 'output_speed_tps' | 'cache_read_tokens' | 'total_cost'
 type Granularity = 'hour' | 'day' | 'month' | 'year'
 type TrendMode = 'all' | 'single'
 type RangeKey = 'today' | '24h' | '7d' | '30d' | '12m' | 'all'
@@ -201,10 +211,11 @@ const METRIC_LABEL_KEYS: Record<Metric, TranslationKey> = {
   avg_ttft_ms: 'metricTtft',
   output_speed_tps: 'metricSpeed',
   cache_read_tokens: 'metricCacheRead',
+  total_cost: 'costEstimate',
 }
 
-// 可求和指标（计数/token）：排行按求和；平均类指标（延时/首字/速度）按请求数加权
-const SUM_METRICS: ReadonlySet<Metric> = new Set(['requests', 'failed_requests', 'token_input', 'token_output', 'cache_read_tokens'])
+// 可求和指标（计数/token/成本）：排行按求和；平均类指标（延时/首字/速度）按请求数加权
+const SUM_METRICS: ReadonlySet<Metric> = new Set(['requests', 'failed_requests', 'token_input', 'token_output', 'cache_read_tokens', 'total_cost'])
 const isSumMetric = (m: Metric) => SUM_METRICS.has(m)
 
 // 时段 → 允许粒度 + 默认粒度（选时段时自动切粒度，粒度控件按范围禁用）
@@ -218,7 +229,7 @@ const RANGE_GRANULARITIES: Record<RangeKey, { allowed: Granularity[]; fallback: 
 }
 
 // loadData 一次负责这几块；某块本轮取到了就从失败清单里摘掉
-const LOAD_BLOCKS: TranslationKey[] = ['wallBlockKpi', 'healthBoard', 'platformShare', 'errorAnalysis', 'modelMatrix']
+const LOAD_BLOCKS: TranslationKey[] = ['wallBlockKpi', 'healthBoard', 'platformShare', 'errorAnalysis', 'modelMatrix', 'budgetAlertsBlock']
 // 趋势与明细各自单独重载，失败清单按这个全集汇总展示
 const ALL_BLOCKS: TranslationKey[] = [...LOAD_BLOCKS, 'heatmapTitle', 'modelStats', 'requestLogs']
 
@@ -258,6 +269,9 @@ const STATUS = {
   light: { ok: '#216636', warn: '#8A5A00', err: '#A61B2E' },
 }
 
+// 大屏顶部只报预算/积分相关告警：模型故障、备份新鲜度等交给通知中心，别把墙刷成告警列表
+const BUDGET_ALERT_KINDS = new Set(['key_quota', 'key_budget', 'platform_credit_low', 'platform_credit_exhausted'])
+
 function formatNumber(n: number | undefined): string {
   return (n ?? 0).toLocaleString()
 }
@@ -291,6 +305,8 @@ function formatMetricValue(m: Metric, v: number): string {
       return formatDurationMs(v)
     case 'output_speed_tps':
       return v.toFixed(1)
+    case 'total_cost':
+      return formatCost(v)
   }
 }
 
@@ -417,6 +433,22 @@ function Heatmap({ data, locale, isDark }: { data: ActivityHeatmapData | null; l
   )
 }
 
+// 成本 KPI 迷你走势：纯 SVG 折线；无定价数据时返回 null，不画一条贴底的假线
+function CostSpark({ values }: { values: number[] }) {
+  const max = Math.max(...values, 0)
+  if (values.length < 2 || max <= 0) return null
+  const w = 64
+  const h = 18
+  const points = values
+    .map((v, i) => `${((i / (values.length - 1)) * w).toFixed(2)},${(h - (Math.max(0, v) / max) * h).toFixed(2)}`)
+    .join(' ')
+  return (
+    <svg width={w} height={h} aria-hidden="true" style={{ overflow: 'visible', flexShrink: 0 }}>
+      <polyline points={points} fill="none" stroke="var(--accent)" strokeWidth={1.5} />
+    </svg>
+  )
+}
+
 // delta 徽章：与上一周期比；prev 缺失时不渲染（紧凑卡内随数字同行）
 function DeltaBadge({ cur, prev, higherIsBetter }: {
   cur: number
@@ -501,6 +533,11 @@ export default function Dashboard() {
   const [logsModel, setLogsModel] = useState<string>('')
   const [logsStatus, setLogsStatus] = useState<string>('')
 
+  // 预算告警：与通知中心同一份读时扫描结果，大屏只挑预算/积分相关的几类
+  const [alerts, setAlerts] = useState<AlertItem[] | null>(null)
+  // 平台分布口径：请求数 / 成本。成本模式下未定价平台不参与占比。
+  const [shareMode, setShareMode] = useState<'requests' | 'cost'>('requests')
+
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [paused, setPaused] = useState(false)
 
@@ -524,17 +561,19 @@ export default function Dashboard() {
       if (!missing.includes(block)) missing.push(block)
     }
     try {
-      const [overview, proxyList, platformList, errs, pct, summaries] = await Promise.all([
+      const [overview, proxyList, platformList, errs, pct, summaries, alertList] = await Promise.all([
         getOverview(range).catch(() => { note('wallBlockKpi'); return {} }),
         listProxies().catch(() => { note('healthBoard'); return [] }),
         listPlatforms().catch(() => { note('platformShare'); return [] }),
         getErrorStats(range).catch(() => { note('errorAnalysis'); return null }),
         getLatencyPercentiles(range).catch(() => { note('wallBlockKpi'); return null }),
         getModelSummaries(range).catch(() => { note('modelMatrix'); return [] }),
+        listAlerts().catch(() => { note('budgetAlertsBlock'); return null }),
       ])
       setStats(overview as OverviewStats)
       setErrorStats(errs as ErrorStats | null)
       setPercentiles(pct as LatencyPercentiles | null)
+      setAlerts(alertList ? alertList.items : null)
       const sum = (summaries as ModelSummaryRow[]) || []
       setSummaries(sum)
       // 明细筛选下拉：从本次时段实际出现过的模型集合生成
@@ -542,7 +581,8 @@ export default function Dashboard() {
 
       const proxiesWithStats: ProxyWithStats[] = await Promise.all(
         proxyList.map(async (p: any) => {
-          const pStats = await getProxyStats(p.id, range).catch(() => null)
+          // 单个网关的统计取不到时也要点名：否则健康看板会把失败显示成 0 流量
+          const pStats = await getProxyStats(p.id, range).catch(() => { note('healthBoard'); return null })
           return { ...p, stats: pStats || undefined }
         })
       )
@@ -550,7 +590,8 @@ export default function Dashboard() {
 
       const platformsWithStats: PlatformWithStats[] = await Promise.all(
         platformList.map(async (p: any) => {
-          const pStats = await getPlatformStats(p.id, range).catch(() => null)
+          // 同理：漏一个平台的统计会让请求/成本占比静默少一块
+          const pStats = await getPlatformStats(p.id, range).catch(() => { note('platformShare'); return null })
           return { ...p, stats: pStats || undefined }
         })
       )
@@ -712,7 +753,22 @@ export default function Dashboard() {
       const row: Record<string, any> = { period }
       models.forEach((m, i) => {
         const point = lookup[period]?.[m]
-        row[`m${i}`] = point ? point[metric] : 0
+        if (!point) {
+          row[`m${i}`] = 0
+          row[`p${i}`] = 0
+          row[`r${i}`] = 0
+          return
+        }
+        row[`r${i}`] = point.requests
+        if (metric === 'total_cost') {
+          // 未定价桶是 null（不知道），不是 0（免费）：折线断开，堆叠不画这一段
+          const priced = point.priced_requests ?? 0
+          row[`m${i}`] = priced > 0 ? point.total_cost ?? 0 : null
+          row[`p${i}`] = priced
+        } else {
+          row[`m${i}`] = point[metric]
+          row[`p${i}`] = point.requests
+        }
       })
       return row
     })
@@ -727,13 +783,18 @@ export default function Dashboard() {
   }, [tsData, metric, palette])
 
   // 模型矩阵排序（唯一"每模型"视图，替代原排行条形图）：计数/速度降序，延时/首字升序——最优在前。
-  // max 供排序列内嵌微条做宽度分母。
+  // max 供排序列内嵌微条做宽度分母；成本为 NULL（未定价）时永远沉底，不和真实的 0 混排。
   const sortedSummaries = useMemo(() => {
     const asc = metric === 'avg_latency_ms' || metric === 'avg_ttft_ms'
+    const valueOf = (row: ModelSummaryRow) => {
+      const value = row[metric]
+      if (value == null) return asc ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY
+      return value
+    }
     const rows = [...summaries].sort((a, b) =>
-      asc ? (a[metric] || 0) - (b[metric] || 0) : (b[metric] || 0) - (a[metric] || 0)
+      asc ? valueOf(a) - valueOf(b) : valueOf(b) - valueOf(a)
     )
-    return { rows, max: Math.max(...rows.map((r) => r[metric] || 0), 1) }
+    return { rows, max: Math.max(...rows.map((r) => r[metric] ?? 0), 1) }
   }, [summaries, metric])
 
   // 矩阵色点沿用趋势图"一个模型一个颜色"的映射；无趋势数据的模型按序补色
@@ -789,36 +850,61 @@ export default function Dashboard() {
     })
   }, [])
 
-  // KPI 走势微件：请求数与加权平均延迟按周期聚合（随时段/粒度联动）
+  // KPI 走势微件：请求数 / 加权平均延迟 / 每期成本按周期聚合（随时段/粒度联动）
   const periodTotals = useMemo(() => {
-    if (!tsData) return { requests: [] as number[], latency: [] as number[] }
+    if (!tsData) return { requests: [] as number[], latency: [] as number[], cost: [] as number[] }
     const req: Record<string, number> = {}
     const latW: Record<string, number> = {}
     const latN: Record<string, number> = {}
+    const cost: Record<string, number> = {}
     tsData.data.forEach((p) => {
       req[p.period] = (req[p.period] || 0) + p.requests
       latW[p.period] = (latW[p.period] || 0) + (p.avg_latency_ms || 0) * p.requests
       latN[p.period] = (latN[p.period] || 0) + p.requests
+      if ((p.priced_requests ?? 0) > 0) {
+        cost[p.period] = (cost[p.period] || 0) + (p.total_cost || 0)
+      }
     })
     return {
       requests: tsData.periods.map((p) => req[p] || 0),
       latency: tsData.periods.map((p) => (latN[p] ? latW[p] / latN[p] : 0)),
+      cost: tsData.periods.map((p) => cost[p] || 0),
     }
   }, [tsData])
 
-  // 平台分布环形：中心总量 + 8px 色点图例
-  const platformShare = useMemo(() => {
-    return platforms
-      .map((p, i) => ({
-        label: p.name,
-        value: p.stats?.total_requests || 0,
-        color: palette[i % palette.length],
-      }))
-      .filter((p) => p.value > 0)
-      .sort((a, b) => b.value - a.value)
-  }, [platforms, palette])
+  // 平台分布：请求数 / 成本两种口径。成本模式下未定价平台不进环形（未知量不能当 0），
+  // 但图例仍列出它并显示 —，否则"没算进去"会被看成"没花钱"。
+  const platformRows = useMemo(() => platforms.map((p, i) => ({
+    label: p.name,
+    color: palette[i % palette.length],
+    requests: p.stats?.total_requests || 0,
+    cost: p.stats?.total_cost ?? null,
+    priced: p.stats?.priced_requests || 0,
+  })), [platforms, palette])
 
-  const platformTotal = platformShare.reduce((s, p) => s + p.value, 0)
+  const platformShare = useMemo(() => {
+    const rows = platformRows.filter((p) => p.requests > 0)
+    if (shareMode === 'requests') {
+      return rows
+        .map((p) => ({ ...p, value: p.requests, known: true }))
+        .sort((a, b) => b.value - a.value)
+    }
+    return rows
+      .map((p) => ({ ...p, value: p.cost ?? 0, known: p.cost != null }))
+      .sort((a, b) => (a.known === b.known ? b.value - a.value : a.known ? -1 : 1))
+  }, [platformRows, shareMode])
+
+  const ringShare = useMemo(
+    // 已定价但恰好为 0 的平台也要留在环里：它和图例里的 "—" 不是一回事
+    () => (shareMode === 'cost' ? platformShare.filter((p) => p.known) : platformShare),
+    [platformShare, shareMode],
+  )
+  const platformTotal = ringShare.reduce((s, p) => s + p.value, 0)
+  const platformCostCoverage = useMemo(() => {
+    const requests = platformRows.reduce((s, p) => s + p.requests, 0)
+    const priced = platformRows.reduce((s, p) => s + p.priced, 0)
+    return formatCostCoverage(priced, requests)
+  }, [platformRows])
   const sharePercent = (v: number) => (platformTotal ? Math.round((v / platformTotal) * 100) : 0)
 
   const valueFormatter = (value: number) => formatMetricValue(metric, value)
@@ -839,6 +925,44 @@ export default function Dashboard() {
   const rateColor = statusColor(stats.success_rate || 0, isDark)
   const status = isDark ? STATUS.dark : STATUS.light
   const errorColorMap = errorColors(isDark)
+
+  // ---- 成本 / 定价派生值 ----
+  const matrixFailed = failedRef.current.has('modelMatrix')
+  // 完全未定价（一条都没算出来）的模型数；部分覆盖由旁边的覆盖率百分比表达
+  const unpricedModelCount = matrixFailed
+    ? 0
+    : summaries.filter((m) => m.requests > 0 && (m.priced_requests ?? 0) === 0).length
+  const costCoverage = formatCostCoverage(stats.priced_requests, stats.total_requests)
+  const peakConfigured = stats.peak_priced_models || 0
+  const peakActive = stats.peak_active_models || 0
+  const peakShort = peakConfigured > 0
+    ? [
+        t(locale, peakActive > 0 ? 'peakOn' : 'peakOff', String(peakActive), String(peakConfigured)),
+        stats.peak_next_at ? t(locale, 'peakNext', stats.peak_next_at) : null,
+      ].filter(Boolean).join(' · ')
+    : ''
+  const peakHint = peakConfigured > 0
+    ? t(locale, 'peakPricingHint', String(peakActive), String(peakConfigured), stats.peak_next_at || '—')
+    : ''
+  const costTitle = failedRef.current.has('wallBlockKpi')
+    ? undefined
+    : [
+        t(locale, 'costExact', formatCost(stats.total_cost)),
+        t(locale, 'costHint'),
+        t(locale, 'costFrozenHint'),
+        t(locale, 'costCoverageHint', String(stats.priced_requests ?? 0), String(stats.total_requests || 0)),
+        peakHint,
+      ]
+        .filter(Boolean)
+        .join(' ')
+  const cacheSavings = stats.total_cache_savings
+  const cacheSavingsLabel = t(locale, cacheSavings != null && cacheSavings < 0 ? 'cacheSurcharge' : 'cacheSaved')
+  const cacheSavingsValue = formatCost(cacheSavings == null ? null : Math.abs(cacheSavings))
+  const budgetAlerts = useMemo(
+    () => (alerts ?? []).filter((item) => BUDGET_ALERT_KINDS.has(item.kind)),
+    [alerts],
+  )
+
   // 首字/速度 KPI：流式请求数占比（全时段汇总口径）
   const streamShare = useMemo(() => {
     const totalReq = summaries.reduce((s, m) => s + m.requests, 0)
@@ -859,8 +983,9 @@ export default function Dashboard() {
   const trendPeak = peakOf(chartData, trendRowValue)
   const trendAlt = t(locale, effectiveStacked ? 'chartAltBar' : 'chartAltTrend', trendTitle, String(chartData.length),
     trendPeak ? valueFormatter(trendRowValue(trendPeak)) : '—', trendPeak ? String(trendPeak.period) : '—')
-  const piePeak = platformShare[0]
-  const pieAlt = t(locale, 'chartAltPie', t(locale, 'platformShare'), String(platformShare.length),
+  const pieTitle = `${t(locale, 'platformShare')} · ${t(locale, shareMode === 'cost' ? 'cost' : 'totalRequests')}`
+  const piePeak = ringShare[0]
+  const pieAlt = t(locale, 'chartAltPie', pieTitle, String(ringShare.length),
     piePeak ? getPlatformDisplayName(piePeak.label) : '—', piePeak ? `${sharePercent(piePeak.value)}%` : '—')
 
   // 矩阵排序列渲染：当前指标所在单元格内嵌相对宽度微条，直观呈现"排行"（替代原排行面板）
@@ -902,7 +1027,7 @@ export default function Dashboard() {
         return v
       }}
     />,
-    <YAxis key="y" width={52} tick={axisTick} tickFormatter={valueFormatter} tickLine={false} axisLine={false} allowDecimals={false} />,
+    <YAxis key="y" width={52} tick={axisTick} tickFormatter={valueFormatter} tickLine={false} axisLine={false} allowDecimals={metric === 'total_cost'} />,
     // hover 十字线 + 毛玻璃 tooltip
     <RTooltip
       key="tt"
@@ -918,13 +1043,26 @@ export default function Dashboard() {
       }}
       labelStyle={{ color: cc.axis, fontSize: 12, marginBottom: 4, fontVariantNumeric: 'tabular-nums' }}
       labelFormatter={(v: string) => (granularity === 'hour' ? `${v.slice(5, 10)} ${v.slice(11, 16)}` : v)}
-      formatter={(value: number, name: string) => [valueFormatter(value), series.find((s) => s.name === name)?.label || name]}
+      formatter={(value: number, name: string, item: any) => {
+        if (metric === 'total_cost') {
+          // 同一桶里可能有未定价请求：金额和"这个金额覆盖了几条"必须一起出现
+          const index = series.findIndex((s) => s.label === name)
+          const priced = index >= 0 ? Number(item?.payload?.[`p${index}`] ?? 0) : 0
+          const requests = index >= 0 ? Number(item?.payload?.[`r${index}`] ?? 0) : 0
+          return [`${formatCost(value)} · ${t(locale, 'costCoverage', formatCostCoverage(priced, requests))}`, name]
+        }
+        return [valueFormatter(value), series.find((s) => s.name === name)?.label || name]
+      }}
     />,
   ]
 
   const failedBlocks = ALL_BLOCKS.filter((b) => failedRef.current.has(b))
   const failed = (b: TranslationKey) => failedRef.current.has(b)
   const kpiDown = failed('wallBlockKpi')
+  // 成本指标没有一条已定价请求时不画贴底平线：0 元和"没定价"在大屏上必须分得开
+  const costUnavailable = metric === 'total_cost' && !kpiDown
+    && (stats.total_requests || 0) > 0
+    && (stats.priced_requests ?? 0) === 0
 
   return (
     <div className="wall-root">
@@ -1017,6 +1155,20 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* ===== 预算告警：与通知中心同源，只保留预算/积分相关的几类 ===== */}
+      {budgetAlerts.length > 0 && (
+        <div className="wall-failbar wall-budgetbar" role="status">
+          <IconCoin size={16} stroke={1.6} style={{ color: 'var(--warn)', flexShrink: 0 }} />
+          <span className="wall-budgetbar-title">{t(locale, 'budgetAlerts', String(budgetAlerts.length))}</span>
+          <span className="wall-budgetbar-list">
+            {budgetAlerts.slice(0, 3).map((item) => (
+              <span key={item.dedupe_key}>{t(locale, item.code as TranslationKey, ...item.args)}</span>
+            ))}
+            {budgetAlerts.length > 3 && <span>+{budgetAlerts.length - 3}</span>}
+          </span>
+        </div>
+      )}
+
       {/* ===== KPI 行：与控制台其他页面同一套 readouts（标签 / 大数 / 脚注 + 迷你走势） ===== */}
       <div className="console-readouts wall-readouts">
         <Readout
@@ -1078,9 +1230,30 @@ export default function Dashboard() {
           meta={
             kpiDown
               ? null
-              : <span title={t(locale, 'costCoverageHint', String(stats.priced_requests ?? 0), String(stats.total_requests || 0))}>
-                  {t(locale, 'inputTokens')} {formatTokenCount(tokenIn)} · {t(locale, 'outputTokens')} {formatTokenCount(tokenOut)} · {t(locale, 'cost')} {formatCost(stats.total_cost)}
+              : <span title={t(locale, 'cacheSavingsHint')}>
+                  {t(locale, 'inputTokens')} {formatTokenCount(tokenIn)} · {t(locale, 'outputTokens')} {formatTokenCount(tokenOut)} · {cacheSavingsLabel} {cacheSavingsValue}
                 </span>
+          }
+        />
+
+        {/* 成本：把可配置的单价真正搬到墙上——先给结论（花了多少），再给可信度（覆盖多少） */}
+        <Readout
+          label={t(locale, 'costEstimate')}
+          value={kpiDown ? '—' : formatCostCompact(stats.total_cost)}
+          title={costTitle}
+          spark={kpiDown ? undefined : <CostSpark values={periodTotals.cost} />}
+          meta={
+            kpiDown
+              ? null
+              : <>
+                  <span title={t(locale, 'costCoverageHint', String(stats.priced_requests ?? 0), String(stats.total_requests || 0))}>
+                    {t(locale, 'costCoverage', costCoverage)}
+                  </span>
+                  {unpricedModelCount > 0 && (
+                    <span className="wall-kpi-warn">· {t(locale, 'unpricedModels', String(unpricedModelCount))}</span>
+                  )}
+                  {peakShort && <span title={peakHint}>· {peakShort}</span>}
+                </>
           }
         />
 
@@ -1111,6 +1284,9 @@ export default function Dashboard() {
           <div className="wall-panel-head">
             <span className="wall-panel-title">{t(locale, 'modelStats')}</span>
             <Group gap="xs" wrap="wrap">
+              {trendMode === 'all' && metric === 'total_cost' && !kpiDown && (
+                <span className="wall-panel-sub">{t(locale, 'costCoverage', costCoverage)}</span>
+              )}
               {(series.length > 0 || trendMode === 'single') && (
                 <SegmentedControl
                   size="xs"
@@ -1152,6 +1328,7 @@ export default function Dashboard() {
                     { label: t(locale, 'mShortTtft'), value: 'avg_ttft_ms' },
                     { label: t(locale, 'mShortSpeed'), value: 'output_speed_tps' },
                     { label: t(locale, 'mShortCache'), value: 'cache_read_tokens' },
+                    { label: t(locale, 'cost'), value: 'total_cost' },
                   ]}
                 />
               )}
@@ -1219,7 +1396,7 @@ export default function Dashboard() {
                 }}
               />
             )
-          ) : series.length ? (
+          ) : series.length && !costUnavailable ? (
             <div style={{ flex: 1, minHeight: 0 }} role="group" aria-label={trendAlt}>
               <ResponsiveContainer width="100%" height="100%">
                 {effectiveStacked ? (
@@ -1261,14 +1438,14 @@ export default function Dashboard() {
               <ChartAltTable
                 caption={t(locale, 'chartAltCaption', trendTitle)}
                 head={[t(locale, 'chartAltPeriod'), ...series.map(s => s.label)]}
-                rows={chartData.map(row => [String(row.period), ...series.map(s => valueFormatter(Number(row[s.name]) || 0))])}
+                rows={chartData.map(row => [String(row.period), ...series.map(s => row[s.name] == null ? '—' : valueFormatter(Number(row[s.name])))])}
               />
             </div>
           ) : (
             <div style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Stack align="center" gap="xs">
                 <IconChartBarPlaceholder />
-                <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t(locale, 'noChartData')}</span>
+                <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t(locale, costUnavailable ? 'costNoPricedRequests' : 'noChartData')}</span>
               </Stack>
             </div>
           )}
@@ -1303,18 +1480,36 @@ export default function Dashboard() {
         <div className="wall-panel" style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <div className="wall-panel-head">
             <span className="wall-panel-title">{t(locale, 'platformShare')}</span>
-            <span className="wall-panel-sub">{failed('platformShare') ? '—' : `${platforms.length} ${t(locale, 'total')}`}</span>
+            <Group gap="xs" wrap="nowrap">
+              <SegmentedControl
+                size="xs"
+                value={shareMode}
+                onChange={(v) => setShareMode(v as 'requests' | 'cost')}
+                aria-label={t(locale, 'platformShareMetric')}
+                data={[
+                  { label: t(locale, 'mShortRequests'), value: 'requests' },
+                  { label: t(locale, 'cost'), value: 'cost' },
+                ]}
+              />
+              <span className="wall-panel-sub">
+                {failed('platformShare')
+                  ? '—'
+                  : shareMode === 'cost'
+                    ? `${t(locale, 'costCoverage', platformCostCoverage)}`
+                    : `${platforms.length} ${t(locale, 'total')}`}
+              </span>
+            </Group>
           </div>
           <div style={{ flex: 1, display: 'flex', gap: 12, alignItems: 'center', minHeight: 0 }}>
             {/* 环形本身只给一句摘要：旁边那两列"名称 + 数值 + 占比"就是它的表格替代，不必再补一份 */}
             <div style={{ width: 120, height: 120, flexShrink: 0 }} role="img" aria-label={pieAlt}>
               {failed('platformShare') ? (
                 <PanelFailed locale={locale} />
-              ) : platformShare.length ? (
+              ) : ringShare.length ? (
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
                     <Pie
-                      data={platformShare}
+                      data={ringShare}
                       dataKey="value"
                       nameKey="label"
                       cx="50%"
@@ -1325,12 +1520,12 @@ export default function Dashboard() {
                       stroke="none"
                       animationDuration={500}
                     >
-                      {platformShare.map((p) => (
+                      {ringShare.map((p) => (
                         /* 每一块扇形自己报数：recharts 给 path 上了 role="img"，不给名字就是一堆无名图片 */
                         <Cell
                           key={p.label}
                           fill={p.color}
-                          aria-label={`${getPlatformDisplayName(p.label)} ${p.value.toLocaleString()} (${sharePercent(p.value)}%)`}
+                          aria-label={`${getPlatformDisplayName(p.label)} ${shareMode === 'cost' ? formatCost(p.value) : p.value.toLocaleString()} (${sharePercent(p.value)}%)`}
                         />
                       ))}
                       <Label
@@ -1346,7 +1541,7 @@ export default function Dashboard() {
                             fontWeight={700}
                             style={{ fontVariantNumeric: 'tabular-nums' }}
                           >
-                            {formatTokenCount(platformTotal)}
+                            {shareMode === 'cost' ? formatCost(platformTotal) : formatTokenCount(platformTotal)}
                           </text>
                         )}
                       />
@@ -1361,13 +1556,18 @@ export default function Dashboard() {
                         backdropFilter: 'blur(8px)',
                         boxShadow: 'none',
                       }}
-                      formatter={(value: number, name: string) => [`${value.toLocaleString()} (${sharePercent(value)}%)`, getPlatformDisplayName(String(name))]}
+                      formatter={(value: number, name: string) => [
+                        `${shareMode === 'cost' ? formatCost(value) : value.toLocaleString()} (${sharePercent(value)}%)`,
+                        getPlatformDisplayName(String(name)),
+                      ]}
                     />
                   </PieChart>
                 </ResponsiveContainer>
               ) : (
                 <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-3)' }}>{t(locale, 'noChartData')}</span>
+                  <span style={{ fontSize: 12, color: 'var(--text-3)' }}>
+                    {t(locale, shareMode === 'cost' ? 'costNoPricedRequests' : 'noChartData')}
+                  </span>
                 </div>
               )}
             </div>
@@ -1381,8 +1581,10 @@ export default function Dashboard() {
                     </span>
                   </span>
                   <span style={{ color: 'var(--text-1)', fontWeight: 600, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-                    {p.value.toLocaleString()}
-                    <span style={{ color: 'var(--text-3)', fontWeight: 400, marginLeft: 3 }}>{sharePercent(p.value)}%</span>
+                    {shareMode === 'cost'
+                      ? p.known ? formatCost(p.value) : '—'
+                      : p.value.toLocaleString()}
+                    {p.known && <span style={{ color: 'var(--text-3)', fontWeight: 400, marginLeft: 3 }}>{sharePercent(p.value)}%</span>}
                   </span>
                 </div>
               ))}
@@ -1413,6 +1615,7 @@ export default function Dashboard() {
                     <th className={thCls('token_input')}>{t(locale, 'colTokenIn')}</th>
                     <th className="wall-num">{t(locale, 'colFreshInput')}</th>
                     <th className={thCls('token_output')}>{t(locale, 'colTokenOut')}</th>
+                    <th className={thCls('total_cost')}>{t(locale, 'cost')}</th>
                     <th className={thCls('avg_latency_ms')}>{t(locale, 'colDuration')}</th>
                     <th className={thCls('avg_ttft_ms')}>{t(locale, 'colTtft')}</th>
                     <th className={thCls('output_speed_tps')}>{t(locale, 'colSpeed')}</th>
@@ -1460,6 +1663,26 @@ export default function Dashboard() {
                         {mxCell(m, 'token_input', formatTokenCount(m.token_input))}
                         <td className="wall-num">{formatTokenCount(m.fresh_input_tokens)}</td>
                         {mxCell(m, 'token_output', formatTokenCount(m.token_output))}
+                        {mxCell(
+                          m,
+                          'total_cost',
+                          m.total_cost == null ? (
+                            <span className="wall-mx-unpriced" title={t(locale, 'costCoverageHint', String(m.priced_requests ?? 0), String(m.requests))}>
+                              {t(locale, 'costUnpriced')}
+                            </span>
+                          ) : (
+                            <span
+                              title={[
+                                t(locale, 'costCoverageHint', String(m.priced_requests ?? 0), String(m.requests)),
+                                m.cache_savings != null
+                                  ? `${t(locale, m.cache_savings < 0 ? 'cacheSurcharge' : 'cacheSaved')} ${formatCost(Math.abs(m.cache_savings))}`
+                                  : null,
+                              ].filter(Boolean).join(' ')}
+                            >
+                              {formatCost(m.total_cost)}
+                            </span>
+                          ),
+                        )}
                         {mxCell(m, 'avg_latency_ms', formatDurationMs(m.avg_latency_ms))}
                         {mxCell(m, 'avg_ttft_ms', m.avg_ttft_ms > 0 ? formatDurationMs(m.avg_ttft_ms) : '—')}
                         {mxCell(m, 'output_speed_tps', m.output_speed_tps > 0 ? m.output_speed_tps.toFixed(1) : '—')}
@@ -1470,7 +1693,7 @@ export default function Dashboard() {
                       </tr>
                       {errorModel === m.model_id && (
                         <tr className="wall-mx-err-row">
-                          <td colSpan={12}>
+                          <td colSpan={13}>
                             <div className="wall-mx-err">
                               <div className="wall-mx-err-head">
                                 <span className="wall-panel-title">{t(locale, 'errorDetails')} · <span className="console-mono">{m.model_id}</span></span>

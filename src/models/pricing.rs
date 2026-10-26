@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local, NaiveTime, Timelike};
+use chrono::{DateTime, Local, NaiveTime, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 
 /// 高峰时段；支持跨午夜（start > end）。
@@ -66,6 +66,41 @@ impl PeakPricing {
         }
         None
     }
+
+    /// 当前是否落在任一高峰窗口内（大屏的"高峰计费中"状态）
+    pub fn is_active(&self, at: DateTime<Local>) -> bool {
+        self.active_tier(at).is_some()
+    }
+
+    /// 下一次价格切换时刻：所有窗口起点/终点里最近的一个。
+    /// 窗口按天重复，只需看今天和明天；跨午夜的窗口也由"取最近边界"自然覆盖。
+    pub fn next_change(&self, at: DateTime<Local>) -> Option<DateTime<Local>> {
+        let mut best: Option<DateTime<Local>> = None;
+        for window in &self.windows {
+            for raw in [&window.start, &window.end] {
+                let Some(time) = parse_hhmm(raw) else { continue };
+                // DST 空洞里的本地时刻不存在：跳过这一个边界，别让整份配置都算不出下一次切换
+                let naive = at.date_naive().and_time(time);
+                let Some(mut candidate) = Local.from_local_datetime(&naive).earliest() else {
+                    continue;
+                };
+                if candidate <= at {
+                    let Some(tomorrow) = Local
+                        .from_local_datetime(&(naive + chrono::Duration::days(1)))
+                        .earliest()
+                    else {
+                        continue;
+                    };
+                    candidate = tomorrow;
+                }
+                best = Some(match best {
+                    Some(current) => current.min(candidate),
+                    None => candidate,
+                });
+            }
+        }
+        best
+    }
 }
 
 impl Pricing {
@@ -96,6 +131,17 @@ impl Pricing {
                 + output * output_price)
                 / 1_000_000.0,
         )
+    }
+
+    /// 缓存命中相对"按未命中价计费"的价差（正数=省下，负数=命中反而更贵）。
+    /// 与 `cost` 使用同一份高峰快照，所以两边的档位永远一致。
+    /// `cache_read` 为 None（上游没回缓存数据）时无从比较，返回 None。
+    pub fn cache_savings(&self, cache_read: Option<i64>, at: DateTime<Local>) -> Option<f64> {
+        let hit = cache_read?.max(0) as f64;
+        let tier = self.peak.as_ref().and_then(|peak| peak.active_tier(at));
+        let input_price = tier.and_then(|t| t.input).unwrap_or(self.input);
+        let cache_read_price = tier.and_then(|t| t.cache_read).unwrap_or(self.cache_read);
+        Some(hit * (input_price - cache_read_price) / 1_000_000.0)
     }
 }
 
@@ -201,6 +247,51 @@ mod tests {
         assert!(p.active_tier(at(23, 0)).is_some());
         assert!(p.active_tier(at(1, 0)).is_some());
         assert!(p.active_tier(at(12, 0)).is_none());
+        assert!(p.is_active(at(23, 0)));
+        assert!(!p.is_active(at(12, 0)));
+    }
+
+    #[test]
+    fn next_change_finds_the_nearest_boundary() {
+        let p = PeakPricing {
+            windows: vec![PricingWindow { start: "22:00".into(), end: "02:00".into() }],
+            peak: Some(PeakTier { input: Some(9.0), ..Default::default() }),
+        };
+        // 高峰中 → 最近边界是次日 02:00；空闲 → 今天 22:00
+        assert_eq!(p.next_change(at(23, 0)).unwrap().time(), parse_hhmm("02:00").unwrap());
+        assert_eq!(p.next_change(at(1, 0)).unwrap().time(), parse_hhmm("02:00").unwrap());
+        assert_eq!(p.next_change(at(12, 0)).unwrap().time(), parse_hhmm("22:00").unwrap());
+        // 多个窗口取最近的边界
+        let multi = PeakPricing {
+            windows: vec![
+                PricingWindow { start: "08:30".into(), end: "17:30".into() },
+                PricingWindow { start: "22:00".into(), end: "02:00".into() },
+            ],
+            peak: Some(PeakTier { input: Some(9.0), ..Default::default() }),
+        };
+        assert_eq!(multi.next_change(at(17, 0)).unwrap().time(), parse_hhmm("17:30").unwrap());
+    }
+
+    #[test]
+    fn cache_savings_use_the_same_tier_as_cost() {
+        let p = pricing();
+        // 高峰：命中价 0.04 vs 未命中 2.0，20 万命中 → 0.2 × 1.96
+        let peak = p.cache_savings(Some(200_000), at(10, 0)).unwrap();
+        assert!((peak - 0.392).abs() < 1e-12, "peak savings {peak}");
+        // 空闲：0.02 vs 1.0
+        let off = p.cache_savings(Some(200_000), at(3, 0)).unwrap();
+        assert!((off - 0.196).abs() < 1e-12, "off-peak savings {off}");
+        // 上游没回缓存数据时无从比较
+        assert_eq!(p.cache_savings(None, at(10, 0)), None);
+        // 零命中是真实的 0，不是"不知道"
+        assert_eq!(p.cache_savings(Some(0), at(10, 0)), Some(0.0));
+    }
+
+    #[test]
+    fn cache_savings_can_be_negative_when_hit_costs_more() {
+        let p = Pricing { input: 1.0, output: 2.0, cache_read: 3.0, cache_write: 1.0, peak: None };
+        let delta = p.cache_savings(Some(1_000_000), at(12, 0)).unwrap();
+        assert!((delta + 2.0).abs() < 1e-12, "命中反而更贵应是负数 {delta}");
     }
 
     #[test]

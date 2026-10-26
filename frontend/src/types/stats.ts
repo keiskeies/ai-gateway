@@ -19,8 +19,16 @@ export interface OverviewStats {
   cache_hit_rate?: number
   /** 成本估算合计（按模型定价，每 100 万 token 计价）；筛选范围内一条已定价的都没有时为 null */
   total_cost?: number | null
+  /** 缓存价差合计：正数=命中省下，负数=命中反而更贵；无可比较请求时为 null */
+  total_cache_savings?: number | null
   /** 参与成本估算的请求数；覆盖率 = priced_requests / total_requests */
   priced_requests?: number
+  /** 配了高峰价且启用、基础价完整的模型数 */
+  peak_priced_models?: number
+  /** 当前正落在高峰窗口里的模型数 */
+  peak_active_models?: number
+  /** 下一次计费档位切换的本地 HH:MM */
+  peak_next_at?: string | null
 }
 
 export interface LatencyPercentiles {
@@ -45,6 +53,8 @@ export interface ModelSummaryRow {
   fresh_input_tokens: number
   cache_hit_rate: number
   total_cost?: number | null
+  /** 缓存价差合计（正数=节省，负数=加价）；没有可比较的请求时为 null */
+  cache_savings?: number | null
   priced_requests?: number
 }
 
@@ -131,8 +141,10 @@ export interface RequestPayloadRequest {
   protocol: string | null
   headers: Record<string, unknown> | null
   body: string | null
+  /** 正文原始字节数（截断时大于实际存下的长度） */
   bytes: number
-  truncated: boolean
+  headers_truncated: boolean
+  body_truncated: boolean
 }
 
 /** 响应侧详情：存的是上游原始响应（流式为原始 SSE），不是跨协议转换后的结果 */
@@ -149,6 +161,9 @@ export interface RequestPayloadResponse {
 export interface RequestPayload {
   request: RequestPayloadRequest
   response: RequestPayloadResponse
+  /** 当前采集开关：区分“这条没记”与“开关没开” */
+  request_capture_enabled: boolean
+  response_capture_enabled: boolean
 }
 
 export interface PlatformCreditUsage {

@@ -6,15 +6,17 @@ export function Readout({
   unit,
   meta,
   spark,
+  title,
 }: {
   label: string
   value: ReactNode
   unit?: string
   meta?: ReactNode
   spark?: ReactNode
+  title?: string
 }) {
   return (
-    <div className="console-readout">
+    <div className="console-readout" title={title}>
       <div className="console-readout-label">{label}</div>
       <div className="console-readout-main">
         <span className="console-readout-value">{value}</span>

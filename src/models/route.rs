@@ -313,6 +313,27 @@ mod tests {
     }
 
     #[test]
+    fn pricing_snapshot_carries_cache_prices_and_peak_tier() {
+        use chrono::TimeZone;
+        let mut b = priced(Some(2.0), Some(8.0));
+        b.cache_read_price = Some(0.5);
+        b.peak_pricing = Some(serde_json::json!({
+            "windows": [{"start": "08:30", "end": "17:30"}],
+            "peak": {"input": 3.0, "cache_read": 0.6}
+        }));
+        let pricing = b.pricing_snapshot().expect("双侧定价");
+        let peak_at = chrono::Local.with_ymd_and_hms(2026, 10, 26, 10, 0, 0).unwrap();
+        let off_at = chrono::Local.with_ymd_and_hms(2026, 10, 26, 3, 0, 0).unwrap();
+        // 100 万命中 token：高峰省 3.0−0.6，空闲省 2.0−0.5
+        assert!((pricing.cache_savings(Some(1_000_000), peak_at).unwrap() - 2.4).abs() < 1e-12);
+        assert!((pricing.cache_savings(Some(1_000_000), off_at).unwrap() - 1.5).abs() < 1e-12);
+        // 缓存命中价缺失时回退输入价 → 价差为 0，而不是 None（有定价、但没省到）
+        b.cache_read_price = None;
+        let flat = b.pricing_snapshot().unwrap();
+        assert_eq!(flat.cache_savings(Some(1_000_000), off_at), Some(0.0));
+    }
+
+    #[test]
     fn half_priced_model_is_not_estimated() {
         // 只填一侧时整单不估算（宁可不给数，也不按 0 价算出个偏低的车身价）
         assert_eq!(priced(Some(2.5), None).price_pair(), None);

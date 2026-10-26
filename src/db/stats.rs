@@ -394,11 +394,11 @@ pub fn latency_percentiles(pool: &DbPool, from: Option<&str>, to: Option<&str>) 
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, cache_savings, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
             stat.latency_ms, stat.token_input, stat.token_output, stat.error_type, stat.created_at,
             stat.ttft_ms, stat.cache_read_tokens, stat.cache_write_tokens, stat.is_stream as i64,
-            stat.api_key_id, stat.cost, stat.request_id, stat.replayed_from,
+            stat.api_key_id, stat.cost, stat.cache_savings, stat.request_id, stat.replayed_from,
             stat.path, stat.credits])?;
     Ok(())
 }
@@ -429,18 +429,19 @@ pub fn record_response_body(pool: &DbPool, body: &ResponseBody) -> AppResult<()>
 pub fn record_body(pool: &DbPool, body: &RequestBody) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT OR REPLACE INTO request_bodies (request_id, protocol, body, bytes, created_at) VALUES (?1,?2,?3,?4,?5)",
-        rusqlite::params![body.request_id, body.protocol, body.body, body.bytes, body.created_at],
+        "INSERT OR REPLACE INTO request_bodies (request_id, protocol, body, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        rusqlite::params![body.request_id, body.protocol, body.body, body.bytes, body.truncated as i64, body.created_at],
     )?;
     Ok(())
 }
 
 /// 按明细行 ID 取正文：重放接口的入口就是列表里的 `request_stats.id`。
 /// 没有正文行时返回 None（采集没开、请求早于 V21、或正文超限没存）。
+/// 返回的 `truncated` 由调用方检查——截断的前缀只用于查看，不能重放。
 pub fn body_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<Option<RequestBody>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let mut stmt = conn.prepare(
-        "SELECT b.request_id, b.protocol, b.body, b.bytes, b.created_at
+        "SELECT b.request_id, b.protocol, b.body, b.bytes, b.truncated, b.created_at
          FROM request_stats s JOIN request_bodies b ON b.request_id = s.request_id
          WHERE s.id = ?1",
     )?;
@@ -450,7 +451,8 @@ pub fn body_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<Option<RequestBod
             protocol: r.get(1)?,
             body: r.get(2)?,
             bytes: r.get(3)?,
-            created_at: r.get(4)?,
+            truncated: r.get::<_, i64>(4)? != 0,
+            created_at: r.get(5)?,
         })
     })?
     .next()
@@ -479,12 +481,15 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
         return Ok(RequestPayload {
             request: RequestPayloadRequest {
                 headers_captured: false, body_captured: false, protocol: None,
-                headers: None, body: None, bytes: 0, truncated: false,
+                headers: None, body: None, bytes: 0,
+                headers_truncated: false, body_truncated: false,
             },
             response: RequestPayloadResponse {
                 captured: false, protocol: None, status_code: None, content_type: None,
                 body: None, bytes: 0, truncated: false,
             },
+            request_capture_enabled: false,
+            response_capture_enabled: false,
         });
     };
 
@@ -494,9 +499,9 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
         |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)? != 0)),
     ).ok();
     let body_row = conn.query_row(
-        "SELECT protocol, body, bytes FROM request_bodies WHERE request_id = ?1",
+        "SELECT protocol, body, bytes, truncated FROM request_bodies WHERE request_id = ?1",
         [&request_id],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)),
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)? != 0)),
     ).ok();
     let response_row = conn.query_row(
         "SELECT protocol, status_code, content_type, body, bytes, truncated FROM response_bodies WHERE request_id = ?1",
@@ -507,16 +512,16 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
         )),
     ).ok();
 
-    let (headers_captured, headers, header_bytes, header_truncated) = match header_row {
+    let (headers_captured, headers, _header_bytes, header_truncated) = match header_row {
         Some((raw, bytes, truncated)) => {
             let parsed = serde_json::from_str(&raw).ok();
             (parsed.is_some(), parsed, bytes, truncated)
         }
         None => (false, None, 0, false),
     };
-    let (body_captured, protocol, request_body, body_bytes) = match body_row {
-        Some((protocol, body, bytes)) => (true, Some(protocol), Some(body), bytes),
-        None => (false, None, None, 0),
+    let (body_captured, protocol, request_body, body_bytes, body_truncated) = match body_row {
+        Some((protocol, body, bytes, truncated)) => (true, Some(protocol), Some(body), bytes, truncated),
+        None => (false, None, None, 0, false),
     };
 
     Ok(RequestPayload {
@@ -526,8 +531,9 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
             protocol,
             headers,
             body: request_body,
-            bytes: body_bytes.max(header_bytes),
-            truncated: header_truncated,
+            bytes: body_bytes,
+            headers_truncated: header_truncated,
+            body_truncated,
         },
         response: match response_row {
             Some((protocol, status_code, content_type, body, bytes, truncated)) => RequestPayloadResponse {
@@ -544,6 +550,8 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
                 body: None, bytes: 0, truncated: false,
             },
         },
+        request_capture_enabled: false,
+        response_capture_enabled: false,
     })
 }
 
@@ -754,6 +762,7 @@ pub fn model_summaries(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
             COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens,
             COALESCE(SUM(rs.cache_write_tokens), 0) AS cache_write_tokens,
             SUM(rs.cost)                        AS total_cost,
+            SUM(rs.cache_savings)               AS cache_savings,
             COUNT(rs.cost)                      AS priced_requests
         FROM request_stats rs
         LEFT JOIN backends b ON rs.backend_id = b.id
@@ -789,7 +798,8 @@ pub fn model_summaries(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
                 if denominator > 0 { cache_read_tokens as f64 / denominator as f64 * 100.0 } else { 0.0 }
             },
             total_cost: r.get(12)?,
-            priced_requests: r.get(13)?,
+            cache_savings: r.get(13)?,
+            priced_requests: r.get(14)?,
         })
     })?;
     Ok(rows.filter_map(|x| x.ok()).collect())
@@ -829,7 +839,7 @@ SELECT
     -- 正文存没存要在这里就答出来，重放按钮才能一开始就摆对状态。用 EXISTS 而不是 JOIN：
     -- 正文表按 request_id 一对一，JOIN 不会放大行数但会把 TEXT 列拖进结果集，白读一遍。
     CASE WHEN rs.request_id IS NULL THEN 0
-         ELSE EXISTS (SELECT 1 FROM request_bodies tb WHERE tb.request_id = rs.request_id)
+         ELSE EXISTS (SELECT 1 FROM request_bodies tb WHERE tb.request_id = rs.request_id AND tb.truncated = 0)
     END AS has_body,
     rs.path, rs.credits
 "#;
@@ -1374,8 +1384,9 @@ pub fn db_info(pool: &DbPool, path: &std::path::Path) -> AppResult<DbInfo> {
         attempt_rows: count("SELECT COUNT(*) FROM request_attempts")?,
         alert_rows: count("SELECT COUNT(*) FROM alerts")?,
         body_rows: count("SELECT COUNT(*) FROM request_bodies")?,
+        // 实际占库的是存下来的文本，不是原始长度（截断行两者不同）
         body_bytes: conn.query_row(
-            "SELECT COALESCE(SUM(bytes), 0) FROM request_bodies",
+            "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM request_bodies",
             [],
             |row| row.get::<_, i64>(0),
         )?,
@@ -1387,7 +1398,7 @@ pub fn db_info(pool: &DbPool, path: &std::path::Path) -> AppResult<DbInfo> {
         )?,
         response_rows: count("SELECT COUNT(*) FROM response_bodies")?,
         response_bytes: conn.query_row(
-            "SELECT COALESCE(SUM(bytes), 0) FROM response_bodies",
+            "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM response_bodies",
             [],
             |row| row.get::<_, i64>(0),
         )?,
@@ -1443,8 +1454,8 @@ pub fn overview(
         |r| r.get(0),
     ).unwrap_or(0);
     // 全局首字 / 速度 / 缓存命中（KPI 副行展示；口径与时序聚合一致）
-    let (avg_ttft, avg_speed, total_cache_read, total_cache_write, total_cost, priced_requests):
-        (f64, f64, i64, i64, Option<f64>, i64) = conn.query_row(
+    let (avg_ttft, avg_speed, total_cache_read, total_cache_write, total_cost, total_cache_savings, priced_requests):
+        (f64, f64, i64, i64, Option<f64>, Option<f64>, i64) = conn.query_row(
         &format!(
             r#"SELECT
                 COALESCE(AVG(ttft_ms), 0) AS avg_ttft,
@@ -1454,13 +1465,14 @@ pub fn overview(
                 COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
                 COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write,
                 SUM(cost) AS total_cost,
+                SUM(cache_savings) AS total_cache_savings,
                 COUNT(cost) AS priced_requests
              FROM request_stats{}"#,
             range.where_clause("created_at")
         ),
         rusqlite::params_from_iter(range.params()),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-    ).unwrap_or((0.0, 0.0, 0, 0, None, 0));
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    ).unwrap_or((0.0, 0.0, 0, 0, None, None, 0));
 
     // 对比周期：指定范围时对比等长的前一段区间；未指定时保持昨日口径
     match prev_range(&range) {
@@ -1480,7 +1492,7 @@ pub fn overview(
                 total_token_input, total_token_output,
                 total_connections_active, requests_prev_period, avg_latency_prev_period,
                 avg_ttft, avg_speed, total_cache_read, total_cache_write,
-                total_cost, priced_requests,
+                total_cost, total_cache_savings, priced_requests,
             ))
         }
         None => {
@@ -1498,7 +1510,7 @@ pub fn overview(
                 total_token_input, total_token_output,
                 total_connections_active, requests_prev_period, avg_latency_prev_period,
                 avg_ttft, avg_speed, total_cache_read, total_cache_write,
-                total_cost, priced_requests,
+                total_cost, total_cache_savings, priced_requests,
             ))
         }
     }
@@ -1520,6 +1532,7 @@ fn build_overview(
     total_cache_read: i64,
     total_cache_write: i64,
     total_cost: Option<f64>,
+    total_cache_savings: Option<f64>,
     priced_requests: i64,
 ) -> OverviewStats {
     let total_proxies: i64 = conn.query_row("SELECT COUNT(*) FROM proxies", [], |r| r.get(0)).unwrap_or(0);
@@ -1527,6 +1540,7 @@ fn build_overview(
     let total_platforms: i64 = conn.query_row("SELECT COUNT(*) FROM platforms", [], |r| r.get(0)).unwrap_or(0);
     let active_platforms = total_platforms; // all platforms are active
     let total_models: i64 = conn.query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0)).unwrap_or(0);
+    let (peak_priced_models, peak_active_models, peak_next_at) = peak_state(conn, chrono::Local::now());
 
     OverviewStats {
         total_requests, success_rate: if total_requests > 0 { success_count as f64 / total_requests as f64 * 100.0 } else { 0.0 },
@@ -1543,8 +1557,53 @@ fn build_overview(
             if denominator > 0 { total_cache_read as f64 / denominator as f64 * 100.0 } else { 0.0 }
         },
         total_cost,
+        total_cache_savings,
         priced_requests,
+        peak_priced_models,
+        peak_active_models,
+        peak_next_at,
     }
+}
+
+/// 当前高峰计费状态：配置了高峰价的启用模型数、正在高峰窗口里的模型数、下一次切换时刻。
+/// 只看启用且基础价完整的模型——半截价格的模型本来就不会产生成本。
+fn peak_state(
+    conn: &rusqlite::Connection,
+    at: chrono::DateTime<chrono::Local>,
+) -> (i64, i64, Option<String>) {
+    let Ok(mut stmt) = conn.prepare(
+        // status 既可能是旧行的裸值 Active，也可能是新行 serde 写出的 "Active"（带引号）
+        "SELECT peak_pricing FROM models \
+         WHERE peak_pricing IS NOT NULL AND status IN ('Active', '\"Active\"') \
+           AND input_price IS NOT NULL AND output_price IS NOT NULL",
+    ) else {
+        return (0, 0, None);
+    };
+    let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) else {
+        return (0, 0, None);
+    };
+    let mut configured = 0i64;
+    let mut active = 0i64;
+    let mut next: Option<chrono::DateTime<chrono::Local>> = None;
+    for raw in rows.flatten() {
+        let Ok(peak) = serde_json::from_str::<crate::models::pricing::PeakPricing>(&raw) else {
+            continue;
+        };
+        if peak.windows.is_empty() || peak.peak.is_none() {
+            continue;
+        }
+        configured += 1;
+        if peak.is_active(at) {
+            active += 1;
+        }
+        if let Some(change) = peak.next_change(at) {
+            next = Some(match next {
+                Some(current) => current.min(change),
+                None => change,
+            });
+        }
+    }
+    (configured, active, next.map(|t| t.format("%H:%M").to_string()))
 }
 
 /// 计算对比用的上一周期：有范围时为等长的前一段 [from-dur, from)；无范围返回 None（调用方回退昨日口径）
@@ -1974,6 +2033,7 @@ mod tests {
             error_type: None, created_at: "2026-01-01T00:00:00.000Z".into(),
             ttft_ms: None, cache_read_tokens: None, cache_write_tokens: None,
             is_stream: false, api_key_id: Some(api_key_id.into()), cost,
+            cache_savings: None,
             request_id: None, replayed_from: None,
             credits: None, path: None,
         }
@@ -2205,6 +2265,59 @@ mod tests {
         cleanup_db(&path);
     }
 
+    /// 缓存价差是请求时冻结的金额：正负都按行相加，未定价行保持 NULL（不是 0）
+    #[test]
+    fn cache_savings_are_summed_and_stay_null_when_unknown() {
+        let (pool, path) = test_db();
+        let mut saved = stat("k", Some(0.01));
+        saved.cache_savings = Some(0.002);
+        saved.cache_read_tokens = Some(1000);
+        record(&pool, &saved).expect("saved");
+        let mut surcharge = stat("k", Some(0.02));
+        surcharge.cache_savings = Some(-0.001);
+        record(&pool, &surcharge).expect("surcharge");
+        record(&pool, &stat("k", None)).expect("unknown");
+
+        let ov = overview(&pool, 0, None, None).expect("overview");
+        assert!((ov.total_cache_savings.expect("sum") - 0.001).abs() < 1e-12);
+        assert_eq!(ov.total_cost, Some(0.03));
+
+        let summaries = model_summaries(&pool, None, None).expect("summaries");
+        assert_eq!(summaries.len(), 1);
+        assert!((summaries[0].cache_savings.expect("model sum") - 0.001).abs() < 1e-12);
+
+        cleanup_db(&path);
+    }
+
+    /// 高峰状态只统计启用且基础价完整的模型；窗口覆盖全天时当前一定处于高峰
+    #[test]
+    fn overview_reports_peak_pricing_state() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id,name,type,base_url,api_key,created_at,updated_at) VALUES ('pl','p','openai','http://x','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platform");
+            let peak = r#"{"windows":[{"start":"00:00","end":"12:00"},{"start":"12:00","end":"00:00"}],"peak":{"input":2.0}}"#;
+            // 新行的 status 是 serde 写出的带引号形式，旧行才是裸值：两种都要认
+            conn.execute(
+                "INSERT INTO models (id,platform_id,model_id,display_name,input_price,output_price,peak_pricing,status) \
+                 VALUES ('m1','pl','m1','m1',1.0,2.0,?1,'\"Active\"'), \
+                        ('m2','pl','m2','m2',1.0,2.0,?1,'\"Disabled\"'), \
+                        ('m3','pl','m3','m3',NULL,2.0,?1,'\"Active\"')",
+                rusqlite::params![peak],
+            ).expect("models");
+        }
+
+        let ov = overview(&pool, 0, None, None).expect("overview");
+        assert_eq!(ov.peak_priced_models, 1, "停用与半截价格的模型不算");
+        assert_eq!(ov.peak_active_models, 1);
+        assert!(ov.peak_next_at.is_some(), "全天窗口也应有下一次切换边界");
+
+        cleanup_db(&path);
+    }
+
     /// 表头排序：白名单里的列才生效，空值两个方向都沉底，未知列名回落默认顺序。
     #[test]
     fn list_requests_sorts_only_by_whitelisted_columns() {
@@ -2217,6 +2330,7 @@ mod tests {
                 error_type: None, created_at: created_at.into(),
                 ttft_ms: None, cache_read_tokens: None, cache_write_tokens: None,
                 is_stream: false, api_key_id: Some("k1".into()), cost,
+                cache_savings: None,
                 request_id: None, replayed_from: None,
                 credits: None, path: None,
             }
@@ -2477,6 +2591,7 @@ mod tests {
             protocol: "openai".into(),
             body: prompt.into(),
             bytes: prompt.len() as i64,
+            truncated: false,
             created_at: with_body.created_at.clone(),
         }).expect("record body");
         // 采集没开 / 早于 V21：明细行照记，只是没有正文可重放
@@ -2521,6 +2636,7 @@ mod tests {
             protocol: "openai".into(),
             body: prompt.into(),
             bytes: prompt.len() as i64,
+            truncated: false,
             created_at: with_body.created_at.clone(),
         }).expect("record body again");
 
@@ -2538,11 +2654,49 @@ mod tests {
             protocol: "openai".into(),
             body: prompt.into(),
             bytes: prompt.len() as i64,
+            truncated: false,
             created_at: with_body.created_at.clone(),
         }).expect("record orphan body");
         let cleaned = cleanup_dangling(&pool, false).expect("cleanup");
         assert_eq!(cleaned.orphan_bodies, 1, "没有明细行对应的正文要清掉");
         assert_eq!(db_info(&pool, &path).expect("db info after cleanup").body_rows, 0);
+
+        cleanup_db(&path);
+    }
+
+    /// 截断的请求正文仍要在详情里看得到，但不能出现在重放入口（前缀不是当初那份请求）
+    #[test]
+    fn truncated_request_body_is_visible_but_not_replayable() {
+        let (pool, path) = test_db();
+        let prefix = r#"{"model":"gpt-x","messages":[{"role":"user","content":"partial"#;
+        let mut row = stat("k1", None);
+        row.request_id = Some("req-trunc".into());
+        record(&pool, &row).expect("record");
+        let stat_id: i64 = pool.get().unwrap().query_row(
+            "SELECT id FROM request_stats WHERE request_id = 'req-trunc'",
+            [], |r| r.get(0),
+        ).unwrap();
+        record_body(&pool, &RequestBody {
+            request_id: "req-trunc".into(),
+            protocol: "openai".into(),
+            body: prefix.into(),
+            bytes: 700_000,
+            truncated: true,
+            created_at: row.created_at.clone(),
+        }).expect("record truncated body");
+
+        let payload = payload_for_stat(&pool, stat_id).expect("payload");
+        assert!(payload.request.body_captured, "截断也要算已采集，否则 UI 会退回未采集");
+        assert!(payload.request.body_truncated);
+        assert_eq!(payload.request.body.as_deref(), Some(prefix));
+        assert_eq!(payload.request.bytes, 700_000, "bytes 是原始长度，不是前缀长度");
+
+        let stored = body_for_stat(&pool, stat_id).expect("body").expect("prefix exists");
+        assert!(stored.truncated, "重放前必须能看出这是截断的");
+
+        let page = list_requests(&pool, &RequestFilter::default()).expect("list");
+        let item = page.items.iter().find(|i| i.request_id.as_deref() == Some("req-trunc")).expect("row");
+        assert!(!item.has_body, "截断正文不能露出重放入口");
 
         cleanup_db(&path);
     }
@@ -2600,7 +2754,7 @@ mod tests {
         ).unwrap();
         record_body(&pool, &RequestBody {
             request_id: "req-payload".into(), protocol: "openai".into(),
-            body: "{\"model\":\"m\"}".into(), bytes: 15,
+            body: "{\"model\":\"m\"}".into(), bytes: 15, truncated: false,
             created_at: "2020-01-01T00:00:00+00:00".into(),
         }).expect("record body");
         record_headers(&pool, &RequestHeaders {

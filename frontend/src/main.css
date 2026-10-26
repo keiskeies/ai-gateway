@@ -132,10 +132,33 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
   min-width: 0;
 }
 
-/* ---- KPI 行：复用控制台的 readouts 条，7 格 ---- */
+/* ---- KPI 行：复用控制台的 readouts 条，8 格 ---- */
 .console-readouts.wall-readouts {
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   flex-shrink: 0;
+}
+
+.wall-kpi-warn {
+  color: var(--warn);
+}
+
+.wall-budgetbar {
+  align-items: flex-start;
+}
+
+.wall-budgetbar-title {
+  color: var(--text-1);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.wall-budgetbar-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 12px;
 }
 
 .wall-readouts .console-readout {
@@ -159,7 +182,6 @@ html.wall-fullscreen[data-mantine-color-scheme='dark'] {
     border-top: 1px solid var(--line);
   }
 }
-
 @media (max-width: 767px) {
   .console-readouts.wall-readouts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1703,6 +1725,13 @@ html.wall-fullscreen .wall-timeline-lane-chart {
 /* 排序列表头高亮 */
 .wall-matrix-scroll .wall-mx-th-sorted {
   color: var(--accent) !important;
+}
+
+/* 未定价模型：用文字说清楚，而不是把"不知道"画成一个 0 */
+.wall-mx-unpriced {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 /* ---- 登录 / 首次初始化 ---- */
