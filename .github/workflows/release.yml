@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: '是否创建 Release。关闭时只出包并上传为 Actions artifact，不建 Release、不打 tag'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -65,6 +70,8 @@ jobs:
         run: cargo install tauri-cli --version 2.11.5 --locked
 
       - name: Build Tauri app
+        # tag 推送永远走发布路径；手动触发时才看 publish 开关
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -131,3 +138,18 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
+
+      # 不发布时：自己出包并把安装包传成 Actions artifact（不建 Release、不打 tag）
+      - name: Build Tauri app (no release)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == false }}
+        working-directory: src-tauri
+        run: cargo tauri build --target ${{ matrix.target }}
+
+      - name: Upload installers (no release)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-gateway-${{ matrix.label }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+          retention-days: 14
