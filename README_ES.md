@@ -211,6 +211,14 @@ Un perfil de rendimiento completo para cada modelo en granularidad de hora / dí
 - **Libro mayor separado**: cargos, liberaciones, ajustes y reinicios tienen su fila; purgar el historial de solicitudes nunca “devuelve” créditos ya consumidos
 - **Visible y ajustable**: el registro de solicitudes muestra los créditos de cada una; la lista/detalle de plataforma muestra restante/total y modelos sin precio; los créditos bajos/agotados llegan al centro de notificaciones y se pueden ajustar manualmente
 
+### 📚 Catálogo de modelos compartido y tarifas por franja horaria
+
+- **Una URL, configurada una vez**: el catálogo se identifica con un hash de «tipo de plataforma + base URL normalizada», así que una segunda clave sobre el mismo endpoint hereda la lista de modelos, los precios y los precios en créditos — sin volver a sincronizar ni a teclear; un cambio afecta a todas las cuentas del catálogo
+- **Las cuentas siguen siendo las dueñas**: el hash solo fija el alcance compartido — los modelos virtuales y los backends siguen ligados a una cuenta concreta; el catálogo se limpia únicamente al borrar la última cuenta con esa URL (antes los modelos migran a una cuenta hermana)
+- **Precio de entrada dividido por caché**: el precio de entrada se descompone en fallo de caché, acierto de caché y escritura de caché, de modo que `cache_read` y `cache_creation` de Anthropic se facturan por separado; el precio de fallo sigue respaldando los datos antiguos
+- **Punta y valle**: cada modelo puede definir ventanas horarias (`HH:MM-HH:MM`, con salto de medianoche) y sus cuatro precios; la franja se elige según la hora de inicio de la solicitud, así que los 0,02 nocturnos / 0,04 diurnos de DeepSeek se configuran directamente
+- **El historial no se reescribe**: cambiar un precio solo afecta a las solicitudes posteriores; costes registrados, estadísticas y exportaciones conservan sus cifras
+
 ## 🧱 Limitaciones conocidas
 
 Estos son límites de implementación fáciles de sobreestimar:
@@ -224,6 +232,9 @@ Estos son límites de implementación fáciles de sobreestimar:
 7. **Los cuerpos de solicitud/respuesta están desactivados por defecto**: dos interruptores separados con un límite de 64 KB por registro; los detalles de respuesta guardan la respuesta upstream en bruto, los streams solo los primeros 64 KB, y las solicitudes entre protocolos no son el resultado convertido que vio el cliente.
 8. **El auto-purge dura al menos 30 días**: desactivado, la purga es manual; borrar solo libera páginas de SQLite y no reduce el archivo (ejecuta `VACUUM` aparte).
 9. **Los créditos son un libro mayor local**: se reservan/confirman al tener éxito y se liberan al fallar, con ajuste manual; las ventanas usan el día/semana/mes natural local del servidor y pueden diferir de la factura upstream.
+10. **Acceso a clientes solo desde la consola local**: `/api/clients/*` se admite únicamente cuando el extremo remoto es de bucle invertido, la cabecera `Host` también lo es y la solicitud no lleva `Forwarded`, `X-Forwarded-*` ni `X-Real-IP`; de lo contrario devuelve 403 y la página desaparece del menú. Esa página edita `~/.claude` y `~/.codex` de la máquina del gateway, así que un navegador remoto no puede usarla. Detrás de nginx en el mismo equipo siga accediendo por `127.0.0.1` y retire las cabeceras de IP de origen (un dominio propio cuenta como remoto).
+11. **Los catálogos compartidos fijan el precio por URL**: las cuentas con la misma base URL comparten modelos, precios y precios en créditos; una clave concreta no puede llevar tarifas propias — use otra URL u otro tipo de plataforma.
+12. **Las franjas punta usan la zona horaria local del servidor**: la franja se decide con la hora de inicio de la solicitud en el servidor, que puede diferir horas de la zona de facturación del proveedor; las ventanas con salto de medianoche funcionan, pero un despliegue multi-zona conviene revisarlo.
 
 ---
 
@@ -249,16 +260,17 @@ Estos son límites de implementación fáciles de sobreestimar:
 
 - 🏪 **15 presets de plataformas**: OpenAI · Anthropic · DeepSeek · NVIDIA · Moonshot · ZhipuAI · Qwen · Doubao · SiliconFlow · Groq · Google Gemini · Together AI · OpenRouter · Ollama · Azure OpenAI. Los presets rellenan la URL base y la lista de modelos; la clave la sigues aportando tú. También se puede añadir a mano cualquier endpoint compatible con OpenAI / Anthropic
 - 🔍 **Sincronización de modelos remotos**: «Probar conexión» obtiene la lista de modelos del upstream; la sincronización solo añade los modelos que faltan en local y no sobrescribe precios, capacidades ni nombres existentes
+- 🧩 **Catálogo de modelos compartido**: modelos y precios se agrupan por tipo de plataforma + base URL, de modo que reconectar la misma URL no vuelve a pedir configuración; otras URLs u otros tipos de plataforma siguen siendo independientes
 - 🏷️ **Insignias de capacidades**: razonamiento / visión / embedding / rerank / herramientas, editables por modelo y en lote; las insignias de un modelo virtual son la intersección de las capacidades de sus backends
 - 🔗 **Compatibilidad con reasoning_content**: salidas de cadena de pensamiento de plataformas como NVIDIA NIM; parámetros de razonamiento OpenAI / Anthropic traducidos en ambos sentidos
 - 📡 **Cabeceras reenviadas personalizadas**: añade cabeceras arbitrarias por plataforma, sobrescribiendo `Authorization` / `x-api-key` cuando coinciden
 - 🎛️ **Playground**: elige un modelo y un protocolo, envía una petición real para verificar el enrutado y el upstream, crea una clave temporal o copia el cURL equivalente
-- 🔌 **Acceso de clientes**: toma y restauración con un clic de las configuraciones locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; solo se tocan los campos gestionados por AI Gateway, cada aplicación se respalda, con vista previa del diff y editor de configuración sin formato
+- 🔌 **Acceso de clientes**: toma y restauración con un clic de las configuraciones locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; solo se tocan los campos gestionados por AI Gateway, cada aplicación se respalda, con vista previa del diff y editor de configuración sin formato; la página y su API solo están disponibles desde la consola local (el acceso remoto o por proxy inverso devuelve 403)
 - 🌙 **Temas claro / oscuro / sistema**; interfaz en chino e inglés
 - 🧭 **Ocho páginas**: Tráfico · Monitorización · Modelos virtuales · Plataformas · Claves API · Playground · Acceso de clientes · Ajustes. En la página Tráfico, los filtros, la paginación y los rangos de tiempo viven en la URL, así que actualizar y navegar adelante/atrás conservan el estado
 - 🧾 **Trazas de intentos y repetición**: cada intento de backend de una petición queda registrado; la retención de cuerpos de petición está desactivada por defecto y, una vez activada, una petición guardada puede repetirse tal cual
 - 🔔 **Centro de notificaciones**: claves que caducan, fallos repetidos de plataformas, excesos de cuota y copias de seguridad obsoletas se guardan y son accesibles desde la campana de la cabecera
-- 💰 **Estimación de costes y presupuestos**: coste por petición desde la tabla de precios con ratio de cobertura; las cuotas de clave admiten ventanas deslizantes y rechazo al superar el límite
+- 💰 **Estimación de costes y presupuestos**: coste por petición desde la tabla de precios (con franjas de caché y punta incluidas) y ratio de cobertura; las cuotas de clave admiten ventanas deslizantes y rechazo al superar el límite
 - 🔑 **Cuotas por clave**: caducidad, límite de peticiones, límite de tokens, presupuesto de coste y ventana (de por vida / día / semana / mes) por clave, opcionalmente vinculada a un modelo virtual
 - 🗄️ **Copia de seguridad y restauración de la base**: snapshot, descarga y borrado; restaurar en el sitio conserva antes un snapshot de seguridad adicional
 - 📤 **Configuración y CSV**: la exportación de configuración excluye los secretos upstream por defecto (se activa explícitamente si hace falta) y muestra una vista previa antes de importar; el tráfico se exporta a CSV con los filtros activos; los precios de plataforma se importan y exportan como CSV
@@ -464,6 +476,8 @@ capture_request_bodies = false
 - [x] 📊 Monitorización: tendencias por modelo / registro de peticiones / tasa de caché
 - [x] 🔑 Cuotas detalladas por clave API: vinculación a modelo · caducidad · límites de peticiones / tokens / coste · ventanas deslizantes
 - [x] 🔔 Comprobaciones de conectividad de plataformas y centro de notificaciones (solo visualización y alertas; aún no se usan para el enrutado)
+- [x] 🧾 Detalles de solicitudes, captura de cuerpos y retención + 🎟️ presupuestos de créditos upstream y libro mayor
+- [x] 🧩 Catálogo de modelos compartido (las cuentas de la misma URL lo reutilizan) + 💸 franjas de caché y tarifas punta/valle
 - [ ] ⏱️ Conectar una medición real de latencia a «Latencia»
 - [ ] 🩺 Expulsión guiada por health-check y degradación de prioridad
 - [ ] 🧭 Conectar el campo `fallback` de la ruta al camino de la petición

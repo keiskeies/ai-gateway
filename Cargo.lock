@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "ai-gateway"
-version = "1.4.2"
+version = "1.4.3"
 dependencies = [
  "actix-cors",
  "actix-files",

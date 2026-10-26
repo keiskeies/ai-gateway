@@ -211,6 +211,14 @@ Ein vollständiges Leistungsprofil für jedes Modell in Stunden-, Tages-, Monats
 - **Getrenntes Ledger**: Aufladungen, Freigaben, Anpassungen und Resets haben Ledger-Zeilen; das Löschen der Anfragehistorie „erstattet“ bereits verbrauchte Credits nicht
 - **Sichtbar und anpassbar**: Die Anfragehistorie zeigt die Credits pro Anfrage; Plattformliste/-detail zeigt Rest/Gesamt und ungepreiste Modelle; niedrige/erschöpfte Credits landen im Benachrichtigungszentrum und lassen sich manuell anpassen
 
+### 📚 Gemeinsamer Modellkatalog und zeitbasierte Preise
+
+- **Eine URL, einmal gepflegt**: Der Katalog wird über einen Hash aus Plattformtyp und normalisierter Base-URL identifiziert, sodass ein zweiter Schlüssel derselben Adresse Modelle, Preise und Credit-Preise automatisch übernimmt – kein erneutes Synchronisieren und Abtippen; eine Änderung gilt für alle Konten dieses Katalogs
+- **Konten bleiben Eigentümer**: Der Hash bestimmt nur den Teilumfang – virtuelle Modelle und Backends bleiben an ein konkretes Konto gebunden; ein Katalog wird erst bereinigt, wenn das letzte Konto derselben URL gelöscht wird (Modelle wandern vorher zu einem Geschwisterkonto)
+- **Nach Cache gestaffelte Eingabepreise**: Der Eingabepreis zerlegt sich in Cache-Fehltreffer, -Treffer und -Schreiben, damit Anthropic `cache_read` und `cache_creation` getrennt berechnet werden; der Fehltrefferpreis bleibt der Fallback für ältere Daten
+- **Spitzen- und Talfzeiten**: Jedes Modell kann Zeitfenster (`HH:MM-HH:MM`, auch über Mitternacht hinaus) mit eigenen vier Preisen setzen; die Stufe wird nach Startzeit der Anfrage gewählt, DeepSeeks Nacht 0,02 / Tag 0,04 ist damit direkt abbildbar
+- **Historie bleibt unverändert**: Preisänderungen wirken nur auf spätere Anfragen; gespeicherte Kosten, Statistiken und Exporte behalten ihre Zahlen
+
 ## 🧱 Bekannte Einschränkungen
 
 Das sind Implementierungsgrenzen, bei denen man leicht zu viel annimmt:
@@ -224,6 +232,9 @@ Das sind Implementierungsgrenzen, bei denen man leicht zu viel annimmt:
 7. **Request-/Response-Bodys sind standardmäßig aus**: zwei getrennte Schalter mit 64-KB-Limit pro Eintrag; Response-Details speichern die rohe Upstream-Antwort, Streams nur die ersten 64 KB, und Cross-Protocol-Anfragen sind nicht das konvertierte Ergebnis des Clients.
 8. **Auto-Purge dauert mindestens 30 Tage**: ist er aus, wird manuell gelöscht; Löschen gibt nur SQLite-Seiten frei und verkleinert die Datei nicht (separat `VACUUM` ausführen).
 9. **Credits sind ein lokales Ledger**: bei Erfolg reserviert/bestätigt, bei Fehler freigegeben, manuell anpassbar; Fenster nutzen den lokalen natürlichen Tag/Woche/Monat des Servers und können von der Upstream-Rechnung abweichen.
+10. **Client-Zugang nur in der lokalen Konsole**: `/api/clients/*` wird nur durchgelassen, wenn Gegenstelle und `Host` Loopback-Adressen sind und die Anfrage kein `Forwarded` / `X-Forwarded-*` / `X-Real-IP` enthält; sonst antwortet das Gateway mit 403, und der Menüpunkt verschwindet. Die Seite schreibt `~/.claude` und `~/.codex` auf dem Rechner des Gateways – ein ferner Browser kann das nicht. Hinter nginx auf demselben Rechner weiterhin über `127.0.0.1` zugreifen und die Quell-IP-Header weglassen (eine eigene Domain zählt als fern).
+11. **Geteilte Kataloge rechnen pro URL ab**: Konten mit derselben Base-URL teilen Modelle, Preise und Credit-Preise; ein einzelner Schlüssel kann keinen eigenen Preis tragen – bei Bedarf andere URL oder anderer Plattformtyp.
+12. **Spitzenstufen nutzen die lokale Zeitzone des Servers**: Die Stufe ergibt sich aus der Startzeit der Anfrage auf dem Server und kann von der Abrechnungszeitzone des Upstream um Stunden abweichen; Fenster über Mitternacht funktionieren, Multi-Zonen-Deployments müssen geprüft werden.
 
 ---
 
@@ -249,16 +260,17 @@ Das sind Implementierungsgrenzen, bei denen man leicht zu viel annimmt:
 
 - 🏪 **15 Plattform-Presets**: OpenAI · Anthropic · DeepSeek · NVIDIA · Moonshot · ZhipuAI · Qwen · Doubao · SiliconFlow · Groq · Google Gemini · Together AI · OpenRouter · Ollama · Azure OpenAI. Presets füllen Base-URL und Modellliste aus; den Schlüssel lieferst du weiterhin selbst. Jeder OpenAI- / Anthropic-kompatible Endpunkt kann auch manuell angelegt werden
 - 🔍 **Remote-Modellsynchronisierung**: „Verbindung testen" ruft die Upstream-Modellliste ab; die Synchronisierung ergänzt nur lokal fehlende Modelle und überschreibt vorhandene Preise, Fähigkeiten oder Anzeigenamen nicht
+- 🧩 **Gemeinsamer Modellkatalog**: Modelle und Preise werden pro Plattformtyp + Base-URL zusammengeführt – dieselbe Adresse erneut anzulegen erfordert keine Neueinstellungen; andere URLs oder Plattformtypen bleiben getrennt
 - 🏷️ **Fähigkeits-Badges**: Reasoning / Vision / Embedding / Rerank / Tools, pro Modell und in Massen bearbeitbar; die Badges eines virtuellen Modells sind die Schnittmenge der Fähigkeiten seiner Backends
 - 🔗 **reasoning_content-Unterstützung**: Chain-of-Thought-Ausgaben von Plattformen wie NVIDIA NIM; OpenAI- / Anthropic-Reasoning-Parameter werden in beide Richtungen übersetzt
 - 📡 **Benutzerdefinierte weitergeleitete Header**: beliebige Header pro Plattform anhängen, die `Authorization` / `x-api-key` namensgleich überschreiben
 - 🎛️ **Playground**: Modell und Protokoll wählen, eine echte Anfrage senden, Routing und Upstream prüfen, einen temporären Schlüssel erzeugen oder das passende cURL kopieren
-- 🔌 **Client-Zugriff**: Übernahme und Rollback der lokalen Konfigurationen von Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes mit einem Klick; nur von AI Gateway verwaltete Felder werden geändert, vor jedem Anwenden wird gesichert, inklusive Diff-Vorschau und Rohkonfigurations-Editor
+- 🔌 **Client-Zugriff**: Übernahme und Rollback der lokalen Konfigurationen von Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes mit einem Klick; nur von AI Gateway verwaltete Felder werden geändert, vor jedem Anwenden wird gesichert, inklusive Diff-Vorschau und Rohkonfigurations-Editor; Seite und API sind nur in der lokalen Konsole verfügbar (ferner Zugriff oder über Proxy antwortet mit 403)
 - 🌙 **Themes Hell / Dunkel / System**; UI auf Chinesisch und Englisch
 - 🧭 **Acht Seiten**: Traffic · Monitoring · Virtuelle Modelle · Plattformen · API-Schlüssel · Playground · Client-Zugriff · Einstellungen. Auf der Traffic-Seite stehen Filter, Seitenwechsel und Zeiträume in der URL, sodass Aktualisieren und Vor-/Zurücknavigieren den Zustand behalten
 - 🧾 **Versuchsverfolgung und Replay**: Jeder Backend-Versuch einer Anfrage wird einzeln erfasst; die Aufbewahrung von Anfrageinhalten ist standardmäßig aus, und nach dem Einschalten kann eine gespeicherte Anfrage wortgleich erneut gesendet werden
 - 🔔 **Benachrichtigungszentrum**: ablaufende Schlüssel, wiederholte Plattformfehler, Kontingentüberschreitungen und veraltete Backups werden gespeichert und sind über die Glocke im Kopfbereich erreichbar
-- 💰 **Kostenschätzung und Budgets**: Kosten pro Anfrage aus der Preistabelle mit Abdeckungsquote; Schlüssel-Kontingente unterstützen rollierende Fenster und Ablehnung bei Überschreitung
+- 💰 **Kostenschätzung und Budgets**: Kosten pro Anfrage aus der Preistabelle (Cache-Stufen und Spitzenpreise eingeschlossen) mit Abdeckungsquote; Schlüssel-Kontingente unterstützen rollierende Fenster und Ablehnung bei Überschreitung
 - 🔑 **Kontingente pro Schlüssel**: Ablaufdatum, Anfrage-Limit, Token-Limit, Kostenbudget und Fenster (lebenslang / Tag / Woche / Monat) pro Schlüssel, optional an ein virtuelles Modell gebunden
 - 🗄️ **Datenbanksicherung und -wiederherstellung**: Snapshot, Download und Löschen; vor dem Wiederherstellen an Ort und Stelle wird zusätzlich ein Sicherheits-Snapshot angelegt
 - 📤 **Konfiguration und CSV**: Der Konfigurationsexport enthält standardmäßig keine Upstream-Geheimnisse (bei Bedarf ausdrücklich aktivierbar) und zeigt vor dem Import eine Vorschau; Traffic lässt sich mit den aktiven Filtern als CSV exportieren, Plattformpreise als CSV importieren und exportieren
@@ -464,6 +476,8 @@ capture_request_bodies = false
 - [x] 📊 Monitoring-Dashboard: Trends je Modell / Request-Log / Cache-Trefferquote
 - [x] 🔑 Feingranulare API-Key-Kontingente: Modellbindung · Ablaufdatum · Anfrage- / Token- / Kostenlimits · rollierende Fenster
 - [x] 🔔 Plattform-Konnektivitätsprüfungen und Benachrichtigungszentrum (nur Anzeige und Alarme; noch nicht für das Routing)
+- [x] 🧾 Anfragedetails, Speicherung von Nachrichtenkörpern und Aufbewahrungsdauer + 🎟️ Upstream-Credit-Budget und Credit-Log
+- [x] 🧩 Gemeinsamer Modellkatalog (Konten derselben URL teilen ihn) + 💸 Cache-Stufen und Spitzen-/Talpreise
 - [ ] ⏱️ Echte Latenzmessung für „Latency based"
 - [ ] 🩺 Gesundheitsprüfungsgesteuerte Auslistung und Prioritäts-Downgrade
 - [ ] 🧭 `fallback` der Route in den Anfragepfad einbinden

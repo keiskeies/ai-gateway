@@ -211,6 +211,14 @@ A complete performance profile for every model at hour / day / month / year gran
 - **Separate ledger**: charges, releases, adjustments and resets all have ledger rows; purging request history never “refunds” credits already spent
 - **Visible and adjustable**: the request log shows credits for each request; platform list/detail shows remaining/total and unpriced model count; low/exhausted credits go to the notification center and can be adjusted manually
 
+### 📚 Shared model catalog and time-of-day pricing
+
+- **One URL, configured once**: the catalog is keyed by a hash of platform type + normalized base URL, so a second key for the same endpoint inherits the model list, prices and credit prices instead of re-syncing and re-typing; one edit applies to every account in that catalog
+- **Accounts still own their rows**: the hash only decides the sharing scope — virtual models and backends stay attached to a concrete account, and a catalog is cleaned only when its last same-URL account is deleted (models move to a sibling account first)
+- **Cache-tiered input pricing**: the input price splits into cache-miss / cache-hit / cache-write, so Anthropic `cache_read` and `cache_creation` are billed separately; the miss price stays as the fallback for older records
+- **Peak and off-peak rates**: each model can define peak windows (`HH:MM-HH:MM`, wrapping past midnight) with their own four prices; the tier is picked from the request start time, so DeepSeek's night 0.02 / day 0.04 is directly configurable
+- **History is never rewritten**: a price change affects later requests only; recorded costs, statistics and exports keep their original numbers
+
 ## 🧱 Known limitations
 
 These are implementation boundaries that are easy to over-assume:
@@ -224,6 +232,9 @@ These are implementation boundaries that are easy to over-assume:
 7. **Request/response bodies are off by default**: two independent switches with a 64 KB cap per record; response details store the raw upstream response, streams keep only the first 64 KB, and cross-protocol requests are not the converted result the client saw.
 8. **Auto purge is at least 30 days**: when off, purge is manual; deletion only frees SQLite pages and does not shrink the file (run `VACUUM` separately).
 9. **Credits are a local ledger**: reserved/confirmed on success and released on failure, with manual adjustment; windows use the server's local natural day/week/month and may differ from the upstream bill.
+10. **Client access is local-console only**: `/api/clients/*` is allowed only when the peer address is loopback, the `Host` is loopback, and the request carries no `Forwarded` / `X-Forwarded-*` / `X-Real-IP` header; otherwise it returns 403 and the page leaves the menu. That page edits `~/.claude` and `~/.codex` on the machine running the gateway, so a remote browser cannot use it. Behind nginx on the same machine, keep browsing by `127.0.0.1` and drop the source-IP headers (a custom domain counts as remote).
+11. **Shared catalogs price by URL**: accounts on one base URL share a single set of models, prices and credit prices, so an individual key cannot carry its own pricing; use a different URL or platform type when prices really must differ.
+12. **Peak tiers use the server's local timezone**: the tier comes from the request start time on the server, which may sit hours away from the upstream's billing timezone; windows may wrap midnight, but multi-timezone deployments need checking.
 
 ---
 
@@ -249,16 +260,17 @@ These are implementation boundaries that are easy to over-assume:
 
 - 🏪 **15 platform presets**: OpenAI · Anthropic · DeepSeek · NVIDIA · Moonshot · ZhipuAI · Qwen · Doubao · SiliconFlow · Groq · Google Gemini · Together AI · OpenRouter · Ollama · Azure OpenAI. Presets fill in the base URL and model list; you still supply the key. Any OpenAI / Anthropic-compatible endpoint can also be added by hand
 - 🔍 **Remote model sync**: Test connection pulls the upstream model list; syncing only adds models that are missing locally and does not overwrite existing prices, capabilities or display names
+- 🧩 **Shared model catalog**: models and prices merge per platform type + base URL, so re-adding the same endpoint needs no re-configuration; different URLs or platform types stay independent
 - 🏷️ **Capability badges**: reasoning / vision / embedding / rerank / tools, editable per model and in bulk; a virtual model's badges are the intersection of its backends' capabilities
 - 🔗 **reasoning_content support**: chain-of-thought output from platforms such as NVIDIA NIM; OpenAI / Anthropic reasoning parameters translated both ways
 - 📡 **Custom forwarded headers**: append arbitrary headers per platform, overriding `Authorization` / `x-api-key` by name
 - 🎛️ **Playground**: pick a model and protocol, send a real request to verify routing and the upstream, mint a temporary key, or copy the equivalent cURL
-- 🔌 **Client access**: one-click takeover and rollback for Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes local configs; only AI Gateway-owned fields are touched, every apply is backed up, with diff preview and a raw-config editor
+- 🔌 **Client access**: one-click takeover and rollback for Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes local configs; only AI Gateway-owned fields are touched, every apply is backed up, with diff preview and a raw-config editor; the page and its API are available only from the local console (remote or reverse-proxied access returns 403)
 - 🌙 **Light / dark / system themes**; UI available in Chinese and English
 - 🧭 **Eight pages**: Traffic · Monitoring Wall · Virtual Models · Platforms · API Keys · Playground · Client Access · Settings. On the Traffic page, filters, paging and time ranges live in the URL, so refresh and back/forward keep state
 - 🧾 **Attempt traces and replay**: every backend try of a request is recorded; request-body retention is off by default, and once enabled a stored request can be replayed verbatim
 - 🔔 **Notification centre**: expiring keys, repeated platform failures, quota breaches and stale backups are persisted, reachable from the header bell
-- 💰 **Cost estimation and budgets**: per-request cost from the price table with a coverage ratio; key quotas support rolling windows and over-limit rejection
+- 💰 **Cost estimation and budgets**: per-request cost from the price table (cache tiers and peak rates included) with a coverage ratio; key quotas support rolling windows and over-limit rejection
 - 🔑 **Per-key quotas**: expiry, request limit, token limit, cost budget and window (lifetime / day / week / month) per key, optionally bound to one virtual model
 - 🗄️ **Database backup and restore**: snapshot, download and delete; restoring in place keeps an extra safety snapshot first
 - 📤 **Config and CSV**: config export excludes upstream secrets by default (opt in when needed) with preview before import; traffic exports to CSV using the active filters; platform prices import/export as CSV
@@ -464,6 +476,8 @@ capture_request_bodies = false
 - [x] 📊 Monitoring wall: per-model trends / request log / cache hit rate
 - [x] 🔑 Fine-grained API key quotas: model binding · expiry · request / token / cost limits · rolling windows
 - [x] 🔔 Platform connectivity checks and a notification centre (display and alerts only; not used for routing yet)
+- [x] 🧾 Request details, body capture and retention + 🎟️ upstream credit budgets and ledger
+- [x] 🧩 Shared model catalog (accounts on one URL reuse it) + 💸 cache tiers and peak/off-peak pricing
 - [ ] ⏱️ Wire real latency sampling into "latency based"
 - [ ] 🩺 Health-check-driven ejection and priority downgrade
 - [ ] 🧭 Wire the route `fallback` field into the request path

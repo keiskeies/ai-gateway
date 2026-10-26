@@ -211,6 +211,14 @@ Un profil de performance complet pour chaque modèle en granularité heure / jou
 - **Registre séparé** : débits, libérations, ajustements et réinitialisations ont chacun une ligne ; purger l'historique des requêtes ne « rembourse » jamais les crédits déjà consommés
 - **Visible et ajustable** : le journal des requêtes affiche les crédits par requête ; la liste/fiche plateforme affiche restant/total et le nombre de modèles non tarifés ; les crédits faibles/épuisés vont au centre de notifications et peuvent être ajustés manuellement
 
+### 📚 Catalogue de modèles partagé et tarification par plage horaire
+
+- **Une URL, configurée une fois** : le catalogue est identifié par un hash « type de plateforme + base URL normalisée », si bien qu'une seconde clé sur le même point d'entrée reprend la liste des modèles, les prix et les prix en crédits – inutile de resynchroniser et de ressaisir ; une modification vaut pour tous les comptes du catalogue
+- **Les comptes restent propriétaires** : le hash ne définit que le périmètre partagé — modèles virtuels et backends demeurent rattachés à un compte précis ; un catalogue n'est nettoyé que lorsque le dernier compte de la même URL disparaît (les modèles migrent d'abord vers un compte frère)
+- **Prix d'entrée décomposé selon le cache** : le prix d'entrée se divise en échec de cache, réussite de cache et écriture de cache, afin de facturer séparément `cache_read` et `cache_creation` d'Anthropic ; le prix d'échec reste la valeur de repli pour les données plus anciennes
+- **Heures de pointe et heures creuses** : chaque modèle peut définir des créneaux (`HH:MM-HH:MM`, franchissant minuit) avec leurs quatre prix ; le palier est retenu selon l'heure de début de la requête, ce qui rend directement configurables les 0,02 la nuit / 0,04 le jour de DeepSeek
+- **L'historique n'est jamais réécrit** : un changement de prix ne touche que les requêtes suivantes ; coûts enregistrés, statistiques et exports gardent leurs valeurs
+
 ## 🧱 Limites connues
 
 Voici les limites d'implémentation qu'il est facile de surestimer :
@@ -224,6 +232,9 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 7. **Les corps de requête/réponse sont désactivés par défaut** : deux interrupteurs séparés avec une limite de 64 Ko par entrée ; les détails de réponse stockent la réponse amont brute, les flux seulement les 64 premiers Ko, et les requêtes inter-protocoles ne sont pas le résultat converti vu par le client.
 8. **L'auto-purge dure au moins 30 jours** : désactivé, la purge est manuelle ; la suppression ne libère que des pages SQLite et ne réduit pas le fichier (exécuter `VACUUM` séparément).
 9. **Les crédits sont un registre local** : réservés/confirmés en cas de succès et libérés en cas d'échec, avec ajustement manuel ; les fenêtres utilisent le jour/semaine/mois naturel local du serveur et peuvent différer de la facture amont.
+10. **Accès client réservé à la console locale** : `/api/clients/*` n'est accepté que si l'adresse distante et l'en-tête `Host` sont boucleurs et si la requête ne porte ni `Forwarded`, ni `X-Forwarded-*`, ni `X-Real-IP` ; sinon le gateway répond 403 et l'entrée quitte le menu. Cette page édite `~/.claude` et `~/.codex` de la machine du gateway : un navigateur distant ne peut pas le faire. Derrière nginx sur la même machine, continuer de passer par `127.0.0.1` et supprimer les en-têtes d'IP source (un domaine personnalisé compte comme distant).
+11. **Les catalogues partagés se tarifent par URL** : les comptes d'une même base URL partagent modèles, prix et prix en crédits ; une clé prise isolément ne peut pas porter sa propre tarification — utiliser une autre URL ou un autre type de plateforme.
+12. **Les paliers de pointe utilisent le fuseau local du serveur** : le palier dépend de l'heure de début de la requête côté serveur, parfois à plusieurs heures du fuseau de facturation amont ; les créneaux franchissant minuit fonctionnent, mais un déploiement multi-fuseaux demande vérification.
 
 ---
 
@@ -249,16 +260,17 @@ Voici les limites d'implémentation qu'il est facile de surestimer :
 
 - 🏪 **15 presets de plateformes** : OpenAI · Anthropic · DeepSeek · NVIDIA · Moonshot · ZhipuAI · Qwen · Doubao · SiliconFlow · Groq · Google Gemini · Together AI · OpenRouter · Ollama · Azure OpenAI. Les presets remplissent l'URL de base et la liste des modèles ; vous fournissez toujours la clé. Tout endpoint compatible OpenAI / Anthropic peut aussi être ajouté à la main
 - 🔍 **Synchronisation des modèles distants** : « Tester la connexion » récupère la liste des modèles de l'upstream ; la synchronisation n'ajoute que les modèles absents en local et n'écrase ni les prix, ni les capacités, ni les noms d'affichage existants
+- 🧩 **Catalogue de modèles partagé** : modèles et prix sont fusionnés par type de plateforme + base URL, donc reconnecter la même adresse ne demande plus de reconfiguration ; les autres URLs ou types de plateforme restent indépendants
 - 🏷️ **Badges de capacités** : raisonnement / vision / embedding / rerank / outils, modifiables par modèle et en masse ; les badges d'un modèle virtuel sont l'intersection des capacités de ses backends
 - 🔗 **Prise en charge de reasoning_content** : sorties de chaîne de pensée de plateformes comme NVIDIA NIM ; paramètres de raisonnement OpenAI / Anthropic traduits dans les deux sens
 - 📡 **En-têtes transférés personnalisés** : ajoutez des en-têtes arbitraires par plateforme, en écrasant `Authorization` / `x-api-key` à nom égal
 - 🎛️ **Playground** : choisissez un modèle et un protocole, envoyez une vraie requête pour vérifier le routage et l'upstream, créez une clé temporaire ou copiez le cURL équivalent
-- 🔌 **Accès clients** : prise en charge et restauration en un clic des configurations locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes ; seuls les champs gérés par AI Gateway sont modifiés, chaque application est sauvegardée, avec aperçu du diff et éditeur de configuration brute
+- 🔌 **Accès clients** : prise en charge et restauration en un clic des configurations locales de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes ; seuls les champs gérés par AI Gateway sont modifiés, chaque application est sauvegardée, avec aperçu du diff et éditeur de configuration brute ; la page et son API ne sont disponibles que depuis la console locale (un accès distant ou par reverse-proxy renvoie 403)
 - 🌙 **Thèmes clair / sombre / système** ; interface en chinois et en anglais
 - 🧭 **Huit pages** : Trafic · Supervision · Modèles virtuels · Plateformes · Clés API · Playground · Accès clients · Réglages. Sur la page Trafic, les filtres, la pagination et les plages de temps vivent dans l'URL : actualiser et naviguer avant/arrière conservent l'état
 - 🧾 **Traces de tentatives et rejeu** : chaque essai de backend d'une requête est enregistré ; la rétention des corps de requête est désactivée par défaut, et une fois activée, une requête stockée peut être rejouée mot pour mot
 - 🔔 **Centre de notifications** : clés qui expirent, échecs répétés de plateformes, dépassements de quota et sauvegardes obsolètes sont persistés et accessibles depuis la cloche de l'en-tête
-- 💰 **Estimation des coûts et budgets** : coût par requête à partir de la table de prix avec un taux de couverture ; les quotas de clé prennent en charge les fenêtres glissantes et le rejet en cas de dépassement
+- 💰 **Estimation des coûts et budgets** : coût par requête à partir de la table de prix (paliers de cache et heures de pointe compris) avec un taux de couverture ; les quotas de clé prennent en charge les fenêtres glissantes et le rejet en cas de dépassement
 - 🔑 **Quotas par clé** : expiration, limite de requêtes, limite de tokens, budget de coût et fenêtre (vie entière / jour / semaine / mois) par clé, éventuellement rattachée à un modèle virtuel
 - 🗄️ **Sauvegarde et restauration de la base** : snapshot, téléchargement et suppression ; une restauration sur place conserve d'abord un snapshot de sécurité supplémentaire
 - 📤 **Configuration et CSV** : l'export de configuration exclut les secrets upstream par défaut (activation explicite si besoin), avec aperçu avant import ; le trafic s'exporte en CSV selon les filtres actifs ; les prix des plateformes s'importent et s'exportent en CSV
@@ -464,6 +476,8 @@ capture_request_bodies = false
 - [x] 📊 Supervision : tendances par modèle / journal des requêtes / taux de cache
 - [x] 🔑 Quotas fins par clé API : rattachement de modèle · expiration · limites requêtes / tokens / coût · fenêtres glissantes
 - [x] 🔔 Tests de connectivité des plateformes et centre de notifications (affichage et alertes uniquement ; pas encore utilisés pour le routage)
+- [x] 🧾 Détails des requêtes, capture des corps et rétention + 🎟️ budgets de crédits amont et grand-livre
+- [x] 🧩 Catalogue de modèles partagé (les comptes d’une même URL le réutilisent) + 💸 paliers de cache et tarifs pointe/creuse
 - [ ] ⏱️ Brancher une vraie mesure de latence sur « Latence »
 - [ ] 🩺 Éjection pilotée par health-check et repli de priorité
 - [ ] 🧭 Brancher le champ `fallback` de la route dans le chemin de requête

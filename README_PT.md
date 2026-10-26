@@ -211,6 +211,14 @@ Um perfil completo de desempenho para cada modelo em granularidade de hora / dia
 - **Livro-razão separado**: cobranças, liberações, ajustes e resets têm linha própria; limpar o histórico de requisições nunca “devolve” créditos já consumidos
 - **Visível e ajustável**: o log de requisições mostra os créditos de cada uma; a lista/detalhe da plataforma mostra restante/total e modelos sem preço; créditos baixos/esgotados vão para a central de notificações e podem ser ajustados manualmente
 
+### 📚 Catálogo de modelos compartilhado e tarifas por faixa horária
+
+- **Uma URL, configurada uma vez**: o catálogo é identificado por um hash de «tipo de plataforma + base URL normalizada», então uma segunda chave no mesmo endpoint herda a lista de modelos, os preços e os preços em créditos — sem sincronizar e redigitar; uma alteração vale para todas as contas do catálogo
+- **As contas continuam donas das linhas**: o hash só define o escopo compartilhado — modelos virtuais e backends permanecem vinculados a uma conta específica; o catálogo só é limpo ao excluir a última conta daquela URL (antes os modelos migram para uma conta irmã)
+- **Preço de entrada dividido por cache**: o preço de entrada se divide em falha de cache, acerto de cache e gravação de cache, para que `cache_read` e `cache_creation` do Anthropic sejam cobrados separadamente; o preço de falha continua servindo de fallback para registros antigos
+- **Ponta e fora de ponta**: cada modelo pode definir janelas (`HH:MM-HH:MM`, com virada de meia-noite) e seus quatro preços; a faixa é escolhida pelo horário de início da requisição, então 0,02 à noite / 0,04 de dia do DeepSeek é configurável diretamente
+- **O histórico não é reescrito**: alterar um preço afeta apenas as requisições seguintes; custos registrados, estatísticas e exportações mantêm seus números
+
 ## 🧱 Limitações conhecidas
 
 Estes são limites de implementação fáceis de superestimar:
@@ -224,6 +232,9 @@ Estes são limites de implementação fáceis de superestimar:
 7. **Os corpos de requisição/resposta vêm desligados**: dois interruptores separados com limite de 64 KB por registro; os detalhes de resposta guardam a resposta upstream bruta, streams apenas os primeiros 64 KB, e requisições entre protocolos não são o resultado convertido que o cliente viu.
 8. **O auto-purge dura pelo menos 30 dias**: desligado, a limpeza é manual; apagar só libera páginas do SQLite e não reduz o arquivo (execute `VACUUM` separadamente).
 9. **Créditos são um livro-razão local**: reservados/confirmados em caso de sucesso e liberados em caso de falha, com ajuste manual; as janelas usam o dia/semana/mês natural local do servidor e podem divergir da fatura upstream.
+10. **Acesso a clientes só no console local**: `/api/clients/*` só é liberado quando o endereço remoto é de loopback, o cabeçalho `Host` também é, e a requisição não traz `Forwarded`, `X-Forwarded-*` nem `X-Real-IP`; caso contrário devolve 403 e a página sai do menu. Essa página edita `~/.claude` e `~/.codex` da máquina do gateway, então um navegador remoto não a utiliza. Atrás de nginx na mesma máquina, continue acessando por `127.0.0.1` e remova os cabeçalhos de IP de origem (um domínio próprio conta como remoto).
+11. **Catálogos compartilhados precificam por URL**: as contas com a mesma base URL dividem modelos, preços e preços em créditos; uma chave específica não pode ter tarifação própria — use outra URL ou outro tipo de plataforma.
+12. **As faixas de ponta usam o fuso local do servidor**: a faixa escolhida depende do horário de início da requisição no servidor, que pode ficar horas distante do fuso de cobrança do upstream; janelas com virada de meia-noite funcionam, mas deploys multi-fuso pedem conferência.
 
 ---
 
@@ -249,16 +260,17 @@ Estes são limites de implementação fáceis de superestimar:
 
 - 🏪 **15 presets de plataforma**: OpenAI · Anthropic · DeepSeek · NVIDIA · Moonshot · ZhipuAI · Qwen · Doubao · SiliconFlow · Groq · Google Gemini · Together AI · OpenRouter · Ollama · Azure OpenAI. Os presets preenchem a URL base e a lista de modelos; a chave continua sendo sua. Qualquer endpoint compatível com OpenAI / Anthropic também pode ser adicionado manualmente
 - 🔍 **Sincronização de modelos remotos**: «Testar conexão» busca a lista de modelos do upstream; a sincronização só adiciona modelos ausentes localmente e não sobrescreve preços, capacidades ou nomes existentes
+- 🧩 **Catálogo de modelos compartilhado**: modelos e preços se agrupam por tipo de plataforma + base URL, então reconectar a mesma URL não exige nova configuração; outras URLs ou outros tipos de plataforma seguem independentes
 - 🏷️ **Selos de capacidade**: raciocínio / visão / embedding / rerank / ferramentas, editáveis por modelo e em lote; os selos de um modelo virtual são a interseção das capacidades dos seus backends
 - 🔗 **Suporte a reasoning_content**: saídas de cadeia de pensamento de plataformas como NVIDIA NIM; parâmetros de raciocínio OpenAI / Anthropic traduzidos nos dois sentidos
 - 📡 **Cabeçalhos repassados personalizados**: adicione cabeçalhos arbitrários por plataforma, sobrescrevendo `Authorization` / `x-api-key` quando os nomes coincidem
 - 🎛️ **Playground**: escolha um modelo e um protocolo, envie uma requisição real para verificar o roteamento e o upstream, crie uma chave temporária ou copie o cURL equivalente
-- 🔌 **Acesso de clientes**: assumir e restaurar com um clique as configurações locais de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; apenas os campos gerenciados pelo AI Gateway são alterados, cada aplicação é copiada para backup, com prévia do diff e editor de configuração bruta
+- 🔌 **Acesso de clientes**: assumir e restaurar com um clique as configurações locais de Claude Code / Codex / OpenCode / OpenClaw / Pi / Hermes; apenas os campos gerenciados pelo AI Gateway são alterados, cada aplicação é copiada para backup, com prévia do diff e editor de configuração bruta; a página e sua API só estão disponíveis no console local (acesso remoto ou por proxy reverso devolve 403)
 - 🌙 **Temas claro / escuro / sistema**; interface em chinês e inglês
 - 🧭 **Oito páginas**: Tráfego · Monitoramento · Modelos virtuais · Plataformas · Chaves de API · Playground · Acesso de clientes · Configurações. Na página Tráfego, filtros, paginação e faixas de tempo vivem na URL, então atualizar e navegar para frente/trás preservam o estado
 - 🧾 **Trilhas de tentativas e replay**: cada tentativa de backend de uma requisição é registrada; a retenção de corpos de requisição fica desligada por padrão e, quando ativada, uma requisição armazenada pode ser reenviada palavra por palavra
 - 🔔 **Central de notificações**: chaves expirando, falhas repetidas de plataformas, estouros de cota e backups desatualizados são persistidos e acessíveis pelo sino no cabeçalho
-- 💰 **Estimativa de custos e orçamentos**: custo por requisição a partir da tabela de preços com taxa de cobertura; as cotas de chave suportam janelas deslizantes e rejeição ao ultrapassar o limite
+- 💰 **Estimativa de custos e orçamentos**: custo por requisição a partir da tabela de preços (faixas de cache e de ponta incluídas) com taxa de cobertura; as cotas de chave suportam janelas deslizantes e rejeição ao ultrapassar o limite
 - 🔑 **Cotas por chave**: expiração, limite de requisições, limite de tokens, orçamento de custo e janela (vitalícia / dia / semana / mês) por chave, opcionalmente vinculada a um modelo virtual
 - 🗄️ **Backup e restauração do banco**: snapshot, download e exclusão; restaurar no local mantém antes um snapshot de segurança extra
 - 📤 **Configuração e CSV**: a exportação de configuração exclui segredos upstream por padrão (ativação explícita quando necessário) e mostra uma prévia antes de importar; o tráfego é exportado em CSV com os filtros ativos; os preços das plataformas entram e saem em CSV
@@ -464,6 +476,8 @@ capture_request_bodies = false
 - [x] 📊 Painel de monitoramento: tendências por modelo / registro de requisições / taxa de cache
 - [x] 🔑 Cotas refinadas por chave de API: vínculo a modelo · expiração · limites de requisições / tokens / custo · janelas deslizantes
 - [x] 🔔 Verificações de conectividade das plataformas e central de notificações (apenas exibição e alertas; ainda não usadas no roteamento)
+- [x] 🧾 Detalhes das requisições, captura de corpos e retenção + 🎟️ orçamentos de créditos upstream e razão contábil
+- [x] 🧩 Catálogo de modelos compartilhado (contas da mesma URL o reutilizam) + 💸 faixas de cache e tarifas ponta/fora de ponta
 - [ ] ⏱️ Ligar medição real de latência ao «Latência»
 - [ ] 🩺 Remoção guiada por health-check e downgrade de prioridade
 - [ ] 🧭 Ligar o campo `fallback` da rota ao caminho da requisição
