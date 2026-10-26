@@ -1,99 +1,109 @@
-use crate::error::AppResult;
-use crate::models::model::*;
 use crate::db::DbPool;
+use crate::error::{AppError, AppResult};
+use crate::models::model::*;
+
+/// 共享目录行：价格/积分/能力以 catalog_key + model_id 唯一。
+/// platform_id 只表示这条目录行登记在哪个账号下，不再代表价格归属。
+const MODEL_COLS: &str = "id, platform_id, catalog_key, model_id, display_name, max_tokens, \
+    context_window, input_price, output_price, cache_read_price, cache_write_price, \
+    credit_price, peak_pricing, capabilities, status";
+
+fn model_from_row(row: &rusqlite::Row) -> rusqlite::Result<Model> {
+    Ok(Model {
+        id: row.get(0)?,
+        platform_id: row.get(1)?,
+        catalog_key: row.get(2)?,
+        model_id: row.get(3)?,
+        display_name: row.get(4)?,
+        max_tokens: row.get(5)?,
+        context_window: row.get(6)?,
+        input_price: row.get(7)?,
+        output_price: row.get(8)?,
+        cache_read_price: row.get(9)?,
+        cache_write_price: row.get(10)?,
+        credit_price: row.get(11)?,
+        peak_pricing: row.get::<_, Option<String>>(12)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
+        capabilities: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
+        status: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or(ModelStatus::Active),
+    })
+}
+
+fn catalog_key_for_platform(conn: &rusqlite::Connection, platform_id: &str) -> AppResult<Option<String>> {
+    Ok(conn
+        .query_row("SELECT catalog_key FROM platforms WHERE id = ?1", [platform_id], |r| r.get(0))
+        .ok()
+        .flatten())
+}
+
+fn peak_to_db(value: &Option<serde_json::Value>) -> AppResult<Option<String>> {
+    match value {
+        None => Ok(None),
+        Some(value) => crate::models::pricing::validate_peak_pricing(value).map_err(AppError::BadRequest),
+    }
+}
 
 pub fn list(pool: &DbPool) -> AppResult<Vec<Model>> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    let mut stmt = conn.prepare(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models ORDER BY display_name"
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Model {
-            id: row.get(0)?,
-            platform_id: row.get(1)?,
-            model_id: row.get(2)?,
-            display_name: row.get(3)?,
-            max_tokens: row.get(4)?,
-            context_window: row.get(5)?,
-            input_price: row.get(6)?,
-            output_price: row.get(7)?,
-            credit_price: row.get(8)?,
-            capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-            status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
-        })
-    })?;
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let mut stmt = conn.prepare(&format!("SELECT {MODEL_COLS} FROM models ORDER BY display_name"))?;
+    let rows = stmt.query_map([], model_from_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// 平台维度只负责解析 catalog_key：同 URL 的第二个账号看到的是同一份共享目录。
 pub fn list_by_platform(pool: &DbPool, platform_id: &str) -> AppResult<Vec<Model>> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    let mut stmt = conn.prepare(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models WHERE platform_id = ?1 ORDER BY display_name"
-    )?;
-    let rows = stmt.query_map([platform_id], |row| {
-        Ok(Model {
-            id: row.get(0)?,
-            platform_id: row.get(1)?,
-            model_id: row.get(2)?,
-            display_name: row.get(3)?,
-            max_tokens: row.get(4)?,
-            context_window: row.get(5)?,
-            input_price: row.get(6)?,
-            output_price: row.get(7)?,
-            credit_price: row.get(8)?,
-            capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-            status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
-        })
-    })?;
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let key = catalog_key_for_platform(&conn, platform_id)?;
+    let (sql, param) = match key {
+        Some(key) => (format!("SELECT {MODEL_COLS} FROM models WHERE catalog_key = ?1 ORDER BY display_name"), key),
+        None => (format!("SELECT {MODEL_COLS} FROM models WHERE platform_id = ?1 ORDER BY display_name"), platform_id.to_string()),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([param], model_from_row)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
 pub fn get(pool: &DbPool, id: &str) -> AppResult<Model> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.query_row(
-        "SELECT id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status FROM models WHERE id = ?1",
-        [id],
-        |row| {
-            Ok(Model {
-                id: row.get(0)?,
-                platform_id: row.get(1)?,
-                model_id: row.get(2)?,
-                display_name: row.get(3)?,
-                max_tokens: row.get(4)?,
-                context_window: row.get(5)?,
-                input_price: row.get(6)?,
-                output_price: row.get(7)?,
-                credit_price: row.get(8)?,
-                capabilities: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
-                status: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or(ModelStatus::Active),
-            })
-        },
-    ).map_err(Into::into)
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    conn.query_row(&format!("SELECT {MODEL_COLS} FROM models WHERE id = ?1"), [id], model_from_row)
+        .map_err(Into::into)
 }
 
 pub fn create(pool: &DbPool, req: &CreateModelRequest) -> AppResult<Model> {
-    let id = uuid::Uuid::new_v4().to_string();
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let catalog_key = catalog_key_for_platform(&conn, &req.platform_id)?
+        .ok_or_else(|| AppError::BadRequest("platform has no catalog key".to_string()))?;
+    if conn.query_row(
+        "SELECT id FROM models WHERE catalog_key = ?1 AND model_id = ?2",
+        rusqlite::params![catalog_key, req.model_id],
+        |r| r.get::<_, String>(0),
+    ).ok().is_some() {
+        return Err(AppError::BadRequest("model already exists in this catalog".to_string()));
+    }
+    let peak = peak_to_db(&req.peak_pricing)?;
     let model = Model {
-        id,
+        id: uuid::Uuid::new_v4().to_string(),
         platform_id: req.platform_id.clone(),
+        catalog_key: Some(catalog_key.clone()),
         model_id: req.model_id.clone(),
         display_name: req.display_name.clone(),
         max_tokens: req.max_tokens,
         context_window: req.context_window,
         input_price: req.input_price,
         output_price: req.output_price,
+        cache_read_price: req.cache_read_price,
+        cache_write_price: req.cache_write_price,
         credit_price: req.credit_price,
+        peak_pricing: peak.as_deref().and_then(|s| serde_json::from_str(s).ok()),
         capabilities: req.capabilities.clone(),
         status: ModelStatus::Active,
     };
-
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
         rusqlite::params![
-            model.id, model.platform_id, model.model_id, model.display_name,
+            model.id, model.platform_id, catalog_key, model.model_id, model.display_name,
             model.max_tokens, model.context_window, model.input_price, model.output_price,
-            model.credit_price,
+            model.cache_read_price, model.cache_write_price, model.credit_price, peak,
             serde_json::to_string(&model.capabilities)?,
             serde_json::to_string(&model.status)?,
         ],
@@ -102,29 +112,35 @@ pub fn create(pool: &DbPool, req: &CreateModelRequest) -> AppResult<Model> {
 }
 
 pub fn batch_create(pool: &DbPool, models: Vec<CreateModelRequest>) -> AppResult<Vec<Model>> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let mut result = Vec::new();
     for req in models {
-        let id = uuid::Uuid::new_v4().to_string();
+        let catalog_key = catalog_key_for_platform(&conn, &req.platform_id)?
+            .ok_or_else(|| AppError::BadRequest("platform has no catalog key".to_string()))?;
+        let peak = peak_to_db(&req.peak_pricing)?;
         let model = Model {
-            id,
+            id: uuid::Uuid::new_v4().to_string(),
             platform_id: req.platform_id.clone(),
+            catalog_key: Some(catalog_key.clone()),
             model_id: req.model_id.clone(),
             display_name: req.display_name.clone(),
             max_tokens: req.max_tokens,
             context_window: req.context_window,
             input_price: req.input_price,
             output_price: req.output_price,
+            cache_read_price: req.cache_read_price,
+            cache_write_price: req.cache_write_price,
             credit_price: req.credit_price,
+            peak_pricing: peak.as_deref().and_then(|s| serde_json::from_str(s).ok()),
             capabilities: req.capabilities.clone(),
             status: ModelStatus::Active,
         };
         conn.execute(
-            "INSERT OR IGNORE INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, credit_price, capabilities, status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
             rusqlite::params![
-                model.id, model.platform_id, model.model_id, model.display_name,
+                model.id, model.platform_id, catalog_key, model.model_id, model.display_name,
                 model.max_tokens, model.context_window, model.input_price, model.output_price,
-                model.credit_price,
+                model.cache_read_price, model.cache_write_price, model.credit_price, peak,
                 serde_json::to_string(&model.capabilities)?,
                 serde_json::to_string(&model.status)?,
             ],
@@ -134,10 +150,7 @@ pub fn batch_create(pool: &DbPool, models: Vec<CreateModelRequest>) -> AppResult
     Ok(result)
 }
 
-/// 按勾选把远端模型导入库里：去重、跳过库里已有的，剩下的用默认档位建。
-/// 返回 `(新建, 已存在)`——"已存在"要单独报，否则一次导入 0 条看起来像失败。
-/// 同步全部（`api::platform::sync_models`）与多选导入走同一个助手，
-/// 两处对"已存在"的判定不可能分家。
+/// 按勾选把远端模型导入共享目录：同 catalog 已有的模型直接算“已存在”。
 pub fn import_model_ids(pool: &DbPool, platform_id: &str, model_ids: &[String]) -> AppResult<(usize, usize)> {
     let known: std::collections::HashSet<String> = list_by_platform(pool, platform_id)?
         .into_iter()
@@ -166,6 +179,9 @@ pub fn import_model_ids(pool: &DbPool, platform_id: &str, model_ids: &[String]) 
             context_window: default_context_window(),
             input_price: None,
             output_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             credit_price: None,
             capabilities: vec![],
         }).collect())?;
@@ -174,11 +190,11 @@ pub fn import_model_ids(pool: &DbPool, platform_id: &str, model_ids: &[String]) 
 }
 
 /// 三态写入：没提交这个字段就留原值，提交 `null` 落 NULL，提交数字落数字。
-fn apply_nullable(field: crate::models::model::NullableNumber, current: Option<f64>) -> Option<f64> {
+fn apply_nullable(field: NullableNumber, current: Option<f64>) -> Option<f64> {
     match field {
-        crate::models::model::NullableNumber::Keep => current,
-        crate::models::model::NullableNumber::Clear => None,
-        crate::models::model::NullableNumber::Set(value) => Some(value),
+        NullableNumber::Keep => current,
+        NullableNumber::Clear => None,
+        NullableNumber::Set(value) => Some(value),
     }
 }
 
@@ -190,15 +206,24 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateModelRequest) -> AppResult<Mo
     model.input_price = apply_nullable(req.input_price, model.input_price);
     model.output_price = apply_nullable(req.output_price, model.output_price);
     model.credit_price = apply_nullable(req.credit_price, model.credit_price);
+    model.cache_read_price = apply_nullable(req.cache_read_price, model.cache_read_price);
+    model.cache_write_price = apply_nullable(req.cache_write_price, model.cache_write_price);
+    if let Some(value) = &req.peak_pricing {
+        let validated = crate::models::pricing::validate_peak_pricing(value).map_err(AppError::BadRequest)?;
+        model.peak_pricing = validated.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    }
     if let Some(c) = &req.capabilities { model.capabilities = c.clone(); }
     if let Some(s) = &req.status { model.status = s.clone(); }
 
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE models SET display_name=?2, max_tokens=?3, context_window=?4, input_price=?5, output_price=?6, credit_price=?7, capabilities=?8, status=?9 WHERE id=?1",
+        "UPDATE models SET display_name=?2, max_tokens=?3, context_window=?4, input_price=?5, output_price=?6, \
+         cache_read_price=?7, cache_write_price=?8, credit_price=?9, peak_pricing=?10, capabilities=?11, status=?12 WHERE id=?1",
         rusqlite::params![
             id, model.display_name, model.max_tokens, model.context_window,
-            model.input_price, model.output_price, model.credit_price,
+            model.input_price, model.output_price, model.cache_read_price, model.cache_write_price,
+            model.credit_price,
+            model.peak_pricing.as_ref().map(serde_json::to_string).transpose()?,
             serde_json::to_string(&model.capabilities)?,
             serde_json::to_string(&model.status)?,
         ],
@@ -206,8 +231,8 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateModelRequest) -> AppResult<Mo
     Ok(model)
 }
 
-/// 批量改价 / 改能力：一条 UPDATE 覆盖整批，不逐行读改写——逐行 get + update 会把显示名、
-/// 状态这些没打算动的字段一起写回去，批量越大越容易把别人的改动盖掉。
+/// 批量改价/改能力：一条 UPDATE 覆盖整批。归属校验按 catalog_key，而不是 platform_id，
+/// 否则同 URL 的第二个账号永远改不到共享目录行。
 pub fn batch_patch(pool: &DbPool, platform_id: &str, patch: &BatchModelPatch) -> AppResult<usize> {
     let mut ids: Vec<String> = Vec::new();
     for raw in &patch.model_ids {
@@ -217,19 +242,19 @@ pub fn batch_patch(pool: &DbPool, platform_id: &str, patch: &BatchModelPatch) ->
         }
     }
     if ids.is_empty() {
-        return Err(crate::error::AppError::BadRequest("model_ids must not be empty".to_string()));
+        return Err(AppError::BadRequest("model_ids must not be empty".to_string()));
     }
 
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let catalog_key = catalog_key_for_platform(&conn, platform_id)?
+        .ok_or_else(|| AppError::BadRequest("platform has no catalog key".to_string()))?;
     let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
-    // 先确认每一行都挂在这个平台下：混进别处的 id 会让一次编辑悄悄改掉别的平台的定价，
-    // 而界面只会显示本平台那几行，改了什么根本看不见。
-    let select = format!("SELECT id FROM models WHERE platform_id=?1 AND id IN ({})", placeholders);
+    let select = format!("SELECT id FROM models WHERE catalog_key=?1 AND id IN ({})", placeholders);
     let mut owned: Vec<String> = Vec::new();
     {
         let mut stmt = conn.prepare(&select)?;
-        let mut args: Vec<&dyn rusqlite::types::ToSql> = vec![&platform_id];
+        let mut args: Vec<&dyn rusqlite::types::ToSql> = vec![&catalog_key];
         for id in &ids {
             args.push(id);
         }
@@ -240,35 +265,27 @@ pub fn batch_patch(pool: &DbPool, platform_id: &str, patch: &BatchModelPatch) ->
     if owned.len() != ids.len() {
         let missing = ids.iter().find(|id| !owned.iter().any(|owned| owned == *id))
             .cloned().unwrap_or_default();
-        return Err(crate::error::AppError::BadRequest(format!(
-            "{} is not a model of this platform", missing
+        return Err(AppError::BadRequest(format!(
+            "{} is not a model of this catalog", missing
         )));
     }
 
     let mut sets: Vec<String> = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-    match patch.input_price {
-        NullableNumber::Keep => {}
-        NullableNumber::Clear => sets.push("input_price=NULL".to_string()),
-        NullableNumber::Set(v) => {
-            sets.push("input_price=?".to_string());
-            values.push(Box::new(v));
-        }
-    }
-    match patch.output_price {
-        NullableNumber::Keep => {}
-        NullableNumber::Clear => sets.push("output_price=NULL".to_string()),
-        NullableNumber::Set(v) => {
-            sets.push("output_price=?".to_string());
-            values.push(Box::new(v));
-        }
-    }
-    match patch.credit_price {
-        NullableNumber::Keep => {}
-        NullableNumber::Clear => sets.push("credit_price=NULL".to_string()),
-        NullableNumber::Set(v) => {
-            sets.push("credit_price=?".to_string());
-            values.push(Box::new(v));
+    for (field, intent) in [
+        ("input_price", patch.input_price),
+        ("output_price", patch.output_price),
+        ("credit_price", patch.credit_price),
+        ("cache_read_price", patch.cache_read_price),
+        ("cache_write_price", patch.cache_write_price),
+    ] {
+        match intent {
+            NullableNumber::Keep => {}
+            NullableNumber::Clear => sets.push(format!("{field}=NULL")),
+            NullableNumber::Set(v) => {
+                sets.push(format!("{field}=?"));
+                values.push(Box::new(v));
+            }
         }
     }
     if let Some(capabilities) = &patch.capabilities {
@@ -279,50 +296,46 @@ pub fn batch_patch(pool: &DbPool, platform_id: &str, patch: &BatchModelPatch) ->
         return Ok(0);
     }
 
-    // 占位符顺序＝SET 的值 → platform_id → 各 id，values 必须按同一顺序压进去
-    values.push(Box::new(platform_id.to_string()));
+    values.push(Box::new(catalog_key));
     for id in &ids {
         values.push(Box::new(id.clone()));
     }
     let args: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|value| value.as_ref()).collect();
-    let sql = format!("UPDATE models SET {} WHERE platform_id=? AND id IN ({})", sets.join(", "), placeholders);
+    let sql = format!("UPDATE models SET {} WHERE catalog_key=? AND id IN ({})", sets.join(", "), placeholders);
     let changed = conn.execute(sql.as_str(), args.as_slice())?;
     Ok(changed)
 }
 
-pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     conn.execute("DELETE FROM models WHERE id = ?1", [id])?;
     Ok(())
 }
 
-/// 定价导入的结果计数。`unmatched` 必须单独报：CSV 里拼错的模型 ID 如果静默跳过，
-/// 用户会以为价格已经生效，而成本列只会一直显示 `—`。
+/// 删除没有任何账号引用的目录行。平台改 URL / 账号删除后调用；共享目录不会留下孤儿。
+pub fn delete_orphan_catalogs(pool: &DbPool) -> AppResult<i64> {
+    let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let deleted = conn.execute(
+        "DELETE FROM models WHERE catalog_key IS NOT NULL
+           AND catalog_key NOT IN (SELECT catalog_key FROM platforms WHERE catalog_key IS NOT NULL)",
+        [],
+    )?;
+    Ok(deleted as i64)
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct PriceImportResult {
-    /// 真正写入的行数（模型属于本平台且至少有一个字段要改）
     pub written: usize,
-    /// 两个价格字段都是"不改"，没有可写内容
     pub skipped: usize,
-    /// 本平台库里没有这个模型 ID——不新建，只报数
     pub unmatched: usize,
 }
 
-/// 按定价 CSV 逐行写单价：只碰本平台已有的模型行，只碰价格两列。
-///
-/// 每行一条 UPDATE，而不是 `batch_patch` 那种一条 `IN` ——批量编辑是"整批同一个值"，
-/// CSV 是每行各自的值，一条 SQL 表达不了。SET 子句仍按三态拼：没提交的字段不进 SQL，
-/// `NULL` 与"不改"就分得开。
-///
-/// 整个导入放在一个事务里：中途失败不会留下"一半模型有价、一半没有"的库，
-/// 而成本估算是逐行读价的，半套价格比没有价格更难查。
+/// CSV 按共享目录逐行写：同 URL 的所有账号看到同一份结果。
 pub fn set_prices(
     pool: &DbPool,
     platform_id: &str,
     rows: &[ModelPriceRow],
 ) -> AppResult<PriceImportResult> {
-    // 同一个模型 ID 出现多次时合并而不是整行覆盖：CSV 里同一模型分两行写（一行填入价、
-    // 一行填出价）是常见写法，"最后一行覆盖"会把前一行刚填好的那侧抹成"不改"。
-    // 合并规则＝后写的非 Keep 字段赢，与"最后一行"的直觉一致，又不丢字段。
     let mut merged: Vec<ModelPriceRow> = Vec::new();
     let mut positions: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for row in rows {
@@ -333,15 +346,11 @@ pub fn set_prices(
         match positions.get(model_id) {
             Some(index) => {
                 let target = &mut merged[*index];
-                if row.input_price != NullableNumber::Keep {
-                    target.input_price = row.input_price;
-                }
-                if row.output_price != NullableNumber::Keep {
-                    target.output_price = row.output_price;
-                }
-                if row.credit_price != NullableNumber::Keep {
-                    target.credit_price = row.credit_price;
-                }
+                if row.input_price != NullableNumber::Keep { target.input_price = row.input_price; }
+                if row.output_price != NullableNumber::Keep { target.output_price = row.output_price; }
+                if row.cache_read_price != NullableNumber::Keep { target.cache_read_price = row.cache_read_price; }
+                if row.cache_write_price != NullableNumber::Keep { target.cache_write_price = row.cache_write_price; }
+                if row.credit_price != NullableNumber::Keep { target.credit_price = row.credit_price; }
             }
             None => {
                 positions.insert(model_id, merged.len());
@@ -349,14 +358,18 @@ pub fn set_prices(
                     model_id: model_id.to_string(),
                     input_price: row.input_price,
                     output_price: row.output_price,
+                    cache_read_price: row.cache_read_price,
+                    cache_write_price: row.cache_write_price,
                     credit_price: row.credit_price,
                 });
             }
         }
     }
 
-    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    let tx = conn.transaction().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let catalog_key = catalog_key_for_platform(&conn, platform_id)?
+        .ok_or_else(|| AppError::BadRequest("platform has no catalog key".to_string()))?;
+    let tx = conn.transaction().map_err(|e| AppError::Internal(e.to_string()))?;
     let mut out = PriceImportResult::default();
 
     for row in &merged {
@@ -365,6 +378,8 @@ pub fn set_prices(
         for (field, intent) in [
             ("input_price", row.input_price),
             ("output_price", row.output_price),
+            ("cache_read_price", row.cache_read_price),
+            ("cache_write_price", row.cache_write_price),
             ("credit_price", row.credit_price),
         ] {
             match intent {
@@ -380,19 +395,20 @@ pub fn set_prices(
             out.skipped += 1;
             continue;
         }
-        values.push(Box::new(platform_id.to_string()));
+        values.push(Box::new(catalog_key.clone()));
         values.push(Box::new(row.model_id.trim().to_string()));
         let args: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
-        let sql = format!("UPDATE models SET {} WHERE platform_id=? AND model_id=?", sets.join(", "));
+        let sql = format!("UPDATE models SET {} WHERE catalog_key=? AND model_id=?", sets.join(", "));
         match tx.execute(sql.as_str(), args.as_slice())? {
             0 => out.unmatched += 1,
             _ => out.written += 1,
         }
     }
 
-    tx.commit().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(out)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,6 +440,9 @@ mod tests {
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            cache_read_price: NullableNumber::Keep,
+            cache_write_price: NullableNumber::Keep,
+            peak_pricing: None,
             capabilities: None,
             status: None,
         }
@@ -478,6 +497,9 @@ mod tests {
             input_price: Some(1.0),
             output_price: Some(2.0),
             credit_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             capabilities: vec![],
         }).expect("create model");
 
@@ -508,7 +530,7 @@ mod tests {
         crate::db::platform::create(pool, &CreatePlatformRequest {
             name: "plat-other".to_string(),
             platform_type: PlatformType::OpenAI,
-            base_url: "http://127.0.0.1:1/v1".to_string(),
+            base_url: "http://127.0.0.1:2/v1".to_string(),
             api_key: "sk-test".to_string(),
             organization: None,
             custom_headers: serde_json::Value::Null,
@@ -529,6 +551,9 @@ mod tests {
             input_price: Some(price),
             output_price: Some(price),
             credit_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             capabilities: vec![Capability::Vision],
         })
         .expect("create model")
@@ -548,6 +573,8 @@ mod tests {
             input_price: NullableNumber::Set(0.8),
             output_price: NullableNumber::Clear,
             credit_price: NullableNumber::Keep,
+            cache_read_price: NullableNumber::Keep,
+            cache_write_price: NullableNumber::Keep,
             capabilities: Some(vec![Capability::Reasoning, Capability::Tool]),
         };
         assert_eq!(batch_patch(&pool, &mine, &patch).unwrap(), 2);
@@ -568,6 +595,8 @@ mod tests {
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            cache_read_price: NullableNumber::Keep,
+            cache_write_price: NullableNumber::Keep,
             capabilities: Some(vec![]),
         };
         assert_eq!(batch_patch(&pool, &mine, &caps_only).unwrap(), 2);
@@ -593,11 +622,13 @@ mod tests {
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            cache_read_price: NullableNumber::Keep,
+            cache_write_price: NullableNumber::Keep,
             capabilities: None,
         };
         let err = batch_patch(&pool, &mine, &mixed).unwrap_err();
         assert!(matches!(err, crate::error::AppError::BadRequest(_)));
-        assert!(format!("{:?}", err).contains("not a model of this platform"));
+        assert!(format!("{:?}", err).contains("not a model of this catalog"));
         // 校验先于写入：连那一条合法的也没被改
         assert_eq!(get(&pool, &mine_id).unwrap().input_price, Some(9.0));
         assert_eq!(get(&pool, &foreign_id).unwrap().input_price, Some(1.0));
@@ -607,6 +638,8 @@ mod tests {
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            cache_read_price: NullableNumber::Keep,
+            cache_write_price: NullableNumber::Keep,
             capabilities: None,
         };
         assert!(matches!(batch_patch(&pool, &mine, &empty).unwrap_err(), crate::error::AppError::BadRequest(_)));
@@ -628,6 +661,9 @@ mod tests {
             input_price: Some(1.5),
             output_price: Some(3.0),
             credit_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             capabilities: vec![],
         }).expect("create model");
 
@@ -673,14 +709,14 @@ mod tests {
 
         let rows = vec![
             // 只设一侧，另一侧 Keep
-            ModelPriceRow { model_id: "m0".into(), input_price: NullableNumber::Set(0.5), output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m0".into(), input_price: NullableNumber::Set(0.5), output_price: NullableNumber::Keep, cache_read_price: NullableNumber::Keep, cache_write_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
             // 库里没有这个 ID：报 unmatched，不顺手建一行
-            ModelPriceRow { model_id: " m2 ".into(), input_price: NullableNumber::Set(2.0), output_price: NullableNumber::Set(4.0), credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: " m2 ".into(), input_price: NullableNumber::Set(2.0), output_price: NullableNumber::Set(4.0), cache_read_price: NullableNumber::Keep, cache_write_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
             // 同一个模型分两行写：合并后＝设入价 + 清出价，而不是后一行把入价抹回"不改"
-            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Set(0.6), output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
-            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Clear, credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Set(0.6), output_price: NullableNumber::Keep, cache_read_price: NullableNumber::Keep, cache_write_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m1".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Clear, cache_read_price: NullableNumber::Keep, cache_write_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
             // 两个字段都不改：不进 SQL
-            ModelPriceRow { model_id: "m3".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
+            ModelPriceRow { model_id: "m3".into(), input_price: NullableNumber::Keep, output_price: NullableNumber::Keep, cache_read_price: NullableNumber::Keep, cache_write_price: NullableNumber::Keep, credit_price: NullableNumber::Keep },
         ];
         let out = set_prices(&pool, &mine, &rows).unwrap();
         assert_eq!((out.written, out.unmatched, out.skipped), (2, 1, 1));
@@ -698,8 +734,54 @@ mod tests {
         assert_eq!(m0.output_price, Some(7.0), "没提交的那侧保持原值");
         assert_eq!(mine_rows.iter().find(|m| m.model_id == "m3").unwrap().input_price, Some(5.0));
 
-        // models 的唯一键是 (platform_id, model_id)，跨平台同 ID 是常态：那一行必须一字未动
+        // 不同 catalog 的同 model_id 互不影响：价格/行都是各自目录的
         assert_eq!(get(&pool, &foreign).unwrap().input_price, Some(1.0));
+
+        cleanup_db(&path);
+    }
+
+    /// 同 URL 的第二个账号直接看到共享目录；改价/同步/删除账号都按 catalog_key 生效。
+    #[test]
+    fn same_url_accounts_share_models_and_prices() {
+        let (pool, path) = test_db();
+        let first = seed_platform(&pool);
+        let second = crate::db::platform::create(&pool, &CreatePlatformRequest {
+            name: "same-upstream-other-key".into(),
+            platform_type: PlatformType::OpenAI,
+            base_url: "http://127.0.0.1:1/v1/".into(),
+            api_key: "sk-second".into(),
+            organization: None,
+            custom_headers: serde_json::Value::Null,
+            credit_budget: Some(250.0),
+            credit_window: Some("day".into()),
+        }).expect("create sibling account").id;
+
+        let model_id = seed_model(&pool, &first, "shared-model", 1.0);
+        let seen = list_by_platform(&pool, &second).expect("second account list");
+        assert_eq!(seen.len(), 1, "第二个账号无需重新同步");
+        assert_eq!(seen[0].model_id, "shared-model");
+
+        let mut req = blank_update();
+        req.input_price = NullableNumber::Set(3.5);
+        req.cache_read_price = NullableNumber::Set(0.1);
+        update(&pool, &model_id, &req).expect("edit shared model");
+        let after = list_by_platform(&pool, &second).expect("second account after edit");
+        assert_eq!(after[0].input_price, Some(3.5));
+        assert_eq!(after[0].cache_read_price, Some(0.1));
+
+        import_model_ids(&pool, &second, &["new-shared".into()]).expect("sync from second account");
+        assert!(list_by_platform(&pool, &first).unwrap().iter().any(|m| m.model_id == "new-shared"),
+                "同步新模型应写进共享目录");
+
+        // 第二个账号的积分预算独立；模型价格共享。
+        let platforms = crate::db::platform::list(&pool).unwrap();
+        let sibling = platforms.iter().find(|p| p.id == second).unwrap();
+        assert_eq!(sibling.credit_budget, Some(250.0));
+
+        crate::db::platform::delete(&pool, &first).expect("delete registering account");
+        let remaining = list_by_platform(&pool, &second).expect("shared model survives owner deletion");
+        assert!(remaining.iter().any(|m| m.model_id == "shared-model"),
+                "删除登记账号时共享目录应改挂兄弟账号");
 
         cleanup_db(&path);
     }

@@ -2,14 +2,16 @@ use crate::error::AppResult;
 use crate::models::route::*;
 use crate::db::DbPool;
 
-// 后端读取列：末尾三列是单价/积分价，来自按 (platform_id, model_id) 的 LEFT JOIN models。
-// 放在读取路径里，是为了让代理热路径直接拿到单价，不必每条请求再查一次库；
-// 模型行不存在或价格列为 NULL 时这里就是 None，调用方据此整单不估算。
+// 后端读取列：末尾是价格/积分字段，来自按 (catalog_key, model_id) 的共享目录。
+// 同一上游 URL 的账号共享 models 行，所以这里必须经 platforms.catalog_key 关联，
+// 不能再按 m.platform_id = b.platform_id。
 const BACKEND_COLS: &str = "b.id, b.route_id, b.platform_id, b.model_id, b.weight, b.priority, \
     b.max_concurrent, b.capabilities, b.status, b.param_overrides, b.unknown_params, \
-    b.reasoning_style, b.reasoning_echo, m.input_price, m.output_price, m.credit_price";
-const BACKEND_FROM: &str = "FROM backends b LEFT JOIN models m \
-    ON m.platform_id = b.platform_id AND m.model_id = b.model_id";
+    b.reasoning_style, b.reasoning_echo, m.input_price, m.output_price, m.credit_price, \
+    m.cache_read_price, m.cache_write_price, m.peak_pricing";
+const BACKEND_FROM: &str = "FROM backends b \
+    LEFT JOIN platforms p ON p.id = b.platform_id \
+    LEFT JOIN models m ON m.catalog_key = p.catalog_key AND m.model_id = b.model_id";
 
 fn map_backend(row: &rusqlite::Row) -> rusqlite::Result<Backend> {
     Ok(Backend {
@@ -26,6 +28,10 @@ fn map_backend(row: &rusqlite::Row) -> rusqlite::Result<Backend> {
         input_price: row.get(13)?,
         output_price: row.get(14)?,
         credit_price: row.get(15)?,
+        cache_read_price: row.get(16)?,
+        cache_write_price: row.get(17)?,
+        peak_pricing: row.get::<_, Option<String>>(18)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
     })
 }
 
@@ -292,6 +298,9 @@ mod tests {
             max_tokens: 4096, context_window: 8192,
             input_price: Some(2.5), output_price: None,
             credit_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             capabilities: vec![Capability::Reasoning],
         }).expect("create model (input only)");
         let b = backend_by_id(&pool, &backend_id).expect("read backend");

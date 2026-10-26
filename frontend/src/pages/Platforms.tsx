@@ -36,6 +36,7 @@ import type { PlatformCreditUsage, PlatformDetail, PlatformHealthSummary, Platfo
 interface ModelRow {
   id: string
   platform_id: string
+  catalog_key?: string | null
   model_id: string
 }
 
@@ -78,8 +79,9 @@ export default function Platforms() {
 
       const modelCount = new Map<string, number>()
       for (const model of models ?? []) {
-        if (!model.platform_id) continue
-        modelCount.set(model.platform_id, (modelCount.get(model.platform_id) ?? 0) + 1)
+        // 同 URL 的账号共享目录；按 catalog_key 计数，第二个账号不会显示 0。
+        if (!model.catalog_key) continue
+        modelCount.set(model.catalog_key, (modelCount.get(model.catalog_key) ?? 0) + 1)
       }
 
       const refs = new Map<string, { proxies: Set<string>; backends: number }>()
@@ -113,7 +115,7 @@ export default function Platforms() {
         const ref = refs.get(platform.id)
         return {
           platform,
-          modelCount: modelCount.get(platform.id) ?? 0,
+          modelCount: modelCount.get(platform.catalog_key ?? '') ?? 0,
           refModels: ref?.proxies.size ?? 0,
           refBackends: ref?.backends ?? 0,
           stats: statsByPlatform.get(platform.id) ?? null,

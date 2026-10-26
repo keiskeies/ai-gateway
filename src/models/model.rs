@@ -21,12 +21,25 @@ pub enum Capability {
 pub struct Model {
     pub id: String,
     pub platform_id: String,
+    /// 同一上游目录键（type + base_url 哈希）；同 key 的账号共享这一行。
+    #[serde(default)]
+    pub catalog_key: Option<String>,
     pub model_id: String,
     pub display_name: String,
     pub max_tokens: u32,
     pub context_window: u32,
+    /// 缓存未命中输入价（每 100 万 token）
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
+    /// 缓存命中输入价；NULL → 回退 input_price
+    #[serde(default)]
+    pub cache_read_price: Option<f64>,
+    /// 缓存写入输入价；NULL → 回退 input_price
+    #[serde(default)]
+    pub cache_write_price: Option<f64>,
+    /// 高峰时段覆盖：{"windows":[{start,end}], "peak":{input,cache_read,cache_write,output}}
+    #[serde(default)]
+    pub peak_pricing: Option<serde_json::Value>,
     /// 每次成功请求消耗的上游积分；NULL = 未定价，按 0 计。
     /// 与 input/output_price 的“每 100 万 token”口径不同，单位是“次”。
     pub credit_price: Option<f64>,
@@ -45,6 +58,12 @@ pub struct CreateModelRequest {
     pub context_window: u32,
     pub input_price: Option<f64>,
     pub output_price: Option<f64>,
+    #[serde(default)]
+    pub cache_read_price: Option<f64>,
+    #[serde(default)]
+    pub cache_write_price: Option<f64>,
+    #[serde(default)]
+    pub peak_pricing: Option<serde_json::Value>,
     #[serde(default)]
     pub credit_price: Option<f64>,
     #[serde(default)]
@@ -67,6 +86,10 @@ pub struct ModelPriceRow {
     pub input_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub output_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_read_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_write_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub credit_price: NullableNumber,
 }
@@ -138,6 +161,13 @@ pub struct UpdateModelRequest {
     /// 三态：没写 = 不改，null = 清空（未定价），数字 = 设值。
     #[serde(default = "keep_number")]
     pub credit_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_read_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_write_price: NullableNumber,
+    /// 缺省 = 不改，null = 清空，对象 = 设置高峰时段覆盖。
+    #[serde(default)]
+    pub peak_pricing: Option<serde_json::Value>,
     pub capabilities: Option<Vec<Capability>>,
     pub status: Option<ModelStatus>,
 }
@@ -155,6 +185,10 @@ pub struct BatchModelPatch {
     pub output_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub credit_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_read_price: NullableNumber,
+    #[serde(default = "keep_number")]
+    pub cache_write_price: NullableNumber,
     pub capabilities: Option<Vec<Capability>>,
 }
 
@@ -163,6 +197,8 @@ impl BatchModelPatch {
         self.input_price != NullableNumber::Keep
             || self.output_price != NullableNumber::Keep
             || self.credit_price != NullableNumber::Keep
+            || self.cache_read_price != NullableNumber::Keep
+            || self.cache_write_price != NullableNumber::Keep
             || self.capabilities.is_some()
     }
 }

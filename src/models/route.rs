@@ -146,6 +146,15 @@ pub struct Backend {
     /// 输出单价（每 100 万 token）；口径同 input_price
     #[serde(default)]
     pub output_price: Option<f64>,
+    /// 缓存命中输入价（每 100 万 token）；NULL → 回退 input_price
+    #[serde(default)]
+    pub cache_read_price: Option<f64>,
+    /// 缓存写入输入价（每 100 万 token）；NULL → 回退 input_price
+    #[serde(default)]
+    pub cache_write_price: Option<f64>,
+    /// 高峰时段价格覆盖；NULL → 始终基础价
+    #[serde(default)]
+    pub peak_pricing: Option<serde_json::Value>,
     /// 每次请求消耗的上游积分；口径同 models.credit_price
     #[serde(default)]
     pub credit_price: Option<f64>,
@@ -165,6 +174,36 @@ impl Backend {
     /// token 数为 0 时结果就是 0（与该行自己记录的用量保持一致）。
     pub fn estimate_cost(&self, token_input: Option<i64>, token_output: Option<i64>) -> Option<f64> {
         cost_from_prices(self.price_pair(), token_input, token_output)
+    }
+
+    /// 热路径的价格快照：基础价（缓存价缺失回退输入价）+ 解析后的高峰覆盖。
+    pub fn pricing_snapshot(&self) -> Option<crate::models::pricing::Pricing> {
+        let input = self.input_price?;
+        let output = self.output_price?;
+        let peak = self
+            .peak_pricing
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+        Some(crate::models::pricing::Pricing {
+            input,
+            output,
+            cache_read: self.cache_read_price.unwrap_or(input),
+            cache_write: self.cache_write_price.unwrap_or(input),
+            peak,
+        })
+    }
+
+    /// 按缓存命中/写入 token 与请求时刻计费；缓存 token 缺失按 0。
+    pub fn estimate_cost_detailed(
+        &self,
+        token_input: Option<i64>,
+        token_output: Option<i64>,
+        cache_read: Option<i64>,
+        cache_write: Option<i64>,
+        at: chrono::DateTime<chrono::Local>,
+    ) -> Option<f64> {
+        self.pricing_snapshot()?
+            .cost(token_input, token_output, cache_read, cache_write, at)
     }
 }
 
@@ -256,6 +295,9 @@ mod tests {
             reasoning_echo: ReasoningEcho::default(),
             input_price: input,
             output_price: output,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             credit_price: None,
         }
     }

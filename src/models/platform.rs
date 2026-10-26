@@ -103,6 +103,10 @@ pub struct Platform {
     pub credit_budget: Option<f64>,
     /// 自然窗口：day / week / month；NULL = 不启用。
     pub credit_window: Option<String>,
+    /// 上游目录键：type + 规范化 base_url 的 SHA-256，不含 API Key。
+    /// 同一 key 的账号共享 models 目录与价格。
+    #[serde(default)]
+    pub catalog_key: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -214,6 +218,7 @@ mod tests {
             rate_limit: None,
             credit_budget: None,
             credit_window: None,
+            catalog_key: None,
             created_at: "2026-01-01T00:00:00Z".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
         }

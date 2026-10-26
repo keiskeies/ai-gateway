@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 24;
+pub const CURRENT_SCHEMA_VERSION: i64 = 25;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -189,6 +189,90 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V24 (platform credits / model credit price / credit ledger)");
     }
 
+    if current_version < 25 {
+        add_column_if_missing(conn, "platforms", "catalog_key",
+            "ALTER TABLE platforms ADD COLUMN catalog_key TEXT")?;
+        add_column_if_missing(conn, "models", "catalog_key",
+            "ALTER TABLE models ADD COLUMN catalog_key TEXT")?;
+        add_column_if_missing(conn, "models", "cache_read_price",
+            "ALTER TABLE models ADD COLUMN cache_read_price REAL")?;
+        add_column_if_missing(conn, "models", "cache_write_price",
+            "ALTER TABLE models ADD COLUMN cache_write_price REAL")?;
+        add_column_if_missing(conn, "models", "peak_pricing",
+            "ALTER TABLE models ADD COLUMN peak_pricing TEXT")?;
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_platforms_catalog ON platforms(catalog_key);")?;
+        backfill_catalog_keys(conn)?;
+        dedupe_models_by_catalog(conn)?;
+        // 唯一索引必须在去重之后建：旧库可能已经有同 URL 多账号的重复模型行。
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_models_catalog_model ON models(catalog_key, model_id);",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 25)", [])?;
+        tracing::info!("Database migrated to V25 (shared model catalog + cache/peak pricing)");
+    }
+
+    Ok(())
+}
+
+/// V25 第一阶段：按 `type + normalized base_url` 回填平台与模型的 catalog_key。
+/// 模型行如果找不到平台（悬挂行）保持 NULL；唯一索引允许 NULL，不阻塞启动。
+fn backfill_catalog_keys(conn: &Connection) -> AppResult<()> {
+    use crate::models::platform::PlatformType;
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, type, base_url FROM platforms")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, type_json, base_url) in rows {
+        let platform_type: PlatformType =
+            serde_json::from_str(&type_json).unwrap_or(PlatformType::OpenAI);
+        let key = crate::catalog::catalog_key(&platform_type, &base_url);
+        conn.execute(
+            "UPDATE platforms SET catalog_key = ?2 WHERE id = ?1",
+            rusqlite::params![id, key],
+        )?;
+    }
+    conn.execute(
+        "UPDATE models SET catalog_key = (
+             SELECT p.catalog_key FROM platforms p WHERE p.id = models.platform_id
+         ) WHERE catalog_key IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// V25 第二阶段：同一 `(catalog_key, model_id)` 只留一行。
+/// 保留“价格字段最多”的那行（旧库常见：一个账号配了价，另一个没配），
+/// 平手保留最早平台的行；删掉的 id 不被任何表引用（backends 存的是模型名字符串）。
+fn dedupe_models_by_catalog(conn: &Connection) -> AppResult<()> {
+    struct Candidate {
+        id: String,
+        key: String,
+        model_id: String,
+    }
+    let rows: Vec<Candidate> = {
+        let mut stmt = conn.prepare(
+            "SELECT m.id, m.catalog_key, m.model_id,
+                    ((m.input_price IS NOT NULL) + (m.output_price IS NOT NULL)
+                     + (m.cache_read_price IS NOT NULL) + (m.cache_write_price IS NOT NULL)
+                     + (m.credit_price IS NOT NULL) + (m.peak_pricing IS NOT NULL)) AS score,
+                    p.created_at
+             FROM models m
+             JOIN platforms p ON p.id = m.platform_id
+             WHERE m.catalog_key IS NOT NULL
+             ORDER BY m.catalog_key, m.model_id, score DESC, p.created_at ASC, m.id ASC",
+        )?;
+        let mapped = stmt.query_map([], |r| {
+            Ok(Candidate { id: r.get(0)?, key: r.get(1)?, model_id: r.get(2)? })
+        })?;
+        mapped.collect::<Result<Vec<_>, _>>()?
+    };
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        if !seen.insert((row.key, row.model_id)) {
+            conn.execute("DELETE FROM models WHERE id = ?1", [row.id])?;
+        }
+    }
     Ok(())
 }
 

@@ -207,6 +207,8 @@ export function ImportPricesModal({
                         <Table.Th>{t(locale, 'modelId')}</Table.Th>
                         <Table.Th className="num">{t(locale, 'pricesColIn')}</Table.Th>
                         <Table.Th className="num">{t(locale, 'pricesColOut')}</Table.Th>
+                        <Table.Th className="num">{t(locale, 'pricesColCacheRead')}</Table.Th>
+                        <Table.Th className="num">{t(locale, 'pricesColCacheWrite')}</Table.Th>
                         <Table.Th className="num">{t(locale, 'pricesColCredit')}</Table.Th>
                       </Table.Tr>
                     </Table.Thead>
@@ -216,6 +218,8 @@ export function ImportPricesModal({
                           <Table.Td><span className="console-mono">{row.modelId}</span></Table.Td>
                           <Table.Td className="num">{priceCell(row, 'input')}</Table.Td>
                           <Table.Td className="num">{priceCell(row, 'output')}</Table.Td>
+                          <Table.Td className="num">{priceCell(row, 'cacheRead')}</Table.Td>
+                          <Table.Td className="num">{priceCell(row, 'cacheWrite')}</Table.Td>
                           <Table.Td className="num">{priceCell(row, 'credit')}</Table.Td>
                         </Table.Tr>
                       ))}
@@ -240,9 +244,25 @@ export function ImportPricesModal({
     </Modal>
   )
 
-  function priceCell(row: PricePlanRow, side: 'input' | 'output' | 'credit') {
-    const cell: PriceCell = side === 'input' ? row.input : side === 'output' ? row.output : row.credit
-    const current = side === 'input' ? row.currentInput : side === 'output' ? row.currentOutput : row.currentCredit
+  function priceCell(row: PricePlanRow, side: 'input' | 'output' | 'cacheRead' | 'cacheWrite' | 'credit') {
+    const cell: PriceCell = side === 'input'
+      ? row.input
+      : side === 'output'
+        ? row.output
+        : side === 'cacheRead'
+          ? row.cacheRead
+          : side === 'cacheWrite'
+            ? row.cacheWrite
+            : row.credit
+    const current = side === 'input'
+      ? row.currentInput
+      : side === 'output'
+        ? row.currentOutput
+        : side === 'cacheRead'
+          ? row.currentCacheRead
+          : side === 'cacheWrite'
+            ? row.currentCacheWrite
+            : row.currentCredit
     if (cell.state === 'keep') {
       return <span className="muted">{current ?? '—'}</span>
     }

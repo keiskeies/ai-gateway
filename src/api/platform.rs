@@ -221,12 +221,14 @@ pub async fn export_prices(db: web::Data<DbPool>, path: web::Path<String>) -> Ap
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
     let mut body = String::from("\u{feff}"); // BOM：没有它 Excel 会把中文列名读成乱码
-    body.push_str("model_id,input_price,output_price,credit_price\n");
+    body.push_str("model_id,input_price,output_price,cache_read_price,cache_write_price,credit_price\n");
     for model in &models {
         let cells = [
             crate::api::stats::csv_text(&model.model_id),
             crate::api::stats::csv_num(model.input_price),
             crate::api::stats::csv_num(model.output_price),
+            crate::api::stats::csv_num(model.cache_read_price),
+            crate::api::stats::csv_num(model.cache_write_price),
             crate::api::stats::csv_num(model.credit_price),
         ];
         body.push_str(&cells.join(","));
@@ -266,6 +268,8 @@ pub async fn import_prices(
     let negative = rows.iter().any(|row| {
         matches!(row.input_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
             || matches!(row.output_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
+            || matches!(row.cache_read_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
+            || matches!(row.cache_write_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
             || matches!(row.credit_price, crate::models::model::NullableNumber::Set(v) if v < 0.0)
     });
     if negative {

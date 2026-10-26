@@ -658,6 +658,8 @@ async fn handle_request(
     }
     let path = meta.path.as_deref();
     let capture_response = state.config.read().defaults.capture_response_bodies;
+    // 分时价格用请求开始时刻判定；长流跨过高峰边界也不换价。
+    let pricing_at = chrono::Local::now();
     // 只有真的会按次计费的平台才查状态；没有积分配置的路由零额外查询。
     let credit_enabled = resolved_route.backends.iter().any(|rb| {
         rb.platform.credit_budget.is_some() && rb.backend.credit_price.unwrap_or(0.0) > 0.0
@@ -807,12 +809,12 @@ async fn handle_request(
                             None
                         };
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.price_pair(), start, capture));
+                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), start, pricing_at, capture));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
                             if upstream_anthropic { "anthropic" } else { "openai" });
-                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.price_pair(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, capture));
+                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture));
                     }
                     let body = resp.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
                     capture_response_body(
@@ -878,7 +880,13 @@ async fn handle_request(
                     );
                     stat.cache_read_tokens = cache_read;
                     stat.cache_write_tokens = cache_write;
-                    stat.cost = backend.estimate_cost(token_input, token_output);
+                    stat.cost = backend.estimate_cost_detailed(
+                        token_input,
+                        token_output,
+                        cache_read,
+                        cache_write,
+                        pricing_at,
+                    );
                     stat.credits = charge;
                     state.stats_writer.record(stat);
 
@@ -1083,14 +1091,21 @@ struct StreamStatCtx {
     cache_write: std::sync::atomic::AtomicI64,
     failed: std::sync::atomic::AtomicBool,
     recorded: std::sync::atomic::AtomicBool,
-    /// 单价对（每 100 万 token）：token 在流结束时才知道，所以价格先随上下文带进来
-    prices: Option<(f64, f64)>,
+    /// 每条请求的token/价格快照：缓存 token 在流结束时才知道，所以价格先随上下文带进来
+    pricing: Option<crate::models::pricing::Pricing>,
+    pricing_at: chrono::DateTime<chrono::Local>,
     writer: StatsWriter,
 }
 
 impl StreamStatCtx {
     /// start 必须是请求发出时刻（与 latency_ms 同源），首字时长以此为基准
-    fn new(base: RequestStat, writer: &StatsWriter, start: Instant, prices: Option<(f64, f64)>) -> Self {
+    fn new(
+        base: RequestStat,
+        writer: &StatsWriter,
+        start: Instant,
+        pricing: Option<crate::models::pricing::Pricing>,
+        pricing_at: chrono::DateTime<chrono::Local>,
+    ) -> Self {
         Self {
             base,
             start,
@@ -1101,7 +1116,8 @@ impl StreamStatCtx {
             cache_write: std::sync::atomic::AtomicI64::new(0),
             failed: std::sync::atomic::AtomicBool::new(false),
             recorded: std::sync::atomic::AtomicBool::new(false),
-            prices,
+            pricing,
+            pricing_at,
             writer: writer.clone(),
         }
     }
@@ -1139,12 +1155,14 @@ impl StreamStatCtx {
             return; // 已记录过，忽略
         }
         let mut stat = self.base.clone();
-        stat.token_input = Some(self.token_in.load(Ordering::SeqCst));
-        stat.token_output = Some(self.token_out.load(Ordering::SeqCst));
-        stat.cost = crate::models::route::cost_from_prices(self.prices, stat.token_input, stat.token_output);
-        // 缓存命中仅在流内出现过 usage 时非 0
         let cr = self.cache_read.load(Ordering::SeqCst);
         let cw = self.cache_write.load(Ordering::SeqCst);
+        stat.token_input = Some(self.token_in.load(Ordering::SeqCst));
+        stat.token_output = Some(self.token_out.load(Ordering::SeqCst));
+        stat.cost = self.pricing.as_ref().and_then(|pricing| {
+            pricing.cost(stat.token_input, stat.token_output, Some(cr), Some(cw), self.pricing_at)
+        });
+        // 缓存命中仅在流内出现过 usage 时非 0
         stat.cache_read_tokens = if cr > 0 { Some(cr) } else { None };
         stat.cache_write_tokens = if cw > 0 { Some(cw) } else { None };
         // 流式延迟统一口径：base 里的 latency_ms 是"响应头到达"时刻（TTFB），
@@ -1224,8 +1242,9 @@ fn handle_stream(
     resp: reqwest::Response,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
-    prices: Option<(f64, f64)>,
+    pricing: Option<crate::models::pricing::Pricing>,
     start: Instant,
+    pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
 ) -> HttpResponse {
     let s = resp.status();
@@ -1242,7 +1261,7 @@ fn handle_stream(
         .body("upstream stream error");
     }
 
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, prices));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
     let body = StreamPassthroughBody {
         inner: Box::pin(resp.bytes_stream()),
         buffer: String::new(),
@@ -1334,15 +1353,16 @@ fn handle_stream_convert(
     resp: reqwest::Response,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
-    prices: Option<(f64, f64)>,
+    pricing: Option<crate::models::pricing::Pricing>,
     client_anthropic: bool,
     model: &str,
     backend_id: &str,
     upstream_model: &str,
     start: Instant,
+    pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
 ) -> HttpResponse {
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, prices));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
     let body = StreamConvertBody {
         inner: Box::pin(resp.bytes_stream()),
         converter: crate::proxy::stream_convert::StreamConverter::new(

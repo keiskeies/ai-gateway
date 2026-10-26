@@ -68,6 +68,9 @@ pub struct PlatformRow {
     pub credit_budget: Option<f64>,
     #[serde(default)]
     pub credit_window: Option<String>,
+    /// 上游目录键；旧配置没有时按 type + base_url 重算。
+    #[serde(default)]
+    pub catalog_key: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -86,9 +89,18 @@ pub struct ModelRow {
     pub input_price: Option<f64>,
     #[serde(default)]
     pub output_price: Option<f64>,
+    #[serde(default)]
+    pub cache_read_price: Option<f64>,
+    #[serde(default)]
+    pub cache_write_price: Option<f64>,
+    #[serde(default)]
+    pub peak_pricing: Option<serde_json::Value>,
     /// 每次成功请求的积分单价；NULL = 未定价。
     #[serde(default)]
     pub credit_price: Option<f64>,
+    /// 共享目录键；旧配置没有时从 platform 推导。
+    #[serde(default)]
+    pub catalog_key: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
     #[serde(default = "default_model_status")]
@@ -508,7 +520,11 @@ mod tests {
             context_window: 8192,
             input_price: None,
             output_price: None,
+            cache_read_price: None,
+            cache_write_price: None,
+            peak_pricing: None,
             credit_price: None,
+            catalog_key: None,
             capabilities: vec![],
             status: ModelStatus::Active,
         });

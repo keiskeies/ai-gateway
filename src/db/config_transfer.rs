@@ -12,9 +12,10 @@ use crate::models::route::{
 
 /// 导出的是"配置"，不是运行数据：六张表就是全部，统计、健康历史、账号与会话都不在这里。
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, \
-    status, rate_limit, credit_budget, credit_window, created_at, updated_at";
+    status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at";
 const MODEL_COLS: &str = "id, platform_id, model_id, display_name, max_tokens, context_window, \
-    input_price, output_price, credit_price, capabilities, status";
+    input_price, output_price, cache_read_price, cache_write_price, credit_price, peak_pricing, \
+    catalog_key, capabilities, status";
 const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens";
 const BACKEND_COLS: &str = "id, route_id, platform_id, model_id, weight, priority, max_concurrent, \
     capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo";
@@ -69,9 +70,14 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
         context_window: row.get::<_, i64>(5)?.max(0) as u32,
         input_price: row.get(6)?,
         output_price: row.get(7)?,
-        credit_price: row.get(8)?,
-        capabilities: decode::<Vec<Capability>>(row.get::<_, String>(9)?, vec![]),
-        status: decode(row.get::<_, String>(10)?, ModelStatus::Active),
+        cache_read_price: row.get(8)?,
+        cache_write_price: row.get(9)?,
+        credit_price: row.get(10)?,
+        peak_pricing: row.get::<_, Option<String>>(11)?
+            .and_then(|raw| serde_json::from_str(&raw).ok()),
+        catalog_key: row.get(12)?,
+        capabilities: decode::<Vec<Capability>>(row.get::<_, String>(13)?, vec![]),
+        status: decode(row.get::<_, String>(14)?, ModelStatus::Active),
     }))? {
         doc.models.push(row?);
     }
@@ -161,8 +167,9 @@ fn map_platform(row: &Row<'_>, include_secrets: bool) -> rusqlite::Result<Platfo
         rate_limit: decode_opt(row.get::<_, Option<String>>(8)?),
         credit_budget: row.get(9)?,
         credit_window: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        catalog_key: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -172,6 +179,7 @@ struct Existing {
     platform_ids: std::collections::HashSet<String>,
     model_ids: std::collections::HashSet<String>,
     model_pairs: std::collections::HashSet<(String, String)>,
+    model_catalog_pairs: std::collections::HashSet<(String, String)>,
     proxy_ids: std::collections::HashSet<String>,
     proxy_names: std::collections::HashSet<String>,
     route_ids: std::collections::HashSet<String>,
@@ -201,6 +209,12 @@ fn existing(conn: &Connection) -> AppResult<Existing> {
         let platform = parts.next().unwrap_or_default().to_string();
         let model = parts.next().unwrap_or_default().to_string();
         out.model_pairs.insert((platform, model));
+    }
+    drop(stmt);
+
+    let mut stmt = conn.prepare("SELECT catalog_key, model_id FROM models WHERE catalog_key IS NOT NULL")?;
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+        out.model_catalog_pairs.insert(row?);
     }
     drop(stmt);
 
@@ -388,8 +402,11 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
         if merge && current.platform_ids.contains(&row.id) {
             continue;
         }
+        let catalog_key = row.catalog_key.clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| crate::catalog::catalog_key(&row.platform_type, &row.base_url));
         tx.execute(
-            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)"),
+            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"),
             rusqlite::params![
                 row.id,
                 row.name,
@@ -403,19 +420,37 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.rate_limit.as_ref().map(encode).transpose()?,
                 row.credit_budget,
                 row.credit_window,
+                catalog_key,
                 row.created_at,
                 row.updated_at,
             ],
         )?;
         result.platforms.add += 1;
     }
+
+    let platform_keys: std::collections::HashMap<String, String> = {
+        let mut stmt = tx.prepare("SELECT id, catalog_key FROM platforms WHERE catalog_key IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.filter_map(|row| row.ok()).collect()
+    };
+    let mut seen_catalog = std::collections::HashSet::new();
     for row in &doc.models {
-        let pair_taken = current.model_pairs.contains(&(row.platform_id.clone(), row.model_id.clone()));
-        if merge && (current.model_ids.contains(&row.id) || pair_taken) {
+        let Some(catalog_key) = row.catalog_key.clone()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| platform_keys.get(&row.platform_id).cloned())
+        else {
+            continue;
+        };
+        let catalog_pair = (catalog_key.clone(), row.model_id.clone());
+        if !seen_catalog.insert(catalog_pair.clone()) {
             continue;
         }
-        tx.execute(
-            &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+        if merge && (current.model_ids.contains(&row.id) || current.model_catalog_pairs.contains(&catalog_pair)) {
+            continue;
+        }
+        let peak_pricing = row.peak_pricing.as_ref().map(serde_json::to_string).transpose()?;
+        let changed = tx.execute(
+            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
             rusqlite::params![
                 row.id,
                 row.platform_id,
@@ -425,12 +460,18 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.context_window as i64,
                 row.input_price,
                 row.output_price,
+                row.cache_read_price,
+                row.cache_write_price,
                 row.credit_price,
+                peak_pricing,
+                catalog_key,
                 encode(&row.capabilities)?,
                 encode(&row.status)?,
             ],
         )?;
-        result.models.add += 1;
+        if changed > 0 {
+            result.models.add += 1;
+        }
     }
     for row in &doc.proxies {
         if merge && current.proxy_ids.contains(&row.id) {
@@ -573,6 +614,12 @@ mod tests {
                VALUES ('k1','prod','0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a6978','sk-p••••••••oc','x1','2026-01-02T00:00:00Z',NULL,1,'2027-01-01T23:59:59+00:00',100,NULL,12.5,'month');",
         )
         .unwrap();
+        let catalog_key = crate::catalog::catalog_key(
+            &crate::models::platform::PlatformType::OpenAI,
+            "http://127.0.0.1:8080/v1",
+        );
+        conn.execute("UPDATE platforms SET catalog_key = ?1 WHERE id = 'p1'", [&catalog_key]).unwrap();
+        conn.execute("UPDATE models SET catalog_key = ?1 WHERE platform_id = 'p1'", [&catalog_key]).unwrap();
     }
 
     /// 导出→清空→导入必须回到同一个形状：备份功能的最低要求。

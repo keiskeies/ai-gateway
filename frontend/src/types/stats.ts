@@ -306,6 +306,8 @@ export interface PlatformDetail {
   credit_budget?: number | null
   /** 自然窗口：day / week / month */
   credit_window?: string | null
+  /** 上游目录键：同 type + base_url 的账号共享模型目录 */
+  catalog_key?: string | null
   created_at: string
   updated_at: string
 }

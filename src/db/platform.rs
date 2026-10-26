@@ -5,7 +5,7 @@ use crate::models::platform::*;
 use crate::db::DbPool;
 
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, status, \
-    rate_limit, credit_budget, credit_window, created_at, updated_at";
+    rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at";
 
 fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
     let rate_limit_str: Option<String> = row.get(8)?;
@@ -21,8 +21,9 @@ fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
         rate_limit: rate_limit_str.and_then(|s| serde_json::from_str(&s).ok()),
         credit_budget: row.get(9)?,
         credit_window: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        catalog_key: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
     })
 }
 
@@ -47,6 +48,7 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
     let now = chrono::Utc::now().to_rfc3339();
     let credit_window = validate_credit_fields(req.credit_budget, req.credit_window.as_deref())
         .map_err(crate::error::AppError::BadRequest)?;
+    let catalog_key = crate::catalog::catalog_key(&req.platform_type, &req.base_url);
     let platform = Platform {
         id: id.clone(),
         name: req.name.clone(),
@@ -59,13 +61,14 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
         rate_limit: None,
         credit_budget: req.credit_budget,
         credit_window,
+        catalog_key: Some(catalog_key.clone()),
         created_at: now.clone(),
         updated_at: now,
     };
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO platforms (id, name, type, base_url, api_key, organization, custom_headers, status, rate_limit, credit_budget, credit_window, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO platforms (id, name, type, base_url, api_key, organization, custom_headers, status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             platform.id,
             platform.name,
@@ -78,6 +81,7 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
             platform.rate_limit.as_ref().map(|r| serde_json::to_string(r).unwrap()),
             platform.credit_budget,
             platform.credit_window,
+            catalog_key,
             platform.created_at,
             platform.updated_at,
         ],
@@ -111,24 +115,50 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdatePlatformRequest) -> AppResult
         .map_err(crate::error::AppError::BadRequest)?;
     platform.credit_budget = budget;
     platform.credit_window = window;
+    let old_catalog_key = platform.catalog_key.clone();
+    let new_catalog_key = crate::catalog::catalog_key(&platform.platform_type, &platform.base_url);
+    platform.catalog_key = Some(new_catalog_key.clone());
     platform.updated_at = chrono::Utc::now().to_rfc3339();
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE platforms SET name=?2, type=?3, base_url=?4, api_key=?5, organization=?6, custom_headers=?7, status=?8, credit_budget=?9, credit_window=?10, updated_at=?11 WHERE id=?1",
+        "UPDATE platforms SET name=?2, type=?3, base_url=?4, api_key=?5, organization=?6, custom_headers=?7, status=?8, credit_budget=?9, credit_window=?10, catalog_key=?11, updated_at=?12 WHERE id=?1",
         rusqlite::params![
             id, platform.name, serde_json::to_string(&platform.platform_type)?,
             platform.base_url, platform.api_key, platform.organization,
             serde_json::to_string(&platform.custom_headers)?,
             serde_json::to_string(&platform.status)?,
-            platform.credit_budget, platform.credit_window, platform.updated_at,
+            platform.credit_budget, platform.credit_window, platform.catalog_key, platform.updated_at,
         ],
     )?;
+    drop(conn);
+    // URL/type 变了就是另一个上游目录：旧目录如果已经没有账号引用，别把模型行留在库里。
+    if old_catalog_key.as_deref() != Some(new_catalog_key.as_str()) {
+        let _ = crate::db::model::delete_orphan_catalogs(pool);
+    }
     Ok(platform)
 }
 
 pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.execute("DELETE FROM platforms WHERE id = ?1", [id])?;
+    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let tx = conn.transaction().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    // 共享目录行登记在某个账号下；删账号前按每行自己的 catalog_key 改挂兄弟账号，
+    // 不能只看平台当前 key——URL 改过之后旧目录行仍可能被其他账号使用。
+    tx.execute(
+        "UPDATE models SET platform_id = (
+             SELECT p2.id FROM platforms p2
+             WHERE p2.catalog_key = models.catalog_key AND p2.id != ?1
+             LIMIT 1
+         )
+         WHERE platform_id = ?1 AND EXISTS (
+             SELECT 1 FROM platforms p2
+             WHERE p2.catalog_key = models.catalog_key AND p2.id != ?1
+         )",
+        [id],
+    )?;
+    tx.execute("DELETE FROM platforms WHERE id = ?1", [id])?;
+    tx.commit().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    drop(conn);
+    let _ = crate::db::model::delete_orphan_catalogs(pool);
     Ok(())
 }

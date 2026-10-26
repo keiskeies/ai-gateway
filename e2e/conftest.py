@@ -509,7 +509,9 @@ def mock_stack(api, mock_upstream):
     )
     assert status == 201, f"建平台失败 {status} {platform}"
     status, synced = api.call("POST", f"/api/platforms/{platform['id']}/models/sync")
-    assert status == 200 and synced.get("created") == 1, f"同步模型失败 {status} {synced}"
+    # 共享目录：同 URL 的账号已同步过时 created=0、existing=1，这是预期结果。
+    assert status == 200 and (synced.get("created") == 1 or synced.get("existing") == 1), \
+        f"同步模型失败 {status} {synced}"
     status, proxy = api.call("POST", "/api/proxies", {"name": tag})
     assert status == 201, f"建虚拟模型失败 {status} {proxy}"
     status, route = api.call(

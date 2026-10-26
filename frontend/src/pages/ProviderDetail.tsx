@@ -43,15 +43,35 @@ interface LinkedModel {
 interface SyncedModel {
   id: string
   platform_id: string
+  /** 同 type + base_url 的账号共享这一行 */
+  catalog_key?: string | null
   model_id: string
   display_name: string
   max_tokens: number
   context_window: number
   input_price: number | null
   output_price: number | null
+  cache_read_price: number | null
+  cache_write_price: number | null
+  peak_pricing?: PeakPricing | null
   credit_price: number | null
   capabilities: string[]
   status: string
+}
+
+interface PeakWindow {
+  start: string
+  end: string
+}
+
+interface PeakPricing {
+  windows?: PeakWindow[]
+  peak?: {
+    input?: number | null
+    cache_read?: number | null
+    cache_write?: number | null
+    output?: number | null
+  } | null
 }
 
 interface ModelDraft {
@@ -60,7 +80,15 @@ interface ModelDraft {
   context_window: string
   input_price: string
   output_price: string
+  cache_read_price: string
+  cache_write_price: string
   credit_price: string
+  peak_enabled: boolean
+  peak_windows: string
+  peak_input: string
+  peak_cache_read: string
+  peak_cache_write: string
+  peak_output: string
   capabilities: string[]
   status: string
 }
@@ -72,6 +100,10 @@ interface BatchDraft {
   input_price: string
   output_price_on: boolean
   output_price: string
+  cache_read_price_on: boolean
+  cache_read_price: string
+  cache_write_price_on: boolean
+  cache_write_price: string
   credit_price_on: boolean
   credit_price: string
   capabilities_on: boolean
@@ -83,6 +115,10 @@ const emptyBatch = (): BatchDraft => ({
   input_price: '',
   output_price_on: false,
   output_price: '',
+  cache_read_price_on: false,
+  cache_read_price: '',
+  cache_write_price_on: false,
+  cache_write_price: '',
   credit_price_on: false,
   credit_price: '',
   capabilities_on: false,
@@ -105,7 +141,15 @@ const modelDraftFrom = (row: SyncedModel): ModelDraft => ({
   context_window: String(row.context_window),
   input_price: row.input_price == null ? '' : String(row.input_price),
   output_price: row.output_price == null ? '' : String(row.output_price),
+  cache_read_price: row.cache_read_price == null ? '' : String(row.cache_read_price),
+  cache_write_price: row.cache_write_price == null ? '' : String(row.cache_write_price),
   credit_price: row.credit_price == null ? '' : String(row.credit_price),
+  peak_enabled: Boolean(row.peak_pricing?.windows?.length),
+  peak_windows: (row.peak_pricing?.windows ?? []).map(window => `${window.start}-${window.end}`).join(', '),
+  peak_input: row.peak_pricing?.peak?.input == null ? '' : String(row.peak_pricing.peak.input),
+  peak_cache_read: row.peak_pricing?.peak?.cache_read == null ? '' : String(row.peak_pricing.peak.cache_read),
+  peak_cache_write: row.peak_pricing?.peak?.cache_write == null ? '' : String(row.peak_pricing.peak.cache_write),
+  peak_output: row.peak_pricing?.peak?.output == null ? '' : String(row.peak_pricing.peak.output),
   capabilities: row.capabilities,
   status: row.status,
 })
@@ -122,6 +166,24 @@ const isInvalidPrice = (raw: string): boolean => {
   return value !== null && (!Number.isFinite(value) || value < 0)
 }
 
+const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/
+
+// 高峰时段：逗号分隔的 HH:MM-HH:MM；允许跨午夜（22:00-02:00）。
+const parsePeakWindows = (raw: string): PeakWindow[] | null => {
+  const text = raw.trim()
+  if (!text) return null
+  const windows: PeakWindow[] = []
+  for (const part of text.split(/[,，;；]/)) {
+    const [start, end] = part.trim().split('-')
+    if (!start || !end) return null
+    const startText = start.trim()
+    const endText = end.trim()
+    if (!HHMM.test(startText) || !HHMM.test(endText) || startText === endText) return null
+    windows.push({ start: startText, end: endText })
+  }
+  return windows.length ? windows : null
+}
+
 // max_tokens / context_window 这两列不允许 NULL，所以空值也算无效
 const isInvalidTokens = (raw: string): boolean => {
   const value = parseNumberField(raw)
@@ -134,6 +196,19 @@ const STRATEGY_LABELS: Record<string, { zh: string; en: string }> = {
   LeastConnections: { zh: '最少连接', en: 'Least connections' },
   Priority: { zh: '优先级', en: 'Priority' },
   LatencyBased: { zh: '延迟优先', en: 'Latency based' },
+}
+
+function modelPriceHint(row: SyncedModel, locale: Locale): string {
+  const peak = row.peak_pricing?.windows?.length
+    ? ` · ${t(locale, 'modelPeakPricing')} ${row.peak_pricing.windows.map(window => `${window.start}-${window.end}`).join(', ')}`
+    : ''
+  return [
+    `${t(locale, 'modelInputPrice')} ${row.input_price ?? '—'}`,
+    `${t(locale, 'modelOutputPrice')} ${row.output_price ?? '—'}`,
+    `${t(locale, 'modelCacheReadPrice')} ${row.cache_read_price ?? '—'}`,
+    `${t(locale, 'modelCacheWritePrice')} ${row.cache_write_price ?? '—'}`,
+    `${t(locale, 'creditUnit')} ${row.credit_price ?? '—'}${peak}`,
+  ].join(' · ')
 }
 
 function strategyLabel(value: string | undefined, locale: 'zh' | 'en'): string {
@@ -283,10 +358,14 @@ export default function ProviderDetail() {
 
   // 本平台已入库的模型：一次 GET /api/models 再按平台过滤，不给每个平台各发一次请求
   const syncedQuery = useQuery({
-    queryKey: ['platform-models', id],
+    queryKey: ['platform-models', id, platformQuery.data?.catalog_key ?? ''],
     queryFn: async (): Promise<SyncedModel[]> => {
       const rows = (await listModels()) as SyncedModel[]
-      return rows.filter(row => row.platform_id === id)
+      const catalogKey = platformQuery.data?.catalog_key
+      // 共享目录：同一个 type + base_url 的账号共用 catalog_key，第二个账号无需重新同步。
+      return catalogKey
+        ? rows.filter(row => row.catalog_key === catalogKey)
+        : rows.filter(row => row.platform_id === id)
     },
     enabled: Boolean(id),
   })
@@ -301,9 +380,15 @@ export default function ProviderDetail() {
   const toggleSelected = (rowId: string) =>    setSelected(prev => (prev.includes(rowId) ? prev.filter(value => value !== rowId) : [...prev, rowId]))
 
   const batchTouched = Boolean(batchDraft)
-    && (batchDraft!.input_price_on || batchDraft!.output_price_on || batchDraft!.credit_price_on || batchDraft!.capabilities_on)
+    && (batchDraft!.input_price_on || batchDraft!.output_price_on
+      || batchDraft!.cache_read_price_on || batchDraft!.cache_write_price_on
+      || batchDraft!.credit_price_on || batchDraft!.capabilities_on)
   const batchInvalid = Boolean(batchDraft)
-    && (isInvalidPrice(batchDraft!.input_price) || isInvalidPrice(batchDraft!.output_price) || isInvalidPrice(batchDraft!.credit_price))
+    && (isInvalidPrice(batchDraft!.input_price)
+      || isInvalidPrice(batchDraft!.output_price)
+      || isInvalidPrice(batchDraft!.cache_read_price)
+      || isInvalidPrice(batchDraft!.cache_write_price)
+      || isInvalidPrice(batchDraft!.credit_price))
 
   const saveBatch = async () => {
     if (!id || !batchDraft || !batchTouched || batchInvalid) return
@@ -314,6 +399,8 @@ export default function ProviderDetail() {
         // 开关关着＝这个字段整个不出现在 body 里＝后端保持原值；开着且留空＝发 null＝清空
         ...(batchDraft.input_price_on ? { input_price: parseNumberField(batchDraft.input_price) } : {}),
         ...(batchDraft.output_price_on ? { output_price: parseNumberField(batchDraft.output_price) } : {}),
+        ...(batchDraft.cache_read_price_on ? { cache_read_price: parseNumberField(batchDraft.cache_read_price) } : {}),
+        ...(batchDraft.cache_write_price_on ? { cache_write_price: parseNumberField(batchDraft.cache_write_price) } : {}),
         ...(batchDraft.credit_price_on ? { credit_price: parseNumberField(batchDraft.credit_price) } : {}),
         ...(batchDraft.capabilities_on ? { capabilities: batchDraft.capabilities } : {}),
       })
@@ -436,19 +523,45 @@ export default function ProviderDetail() {
   const modelDirty = Boolean(editTarget && modelDraft)
     && JSON.stringify(modelDraftFrom(editTarget!)) !== JSON.stringify(modelDraft)
 
+  const peakWindows = modelDraft?.peak_enabled ? parsePeakWindows(modelDraft.peak_windows) : null
+  const peakPricesEmpty = Boolean(modelDraft?.peak_enabled) && [
+    modelDraft!.peak_input,
+    modelDraft!.peak_cache_read,
+    modelDraft!.peak_cache_write,
+    modelDraft!.peak_output,
+  ].every(value => !value.trim())
+
   const modelInvalid = Boolean(modelDraft) && (
     !modelDraft!.display_name.trim()
     || isInvalidTokens(modelDraft!.max_tokens)
     || isInvalidTokens(modelDraft!.context_window)
     || isInvalidPrice(modelDraft!.input_price)
     || isInvalidPrice(modelDraft!.output_price)
+    || isInvalidPrice(modelDraft!.cache_read_price)
+    || isInvalidPrice(modelDraft!.cache_write_price)
     || isInvalidPrice(modelDraft!.credit_price)
+    || isInvalidPrice(modelDraft!.peak_input)
+    || isInvalidPrice(modelDraft!.peak_cache_read)
+    || isInvalidPrice(modelDraft!.peak_cache_write)
+    || isInvalidPrice(modelDraft!.peak_output)
+    || (Boolean(modelDraft?.peak_enabled) && (peakWindows === null || peakPricesEmpty))
   )
 
   const saveModel = async () => {
     if (!editTarget || !modelDraft || modelInvalid) return
     setSaving(true)
     try {
+      const peak_pricing = modelDraft.peak_enabled && peakWindows
+        ? {
+            windows: peakWindows,
+            peak: {
+              input: parseNumberField(modelDraft.peak_input),
+              cache_read: parseNumberField(modelDraft.peak_cache_read),
+              cache_write: parseNumberField(modelDraft.peak_cache_write),
+              output: parseNumberField(modelDraft.peak_output),
+            },
+          }
+        : null
       await updateModel(editTarget.id, {
         display_name: modelDraft.display_name.trim(),
         max_tokens: Number(modelDraft.max_tokens),
@@ -456,7 +569,10 @@ export default function ProviderDetail() {
         // 空串走 null＝清空；字段始终整份提交，所以后端"缺省＝不改"的三态不会被前端误触发
         input_price: parseNumberField(modelDraft.input_price),
         output_price: parseNumberField(modelDraft.output_price),
+        cache_read_price: parseNumberField(modelDraft.cache_read_price),
+        cache_write_price: parseNumberField(modelDraft.cache_write_price),
         credit_price: parseNumberField(modelDraft.credit_price),
+        peak_pricing,
         capabilities: modelDraft.capabilities,
         status: modelDraft.status,
       })
@@ -847,6 +963,9 @@ export default function ProviderDetail() {
             <div className="console-panel-title">{t(locale, 'remoteModelsTitle')}</div>
             <span className="console-panel-sub">{remoteModels ? t(locale, 'modelsCount', String(remoteModels.length)) : t(locale, 'notSynced')}</span>
           </div>
+          {!remoteModels && synced.length > 0 && (
+            <div className="console-note">{t(locale, 'remoteSharedHint', String(synced.length))}</div>
+          )}
           {testing ? (
             <div className="console-empty"><span>{t(locale, 'connectingPlatform')}</span></div>
           ) : remoteModels ? (
@@ -900,6 +1019,7 @@ export default function ProviderDetail() {
           <div className="console-panel-title">{t(locale, 'syncedModelsTitle')}</div>
           <span className="console-panel-sub">{t(locale, 'rowsCount', String(synced.length))}</span>
         </div>
+        <div className="console-note">{t(locale, 'catalogSharedHint')}</div>
         {selected.length > 0 && (
           <div className="console-batch-bar">
             <span>{t(locale, 'batchSelected', String(selected.length))}</span>
@@ -961,9 +1081,11 @@ export default function ProviderDetail() {
                     <Table.Td className="num">{formatNumber(row.context_window)}</Table.Td>
                     <Table.Td className="num">{formatNumber(row.max_tokens)}</Table.Td>
                     <Table.Td className="num">
-                      <span className={row.input_price == null && row.output_price == null ? 'muted' : ''}>
-                        {`${row.input_price ?? '—'} / ${row.output_price ?? '—'}`}
-                      </span>
+                      <Tooltip withArrow w={360} label={modelPriceHint(row, locale)}>
+                        <span className={row.input_price == null && row.output_price == null ? 'muted' : ''}>
+                          {`${row.input_price ?? '—'} / ${row.output_price ?? '—'}`}
+                        </span>
+                      </Tooltip>
                     </Table.Td>
                     <Table.Td className="num">
                       <span className={row.credit_price == null ? 'muted' : ''}>{row.credit_price ?? '—'}</span>
@@ -1171,12 +1293,53 @@ export default function ProviderDetail() {
             <Field label={t(locale, 'modelInputPrice')} unit={t(locale, 'modelPriceUnit')}>
               <TextInput size="xs" inputMode="decimal" value={modelDraft.input_price} onChange={event => setModelDraft(prev => prev && { ...prev, input_price: event.currentTarget.value })} />
             </Field>
+            <Field label={t(locale, 'modelCacheReadPrice')} unit={t(locale, 'modelPriceUnit')}>
+              <TextInput size="xs" inputMode="decimal" value={modelDraft.cache_read_price} onChange={event => setModelDraft(prev => prev && { ...prev, cache_read_price: event.currentTarget.value })} />
+            </Field>
             <Field label={t(locale, 'modelOutputPrice')} unit={t(locale, 'modelPriceUnit')}>
               <TextInput size="xs" inputMode="decimal" value={modelDraft.output_price} onChange={event => setModelDraft(prev => prev && { ...prev, output_price: event.currentTarget.value })} />
+            </Field>
+            <Field label={t(locale, 'modelCacheWritePrice')} unit={t(locale, 'modelPriceUnit')}>
+              <TextInput size="xs" inputMode="decimal" value={modelDraft.cache_write_price} onChange={event => setModelDraft(prev => prev && { ...prev, cache_write_price: event.currentTarget.value })} />
             </Field>
             <Field label={t(locale, 'modelCreditPrice')} unit={t(locale, 'creditUnit')}>
               <TextInput size="xs" inputMode="decimal" value={modelDraft.credit_price} onChange={event => setModelDraft(prev => prev && { ...prev, credit_price: event.currentTarget.value })} />
             </Field>
+            <div className="console-field console-form-full">
+              <Checkbox
+                size="xs"
+                checked={modelDraft.peak_enabled}
+                onChange={event => setModelDraft(prev => prev && { ...prev, peak_enabled: event.currentTarget.checked })}
+                label={t(locale, 'modelPeakPricing')}
+              />
+              <TextInput
+                size="xs"
+                value={modelDraft.peak_windows}
+                disabled={!modelDraft.peak_enabled}
+                placeholder={t(locale, 'modelPeakWindowsPlaceholder')}
+                aria-label={t(locale, 'modelPeakWindows')}
+                onChange={event => setModelDraft(prev => prev && { ...prev, peak_windows: event.currentTarget.value })}
+              />
+              <div className="console-note">{t(locale, 'modelPeakWindowsHint')}</div>
+              {modelDraft.peak_enabled && peakWindows === null && <div className="console-note warn">{t(locale, 'modelPeakWindowsInvalid')}</div>}
+              {modelDraft.peak_enabled && peakPricesEmpty && <div className="console-note warn">{t(locale, 'modelPeakPriceRequired')}</div>}
+            </div>
+            {modelDraft.peak_enabled && (
+              <>
+                <Field label={t(locale, 'modelPeakInput')} unit={t(locale, 'modelPriceUnit')}>
+                  <TextInput size="xs" inputMode="decimal" value={modelDraft.peak_input} onChange={event => setModelDraft(prev => prev && { ...prev, peak_input: event.currentTarget.value })} />
+                </Field>
+                <Field label={t(locale, 'modelPeakCacheRead')} unit={t(locale, 'modelPriceUnit')}>
+                  <TextInput size="xs" inputMode="decimal" value={modelDraft.peak_cache_read} onChange={event => setModelDraft(prev => prev && { ...prev, peak_cache_read: event.currentTarget.value })} />
+                </Field>
+                <Field label={t(locale, 'modelPeakCacheWrite')} unit={t(locale, 'modelPriceUnit')}>
+                  <TextInput size="xs" inputMode="decimal" value={modelDraft.peak_cache_write} onChange={event => setModelDraft(prev => prev && { ...prev, peak_cache_write: event.currentTarget.value })} />
+                </Field>
+                <Field label={t(locale, 'modelPeakOutput')} unit={t(locale, 'modelPriceUnit')}>
+                  <TextInput size="xs" inputMode="decimal" value={modelDraft.peak_output} onChange={event => setModelDraft(prev => prev && { ...prev, peak_output: event.currentTarget.value })} />
+                </Field>
+              </>
+            )}
             <Field full label={t(locale, 'modelCapabilities')}>
               <MultiSelect size="xs" data={CAP_DATA(locale)} value={modelDraft.capabilities} onChange={value => setModelDraft(prev => prev && { ...prev, capabilities: value })} />
             </Field>
@@ -1218,6 +1381,24 @@ export default function ProviderDetail() {
                 label={`${t(locale, 'modelOutputPrice')} · ${t(locale, 'modelPriceUnit')}`}
               />
               <TextInput size="xs" inputMode="decimal" disabled={!batchDraft.output_price_on} value={batchDraft.output_price} onChange={event => setBatchDraft(prev => prev && { ...prev, output_price: event.currentTarget.value })} />
+            </div>
+            <div className="console-field">
+              <Checkbox
+                size="xs"
+                checked={batchDraft.cache_read_price_on}
+                onChange={event => setBatchDraft(prev => prev && { ...prev, cache_read_price_on: event.currentTarget.checked })}
+                label={`${t(locale, 'modelCacheReadPrice')} · ${t(locale, 'modelPriceUnit')}`}
+              />
+              <TextInput size="xs" inputMode="decimal" disabled={!batchDraft.cache_read_price_on} aria-label={t(locale, 'modelCacheReadPrice')} value={batchDraft.cache_read_price} onChange={event => setBatchDraft(prev => prev && { ...prev, cache_read_price: event.currentTarget.value })} />
+            </div>
+            <div className="console-field">
+              <Checkbox
+                size="xs"
+                checked={batchDraft.cache_write_price_on}
+                onChange={event => setBatchDraft(prev => prev && { ...prev, cache_write_price_on: event.currentTarget.checked })}
+                label={`${t(locale, 'modelCacheWritePrice')} · ${t(locale, 'modelPriceUnit')}`}
+              />
+              <TextInput size="xs" inputMode="decimal" disabled={!batchDraft.cache_write_price_on} aria-label={t(locale, 'modelCacheWritePrice')} value={batchDraft.cache_write_price} onChange={event => setBatchDraft(prev => prev && { ...prev, cache_write_price: event.currentTarget.value })} />
             </div>
             <div className="console-field">
               <Checkbox

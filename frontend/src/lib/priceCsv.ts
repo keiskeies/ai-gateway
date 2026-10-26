@@ -13,9 +13,13 @@ export interface PricePlanRow {
   modelId: string
   input: PriceCell
   output: PriceCell
+  cacheRead: PriceCell
+  cacheWrite: PriceCell
   credit: PriceCell
   currentInput: number | null
   currentOutput: number | null
+  currentCacheRead: number | null
+  currentCacheWrite: number | null
   currentCredit: number | null
 }
 
@@ -40,6 +44,8 @@ export interface PriceModelRow {
   model_id: string
   input_price: number | null
   output_price: number | null
+  cache_read_price: number | null
+  cache_write_price: number | null
   credit_price: number | null
 }
 
@@ -48,6 +54,8 @@ export interface PriceModelRow {
 const MODEL_HEADERS = ['modelid', 'model', 'id', '模型', '模型id', '模型名称']
 const INPUT_HEADERS = ['inputprice', 'input', 'promptprice', 'prompt', 'in', '输入', '输入价格', '输入单价']
 const OUTPUT_HEADERS = ['outputprice', 'output', 'completionprice', 'completion', 'out', '输出', '输出价格', '输出单价']
+const CACHE_READ_HEADERS = ['cachereadprice', 'cacheread', 'cachehitprice', 'cachehit', '缓存命中价格', '缓存命中']
+const CACHE_WRITE_HEADERS = ['cachewriteprice', 'cachewrite', '缓存写入价格', '缓存写入']
 const CREDIT_HEADERS = ['creditprice', 'credits', 'credit', '积分', '积分价格', '积分单价']
 
 function normalizeHeader(cell: string): string {
@@ -99,9 +107,13 @@ export function buildPricePlan(
   const modelCol = findColumn(headers, MODEL_HEADERS, false)
   const inputCol = findColumn(headers, INPUT_HEADERS, true)
   const outputCol = findColumn(headers, OUTPUT_HEADERS, true)
+  const cacheReadCol = findColumn(headers, CACHE_READ_HEADERS, true)
+  const cacheWriteCol = findColumn(headers, CACHE_WRITE_HEADERS, true)
   const creditCol = findColumn(headers, CREDIT_HEADERS, true)
   if (modelCol < 0) return { ...plan, error: 'noModelColumn' }
-  if (inputCol < 0 && outputCol < 0 && creditCol < 0) return { ...plan, error: 'noPriceColumn' }
+  if (inputCol < 0 && outputCol < 0 && cacheReadCol < 0 && cacheWriteCol < 0 && creditCol < 0) {
+    return { ...plan, error: 'noPriceColumn' }
+  }
 
   const byId = new Map(models.map(model => [model.model_id, model]))
   const seen = new Set<string>()
@@ -126,8 +138,13 @@ export function buildPricePlan(
     if (seen.has(modelId)) plan.duplicates += 1
     seen.add(modelId)
 
-    const parsed: Record<'input' | 'output' | 'credit', PriceCell | null> = { input: null, output: null, credit: null }
-    for (const [side, column] of [['input', inputCol], ['output', outputCol], ['credit', creditCol]] as const) {
+    const parsed: Record<'input' | 'output' | 'cacheRead' | 'cacheWrite' | 'credit', PriceCell | null> = {
+      input: null, output: null, cacheRead: null, cacheWrite: null, credit: null,
+    }
+    for (const [side, column] of [
+      ['input', inputCol], ['output', outputCol], ['cacheRead', cacheReadCol],
+      ['cacheWrite', cacheWriteCol], ['credit', creditCol],
+    ] as const) {
       if (column < 0) {
         parsed[side] = { state: 'keep' }
         continue
@@ -153,18 +170,24 @@ export function buildPricePlan(
     }
     // 一行里任何一侧读不出来就整行跳过：只写一半的价格会造出"只填一侧＝整单不估算"的模型，
     // 那种行在成本列里显示 —，用户看不出是导入失败还是本来就没定价。
-    if (parsed.input === null || parsed.output === null || parsed.credit === null) continue
+    if (parsed.input === null || parsed.output === null || parsed.cacheRead === null
+      || parsed.cacheWrite === null || parsed.credit === null) continue
 
     const row: PricePlanRow = {
       modelId,
       input: parsed.input,
       output: parsed.output,
+      cacheRead: parsed.cacheRead,
+      cacheWrite: parsed.cacheWrite,
       credit: parsed.credit,
       currentInput: model.input_price,
       currentOutput: model.output_price,
+      currentCacheRead: model.cache_read_price,
+      currentCacheWrite: model.cache_write_price,
       currentCredit: model.credit_price,
     }
-    if (row.input.state === 'keep' && row.output.state === 'keep' && row.credit.state === 'keep') {
+    if (row.input.state === 'keep' && row.output.state === 'keep' && row.cacheRead.state === 'keep'
+      && row.cacheWrite.state === 'keep' && row.credit.state === 'keep') {
       plan.unchanged += 1
       continue
     }
@@ -173,6 +196,8 @@ export function buildPricePlan(
     if (
       sameAsCurrent(row.input, model.input_price) &&
       sameAsCurrent(row.output, model.output_price) &&
+      sameAsCurrent(row.cacheRead, model.cache_read_price) &&
+      sameAsCurrent(row.cacheWrite, model.cache_write_price) &&
       sameAsCurrent(row.credit, model.credit_price)
     ) {
       plan.same += 1
@@ -191,6 +216,8 @@ export function pricePlanPayload(rows: PricePlanRow[]) {
     const item: Record<string, unknown> = { model_id: row.modelId }
     if (row.input.state !== 'keep') item.input_price = row.input.state === 'clear' ? null : row.input.value
     if (row.output.state !== 'keep') item.output_price = row.output.state === 'clear' ? null : row.output.value
+    if (row.cacheRead.state !== 'keep') item.cache_read_price = row.cacheRead.state === 'clear' ? null : row.cacheRead.value
+    if (row.cacheWrite.state !== 'keep') item.cache_write_price = row.cacheWrite.state === 'clear' ? null : row.cacheWrite.value
     if (row.credit.state !== 'keep') item.credit_price = row.credit.state === 'clear' ? null : row.credit.value
     return item
   })
