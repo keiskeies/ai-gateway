@@ -298,6 +298,8 @@ export interface PlatformRow {
   name: string
   type?: string
   platform_type?: string
+  /** 上游目录键：同 type + base_url 的账号共享同一份模型目录 */
+  catalog_key?: string | null
 }
 
 export interface RouteRow {

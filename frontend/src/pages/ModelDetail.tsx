@@ -26,12 +26,14 @@ import {
   createRoute,
   deleteBackend,
   deleteProxy,
+  fetchRemoteModels,
   getProxy,
   getProxyHistoryImpact,
   getProxyStats,
   getSettings,
   listApiKeys,
   listBackends,
+  listModels,
   listPlatforms,
   updateBackend,
   updateProxy,
@@ -78,6 +80,18 @@ interface RouteInfo {
 interface ProxyDetailResponse {
   proxy: ProxyRow
   routes: RouteInfo[]
+}
+
+// 目录行：同 type + base_url 的账号共享 catalog_key，按它过滤才能看到兄弟账号同步的模型
+interface CatalogModelRow {
+  id: string
+  platform_id: string
+  catalog_key?: string | null
+  model_id: string
+}
+
+interface RemoteModel {
+  id: string
 }
 
 interface BackendDraft {
@@ -221,6 +235,25 @@ export default function ModelDetail() {
     staleTime: 60_000,
   })
 
+  // 目录行一次取全，按平台的 catalog_key 过滤；不给每个平台各发一次请求
+  const catalogQuery = useQuery({
+    queryKey: ['models'],
+    queryFn: async (): Promise<CatalogModelRow[]> => listModels() as Promise<CatalogModelRow[]>,
+    staleTime: 60_000,
+  })
+
+  // 远端列表只在选中平台时探测一次。上游失败不能挡住手动输入，所以错误只做提示
+  const remoteQuery = useQuery({
+    queryKey: ['backend-remote-models', draft.platform_id],
+    queryFn: async (): Promise<RemoteModel[]> => {
+      const data = await fetchRemoteModels(draft.platform_id) as { models?: RemoteModel[] }
+      return (data?.models ?? []).filter(model => Boolean(model?.id))
+    },
+    enabled: backendModalOpen && Boolean(draft.platform_id),
+    staleTime: 60_000,
+    retry: false,
+  })
+
   const apiKeysQuery = useQuery({
     queryKey: ['api-keys'],
     queryFn: async (): Promise<ApiKeyRow[]> => listApiKeys() as Promise<ApiKeyRow[]>,
@@ -281,11 +314,36 @@ export default function ModelDetail() {
     ))
   }, [detail])
 
+  // 候选三路合并：已同步目录（同 catalog_key）→ 远端探测 → 内置预设。
+  // 预设按平台名匹配，自建平台名（如 agnes1）根本对不上，只靠它会导致候选为空。
   const modelSuggestions = useMemo(() => {
     const platform = platforms.find(item => item.id === draft.platform_id)
     if (!platform) return []
-    return getModelsForPlatform(platform.name).map(model => model.model_id)
-  }, [platforms, draft.platform_id])
+    const catalogIds = (catalogQuery.data ?? [])
+      .filter(row => platform.catalog_key
+        ? row.catalog_key === platform.catalog_key
+        : row.platform_id === platform.id)
+      .map(row => row.model_id)
+    const remoteIds = (remoteQuery.data ?? []).map(model => model.id)
+    const presetIds = getModelsForPlatform(platform.name).map(model => model.model_id)
+    const ids = new Set<string>()
+    for (const modelId of [...catalogIds, ...remoteIds, ...presetIds]) {
+      if (modelId.trim()) ids.add(modelId)
+    }
+    return [...ids].sort((a, b) => a.localeCompare(b))
+  }, [platforms, catalogQuery.data, remoteQuery.data, draft.platform_id])
+
+  const modelHint = !draft.platform_id
+    ? t(locale, 'modelIdNeedsPlatform')
+    : remoteQuery.isFetching
+      ? t(locale, 'connectingPlatform')
+      : remoteQuery.isError
+        ? t(locale, 'remoteModelFetchFailedHint')
+        : catalogQuery.isError
+          ? t(locale, 'catalogFetchFailedHint')
+          : modelSuggestions.length === 0
+            ? t(locale, 'noCatalogModelsHint')
+            : t(locale, 'modelIdHint', String(modelSuggestions.length))
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ['model', id] })
@@ -774,6 +832,7 @@ export default function ModelDetail() {
         title={editingBackend ? t(locale, 'editBackend') : t(locale, 'addBackend')}
         size="lg"
         closeOnClickOutside={false}
+        closeButtonProps={{ 'aria-label': t(locale, 'close') }}
       >
         <div className="console-form-grid">
           <Field label="PLATFORM">
@@ -792,7 +851,9 @@ export default function ModelDetail() {
               data={modelSuggestions}
               value={draft.model_id}
               onChange={value => setDraft(prev => ({ ...prev, model_id: value }))}
-              placeholder={t(locale, 'selectOrTypeModelId')}
+              placeholder={draft.platform_id ? t(locale, 'selectOrTypeModelId') : t(locale, 'selectPlatformFirst')}
+              description={modelHint}
+              disabled={!draft.platform_id}
             />
           </Field>
           <Field label={t(locale, 'weightLabel')}>
@@ -836,6 +897,7 @@ export default function ModelDetail() {
         onClose={() => setDeleteBackendTarget(null)}
         title={t(locale, 'deleteBackendHeading')}
         size="sm"
+        closeButtonProps={{ 'aria-label': t(locale, 'close') }}
       >
         <div className="console-note warn">{t(locale, 'deleteBackendWarning')}</div>
         <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
@@ -849,6 +911,7 @@ export default function ModelDetail() {
         onClose={() => setDeleteModelOpen(false)}
         title={t(locale, 'deleteVirtualModel')}
         size="sm"
+        closeButtonProps={{ 'aria-label': t(locale, 'close') }}
       >
         <div className="console-note warn">
           {boundKeys.length > 0
