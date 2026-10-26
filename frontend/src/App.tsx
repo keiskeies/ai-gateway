@@ -97,6 +97,7 @@ export default function App() {
             <ConsoleShell
               username={auth.username || ''}
               adminPort={auth.admin_port}
+              localConsole={Boolean(auth.local_console)}
               onLoggedOut={() => setAuth({ ...auth, authenticated: false, username: null })}
             />
           </LiveProvider>
@@ -111,7 +112,7 @@ export default function App() {
         <Route path="/keys" element={<ApiKeys />} />
         <Route path="/keys/:id" element={<KeyDetail />} />
         <Route path="/playground" element={<Playground />} />
-        <Route path="/clients" element={<Clients />} />
+        <Route path="/clients" element={auth.local_console ? <Clients /> : <Navigate to="/traffic" replace />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/platforms" element={<Navigate to="/providers" replace />} />
         <Route path="/proxies" element={<Navigate to="/models" replace />} />

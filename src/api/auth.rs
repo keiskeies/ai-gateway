@@ -286,6 +286,7 @@ pub async fn status(
         authenticated: user.is_some(),
         username: user.map(|u| u.username),
         admin_port: config.read().server.admin_port,
+        local_console: crate::api::local::is_local_console(&req),
     })))
 }
 

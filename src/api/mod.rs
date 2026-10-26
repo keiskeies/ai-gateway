@@ -8,6 +8,7 @@ pub mod stats;
 pub mod settings;
 pub mod api_key;
 pub mod auth;
+pub mod local;
 pub mod config_transfer;
 pub mod events;
 pub mod client_config;
@@ -118,14 +119,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/config/export", web::get().to(config_transfer::export))
                 .route("/config/import/plan", web::post().to(config_transfer::plan))
                 .route("/config/import", web::post().to(config_transfer::apply))
-                // 客户端接入：检测 / 预览 / 应用 / 撤销 / 恢复备份
-                .route("/clients", web::get().to(client_config::list))
-                    .route("/clients/extras-spec", web::get().to(client_config::extras_spec))
-                .route("/clients/{id}/preview", web::post().to(client_config::preview))
-                .route("/clients/{id}/apply", web::post().to(client_config::apply))
-                .route("/clients/{id}/restore", web::post().to(client_config::restore))
-                .route("/clients/{id}/restore-backup", web::post().to(client_config::restore_backup))
-                    .route("/clients/{id}/config", web::get().to(client_config::read_config))
-                    .route("/clients/{id}/config", web::put().to(client_config::write_config))
+                // 客户端接入：只允许本机控制台；远程/反向代理直接 403
+                .service(
+                    web::scope("/clients")
+                        .wrap(actix_web::middleware::from_fn(local::require_local_console))
+                        .route("", web::get().to(client_config::list))
+                        .route("/extras-spec", web::get().to(client_config::extras_spec))
+                        .route("/{id}/preview", web::post().to(client_config::preview))
+                        .route("/{id}/apply", web::post().to(client_config::apply))
+                        .route("/{id}/restore", web::post().to(client_config::restore))
+                        .route("/{id}/restore-backup", web::post().to(client_config::restore_backup))
+                        .route("/{id}/config", web::get().to(client_config::read_config))
+                        .route("/{id}/config", web::put().to(client_config::write_config)),
+                )
         );
 }

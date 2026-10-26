@@ -36,10 +36,12 @@ const APP_VERSION = `v${__APP_VERSION__}`
 export function ConsoleShell({
   username,
   adminPort,
+  localConsole,
   onLoggedOut,
 }: {
   username: string
   adminPort: number
+  localConsole: boolean
   onLoggedOut: () => void
 }) {
   const navigate = useNavigate()
@@ -52,9 +54,14 @@ export function ConsoleShell({
   const [docOpen, { open: openDoc, close: closeDoc }] = useDisclosure(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
 
-  const activeGroup = NAV_GROUPS.find(group =>
+  const visibleGroups = localConsole
+    ? NAV_GROUPS
+    : NAV_GROUPS
+        .map(group => ({ ...group, items: group.items.filter(item => item.path !== '/clients') }))
+        .filter(group => group.items.length > 0)
+  const activeGroup = visibleGroups.find(group =>
     group.items.some(item => isNavItemActive(location.pathname, item.path)),
-  ) || NAV_GROUPS[0]
+  ) || visibleGroups[0]
   const activeItem = activeGroup.items.find(item =>
     isNavItemActive(location.pathname, item.path),
   ) || activeGroup.items[0]
@@ -204,7 +211,7 @@ export function ConsoleShell({
           </div>
         </div>
         <nav className="console-nav" aria-label={t(locale, 'navMain')}>
-          {NAV_GROUPS.map(group => (
+          {visibleGroups.map(group => (
             <div className="console-nav-group" key={group.label}>
               <div className="console-nav-label">{t(locale, group.label)}</div>
               {group.items.map(item => {
@@ -242,7 +249,7 @@ export function ConsoleShell({
       </AppShell.Main>
 
       <HelpModal opened={docOpen} onClose={closeDoc} />
-      <CommandPalette opened={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <CommandPalette opened={paletteOpen} onClose={() => setPaletteOpen(false)} localConsole={localConsole} />
     </AppShell>
   )
 }

@@ -46,6 +46,8 @@ export interface AuthStatus {
   authenticated: boolean
   username: string | null
   admin_port: number
+  /** 当前请求是否来自本机控制台；客户端接入只有本机可见 */
+  local_console?: boolean
 }
 
 // Fetch auth status (public) to discover the configured port on startup

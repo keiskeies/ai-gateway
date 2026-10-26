@@ -48,6 +48,9 @@ pub struct AuthStatusResponse {
     pub username: Option<String>,
     /// 公开返回监听端口，供 Tauri 在未登录时也能发现后端
     pub admin_port: u16,
+    /// 当前请求是否来自本机控制台：回环 peer + Host 为本机 + 无反向代理转发头。
+    /// 客户端接入会改写网关所在机器的本地配置文件，只有这一种访问方式才允许。
+    pub local_console: bool,
 }
 
 #[derive(Debug, Serialize)]

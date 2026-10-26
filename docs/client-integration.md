@@ -136,8 +136,8 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 
 ## 4. 验证
 
-- `cargo test`：125 个 lib 测试（含六适配器、服务层 Key 生命周期、V22 迁移）。
-- `python -m pytest e2e -q`：26 条（客户端接入 1 条：展开即算差异且不含密钥、裸 `env.*` 键名不出现、数值键写成 JSON 数字、应用后权限/MCP 保留、备份存在、撤销后 Key 停用、直接编辑拒绝非法 JSON 且不动文件、排版对齐探针、axe 0 违规；截图留在 `.dsh-tmp/clients/`）。
+- `cargo test`：154 个 lib 测试（含六适配器、服务层 Key 生命周期、V22 迁移、本机控制台判定）。
+- `python -m pytest e2e -q`：30 条（客户端接入 1 条：展开即算差异且不含密钥、裸 `env.*` 键名不出现、数值键写成 JSON 数字、应用后权限/MCP 保留、备份存在、撤销后 Key 停用、直接编辑拒绝非法 JSON 且不动文件、排版对齐探针、axe 0 违规；截图留在 `.dsh-tmp/clients/`）。
 - a11y/键盘矩阵已加入 `/clients`，明暗两套都通过。
 
 ---
@@ -151,3 +151,16 @@ cc-switch 的 Claude 面板上有一排字段，按"最终写到哪"分成三类
 5. **旧凭据恢复**：撤销只回滚非敏感字段；旧 token 需要整份备份恢复。若要做到原地恢复旧 token，需要加密保存 before 值或把备份做成可选择的版本。
 6. **客户端检测**：以配置文件是否存在为准；没有检查 CLI 是否安装、版本是否支持对应 wire API。
 7. **备份不在整库快照里**：`data/client-backups` 是独立文件，数据库备份/还原不包含它。
+
+---
+
+## 6. 访问边界（本机控制台）
+
+客户端接入改写的是**网关所在机器**的配置文件，所以只在“本机控制台”开放：
+
+- **判定**：TCP peer 是回环地址 + `Host` 为 `127.0.0.1` / `localhost` / `::1` + 没有 `Forwarded` / `X-Forwarded-*` / `X-Real-IP`。
+- Tauri 桌面端、`http://127.0.0.1:1994`、`http://localhost:1994` 满足；局域网 IP、远程域名、nginx 反向代理不满足。
+- **前端**：`/api/auth/status` 返回 `local_console`，侧栏与 ⌘K 面板隐藏“客户端接入”，直接访问 `/clients` 会跳回流量页。
+- **后端**：`/api/clients/*` 外挂 `require_local_console` 中间件，远程即使带有效管理员会话也返回 403；不依赖前端藏菜单。
+- **nginx 要求**：设置 `proxy_set_header Host $host;`，并带 `X-Forwarded-For` 或 `X-Real-IP`（任一即可被识别为代理）。如果代理把 Host 保留成 127.0.0.1 且不带任何转发头，会被误判为本机；这是部署约束。
+- 本机通过自定义域名（hosts 映射到 127.0.0.1）访问会被判定为非本机；用 127.0.0.1 / localhost 访问即可。

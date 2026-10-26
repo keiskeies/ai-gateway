@@ -6,15 +6,20 @@ import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
 import { NAV_GROUPS } from './nav'
 
-export function CommandPalette({ opened, onClose }: { opened: boolean; onClose: () => void }) {
+export function CommandPalette({ opened, onClose, localConsole }: { opened: boolean; onClose: () => void; localConsole: boolean }) {
   const navigate = useNavigate()
   const { locale } = useAppContext()
   const [query, setQuery] = useState('')
 
-  const items = NAV_GROUPS.flatMap(group => group.items)
+  const groups = localConsole
+    ? NAV_GROUPS
+    : NAV_GROUPS
+        .map(group => ({ ...group, items: group.items.filter(item => item.path !== '/clients') }))
+        .filter(group => group.items.length > 0)
+  const items = groups.flatMap(group => group.items)
   const filtered = items.filter(item => {
     const label = t(locale, item.label).toLowerCase()
-    const group = t(locale, NAV_GROUPS.find(g => g.items.includes(item))?.label || 'navRun').toLowerCase()
+    const group = t(locale, groups.find(g => g.items.includes(item))?.label || 'navRun').toLowerCase()
     return `${label} ${group} ${item.path}`.includes(query.trim().toLowerCase())
   })
 
