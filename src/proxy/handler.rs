@@ -923,7 +923,7 @@ async fn handle_request(
                             ));
                         }
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), start, pricing_at, capture));
+                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, start, pricing_at, capture));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
@@ -1212,13 +1212,243 @@ fn build_forward_request(
     (body, url)
 }
 
+/// 同协议透传的收尾看护。
+///
+/// 为什么需要：同协议流是**逐字节透传**上游 SSE，不像跨协议转换器和私有协议归一化器那样
+/// 会补发收尾帧。上游如果在生成中断流（我们实测 600 条流式样本里有 2 条），客户端收到的
+/// 是一条既没有 `finish_reason` 也没有 `[DONE]` 的事件流，OpenAI SDK 侧表现为
+/// `Stream ended without finish_reason` —— 报错信息指向网关，实际根因在上游。
+///
+/// 这里只做旁路观察 + 在流结束时补帧，不改动正常流的任何一个字节。
+#[derive(Default)]
+struct PassthroughTracker {
+    /// 客户端是 Anthropic 协议（/v1/messages）：收尾语义换成 message_delta + message_stop
+    anthropic: bool,
+    /// 出现过非空 finish_reason（OpenAI）或 stop_reason（Anthropic）
+    saw_finish_reason: bool,
+    /// 见过上游的收尾哨兵：OpenAI 的 `[DONE]` / Anthropic 的 `message_stop`
+    saw_done: bool,
+    /// 出现过 tool_calls / tool_use：决定补发的 finish_reason 写 tool_calls 还是 stop
+    saw_tool_call: bool,
+    /// 见过的 usage，收尾帧要带回去（Anthropic 的 message_delta 必须带 output_tokens）
+    usage: (i64, i64, i64, i64),
+    /// 从首帧记下的 id/model/created，补发的 chunk 沿用它们以免客户端对不上
+    chunk_id: Option<String>,
+    chunk_model: Option<String>,
+    chunk_created: Option<i64>,
+    /// 已经补过收尾帧（保证只补一次）
+    backfilled: bool,
+}
+
+impl PassthroughTracker {
+    fn new(anthropic: bool) -> Self {
+        Self { anthropic, ..Default::default() }
+    }
+
+    /// 观察一行 `data:` 的 payload（调用方已剥掉前缀并 trim）
+    fn observe(&mut self, payload: &str, usage: Option<(i64, i64, i64, i64)>) {
+        if let Some(u) = usage {
+            // usage 是累计值，取最大即可（与 StreamStatCtx::absorb_usage 同口径）
+            self.usage.0 = self.usage.0.max(u.0);
+            self.usage.1 = self.usage.1.max(u.1);
+            self.usage.2 = self.usage.2.max(u.2);
+            self.usage.3 = self.usage.3.max(u.3);
+        }
+        if payload == "[DONE]" {
+            self.saw_done = true;
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        if self.anthropic {
+            match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "message_stop" => self.saw_done = true,
+                "message_delta" => {
+                    if let Some(sr) = v.pointer("/delta/stop_reason").and_then(|s| s.as_str()) {
+                        self.saw_finish_reason = true;
+                        if sr == "tool_use" {
+                            self.saw_tool_call = true;
+                        }
+                    }
+                }
+                "content_block_start" => {
+                    if v.pointer("/content_block/type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        self.saw_tool_call = true;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        // OpenAI 形态
+        if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
+            for choice in choices {
+                if let Some(fr) = choice.get("finish_reason").and_then(|f| f.as_str()) {
+                    self.saw_finish_reason = true;
+                    if fr == "tool_calls" || fr == "function_call" {
+                        self.saw_tool_call = true;
+                    }
+                }
+                if choice.pointer("/delta/tool_calls").and_then(|t| t.as_array()).is_some() {
+                    self.saw_tool_call = true;
+                }
+            }
+        }
+        if self.chunk_id.is_none() {
+            if let Some(id) = v.get("id").and_then(|s| s.as_str()) {
+                self.chunk_id = Some(id.to_string());
+            }
+        }
+        if self.chunk_model.is_none() {
+            if let Some(m) = v.get("model").and_then(|s| s.as_str()) {
+                self.chunk_model = Some(m.to_string());
+            }
+        }
+        if self.chunk_created.is_none() {
+            self.chunk_created = v.get("created").and_then(|c| c.as_i64());
+        }
+    }
+
+    /// 补发的 finish_reason：出现 tool_calls 就写 tool_calls（否则客户端不会执行工具，
+    /// 与 private_sse 的 effective_finish_reason 同口径），其余一律 stop。
+    fn finish_reason(&self) -> &'static str {
+        if self.saw_tool_call { "tool_calls" } else { "stop" }
+    }
+
+    /// 是否需要补收尾帧
+    fn needs_backfill(&self) -> bool {
+        !self.saw_done || !self.saw_finish_reason
+    }
+
+    /// 生成收尾帧（只补缺失的那部分）。
+    ///
+    /// 顺序：OpenAI 客户端是 finish_reason 帧 → `[DONE]`；Anthropic 客户端是
+    /// message_delta（stop_reason + output_tokens）→ message_stop。
+    fn tail(&self, with_ids: bool) -> String {
+        let mut out = String::new();
+        if self.anthropic {
+            // message_delta 必须在 message_stop 之前；上游若已发过 stop_reason 就不重复
+            if !self.saw_finish_reason {
+                let evt = serde_json::json!({
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn", "stop_sequence": serde_json::Value::Null},
+                    "usage": {"output_tokens": self.usage.1}
+                });
+                out.push_str(&format!("event: message_delta\ndata: {evt}\n\n"));
+            }
+            if !self.saw_done {
+                let evt = serde_json::json!({"type": "message_stop"});
+                out.push_str(&format!("event: message_stop\ndata: {evt}\n\n"));
+            }
+            return out;
+        }
+        if !self.saw_finish_reason {
+            let mut chunk = serde_json::json!({
+                "id": self.chunk_id.clone().unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())),
+                "object": "chat.completion.chunk",
+                "created": self.chunk_created.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": self.finish_reason(),
+                }],
+            });
+            if with_ids {
+                if let Some(m) = &self.chunk_model {
+                    chunk["model"] = serde_json::json!(m);
+                }
+            }
+            out.push_str(&format!("data: {chunk}\n\n"));
+        }
+        if !self.saw_done {
+            out.push_str("data: [DONE]\n\n");
+        }
+        out
+    }
+
+    /// 流结束时的收尾帧：只在缺收尾信息且没补过时产出
+    fn backfill(&mut self) -> String {
+        if self.backfilled || !self.needs_backfill() {
+            return String::new();
+        }
+        self.backfilled = true;
+        self.tail(true)
+    }
+
+    /// 这一行是不是上游的终止哨兵（OpenAI 的 `[DONE]` / Anthropic 的 message_stop）。
+    ///
+    /// 判它是因为两个协议的客户端都在读到哨兵的那一刻收尾：
+    /// OpenAI SDK 遇到 `[DONE]` 直接 break，Anthropic SDK 读到 message_stop 就返回累积结果。
+    /// 补发的终止帧必须落在哨兵**之前**，否则永远读不到。
+    fn is_terminal_sentinel(&self, payload: &str) -> bool {
+        if self.anthropic {
+            if !payload.starts_with('{') {
+                return false;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                return false;
+            };
+            return v.get("type").and_then(|t| t.as_str()) == Some("message_stop");
+        }
+        payload == "[DONE]"
+    }
+
+    /// 只补「终止帧」本身，不含 `[DONE]` / `message_stop`。
+    ///
+    /// 用于上游已经发了 `[DONE]` 但没发 finish_reason 的情形：那一行 `[DONE]`
+    /// 随后会原样转发，所以这里不能重复发哨兵，只需要把缺的终止帧插在它前面。
+    fn finish_only(&self) -> String {
+        if self.saw_finish_reason {
+            return String::new();
+        }
+        if self.anthropic {
+            // message_stop 由上游自己给，这里只补 message_delta
+            let evt = serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": serde_json::Value::Null},
+                "usage": {"output_tokens": self.usage.1}
+            });
+            return format!("event: message_delta\ndata: {evt}\n\n");
+        }
+        let mut chunk = serde_json::json!({
+            "id": self.chunk_id.clone().unwrap_or_else(|| format!("chatcmpl-{}", uuid::Uuid::new_v4().simple())),
+            "object": "chat.completion.chunk",
+            "created": self.chunk_created.unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": self.finish_reason(),
+            }],
+        });
+        if let Some(m) = &self.chunk_model {
+            chunk["model"] = serde_json::json!(m);
+        }
+        format!("data: {chunk}\n\n")
+    }
+
+    /// 错误帧之后的收尾帧：无论 `backfilled` 状态如何都产出一份，
+    /// 保证「错误帧 → 终止帧 → [DONE]」序列完整（否则客户端照样报
+    /// `Stream ended without finish_reason`，错误帧在这条链路上反而不可见）。
+    fn error_tail(&self) -> String {
+        self.tail(true)
+    }
+}
+
 /// 流式响应透传 body：透传 SSE 给客户端，同时旁路解析流内 usage 累积 token。
 /// 统计恰好记录一次：流正常结束、上游出错、或客户端断开（body drop）时都触发。
 struct StreamPassthroughBody {
     inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>,
-    buffer: String,
+    /// 未凑满一行的残留字节。必须是字节缓冲而不是 String：
+    /// 一个 chunk 可能把一个多字节字符切成两半，用 String::from_utf8_lossy
+    /// 再做拼接会把汉字写坏，而这条路径是原样透传的。
+    buffer: Vec<u8>,
     stats: Arc<StreamStatCtx>,
     capture: Option<StreamCapture>,
+    /// 同协议透传的收尾看护：补齐上游没给的 finish_reason / [DONE]
+    tracker: PassthroughTracker,
+    /// 上游已结束（EOF 之后不再 poll inner，避免依赖流的 fuse 行为）
+    finished: bool,
 }
 
 /// body 被 drop 时兜底记录统计（覆盖客户端中途断开的情况），record_once 用 CAS 保证恰好一次
@@ -1340,54 +1570,160 @@ impl Stream for StreamPassthroughBody {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         use std::sync::atomic::Ordering;
-        match self.inner.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(None) => {
-                // 流正常结束：把 buffer 中残留的半行也解析一次（最后一个 chunk 可能无换行）
-                if !self.buffer.is_empty() {
-                    let payload = self.buffer.trim().strip_prefix("data:").map(|s| s.trim());
-                    if let Some(p) = payload {
-                        if let Some((pi, po, cr, cw)) = extract_stream_usage(p) {
-                            self.stats.absorb_usage(pi, po, cr, cw);
+        // 上游异常断开时补发的错误帧只发一次，发完还要继续走到 EOF 补收尾帧
+        loop {
+            if self.finished {
+                return Poll::Ready(None);
+            }
+            match self.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    self.finished = true;
+                    // 流正常结束：把 buffer 中残留的半行（最后一个 chunk 可能无换行）也处理掉
+                    let rest = std::mem::take(&mut self.buffer);
+                    let mut payload = None;
+                    if !rest.is_empty() {
+                        let text = String::from_utf8_lossy(&rest).into_owned();
+                        payload = text.trim().strip_prefix("data:").map(|s| s.trim().to_string());
+                        if let Some(p) = &payload {
+                            let usage = extract_stream_usage(p);
+                            if let Some((pi, po, cr, cw)) = usage {
+                                self.stats.absorb_usage(pi, po, cr, cw);
+                            }
+                            self.tracker.observe(p, usage);
                         }
                     }
-                }
-                if let Some(capture) = &mut self.capture {
-                    capture.flush();
-                }
-                self.stats.record_once();
-                Poll::Ready(None)
-            }
-            Poll::Ready(Some(Ok(bytes))) => {
-                // 收到上游第一个数据 chunk：记录首字时长（CAS 幂等）
-                self.stats.mark_first_token();
-                if let Some(capture) = &mut self.capture {
-                    capture.push(&bytes);
-                }
-                self.buffer.push_str(&String::from_utf8_lossy(&bytes));
-                // 逐行解析已完整的 SSE 行，避免把半截事件当作独立事件
-                while let Some(nl) = self.buffer.find('\n') {
-                    let line: String = self.buffer.drain(..=nl).collect();
-                    let payload = match line.trim().strip_prefix("data:") {
-                        Some(rest) => rest.trim(),
-                        None => continue,
+                    // 残留那一行本身就是终止哨兵（`[DONE]` / message_stop）时，
+                    // 补的只能是它前面缺的终止帧——哨兵由这一行自己充当，不能再补一份。
+                    let rest_is_sentinel = payload
+                        .as_deref()
+                        .map(|p| self.tracker.is_terminal_sentinel(p))
+                        .unwrap_or(false);
+                    let add = if rest_is_sentinel {
+                        self.tracker.finish_only()
+                    } else {
+                        self.tracker.backfill()
                     };
-                    if let Some((p, c, cr, cw)) = extract_stream_usage(payload) {
-                        self.stats.absorb_usage(p, c, cr, cw);
+                    if !add.is_empty() {
+                        tracing::warn!(
+                            "上游流未收尾即结束，已补发收尾帧（protocol={} tool_call={} sentinel={}）",
+                            if self.tracker.anthropic { "anthropic" } else { "openai" },
+                            self.tracker.saw_tool_call,
+                            rest_is_sentinel
+                        );
+                        // 这种流实际是断掉的，统计上如实记为失败
+                        self.stats.failed.store(true, Ordering::SeqCst);
+                        if let Some(capture) = &mut self.capture {
+                            capture.push(add.as_bytes());
+                        }
                     }
+                    // 顺序：终止帧必须在哨兵之前，客户端读到哨兵就收尾了
+                    let mut out = Vec::with_capacity(rest.len() + add.len());
+                    if rest_is_sentinel {
+                        out.extend_from_slice(add.as_bytes());
+                        out.extend_from_slice(&rest);
+                    } else {
+                        out.extend_from_slice(&rest);
+                        out.extend_from_slice(add.as_bytes());
+                    }
+                    if let Some(capture) = &mut self.capture {
+                        capture.flush();
+                    }
+                    self.stats.record_once();
+                    if out.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
                 }
-                Poll::Ready(Some(Ok(bytes)))
-            }
-            Poll::Ready(Some(Err(_))) => {
-                // 上游流错误：标记失败、记录统计，并透传错误
-                self.stats.failed.store(true, Ordering::SeqCst);
-                if let Some(capture) = &mut self.capture {
-                    capture.flush();
+                Poll::Ready(Some(Ok(bytes))) => {
+                    // 收到上游第一个数据 chunk：记录首字时长（CAS 幂等）
+                    self.stats.mark_first_token();
+                    if let Some(capture) = &mut self.capture {
+                        capture.push(&bytes);
+                    }
+                    self.buffer.extend_from_slice(&bytes);
+                    // 逐行解析已完整的 SSE 行：
+                    // 完整行立即转发（不攒到 EOF，上游若在 [DONE] 之后保持连接也不会卡住客户端），
+                    // 不完整的半行留在 buffer 里等下一个 chunk。
+                    // 按行转发是必须的：只有落在事件边界上，才有机会把补发的终止帧
+                    // 插在 `[DONE]` 之前（否则 `[DONE]` 被 TCP 切成两段时会漏判）。
+                    let mut out = Vec::with_capacity(bytes.len());
+                    while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
+                        let line: Vec<u8> = self.buffer.drain(..=pos).collect();
+                        let text = String::from_utf8_lossy(&line).into_owned();
+                        let payload = match text.trim().strip_prefix("data:") {
+                            Some(rest) => rest.trim().to_string(),
+                            None => {
+                                out.extend_from_slice(&line);
+                                continue;
+                            }
+                        };
+                        let usage = extract_stream_usage(&payload);
+                        if let Some((p, c, cr, cw)) = usage {
+                            self.stats.absorb_usage(p, c, cr, cw);
+                        }
+                        // 补帧必须在哨兵之前：OpenAI SDK 读到 `[DONE]`、Anthropic SDK
+                        // 读到 message_stop 都会立刻收尾，补在它们后面的终止帧永远读不到，
+                        // 客户端照样报 Stream ended without finish_reason。
+                        if self.tracker.is_terminal_sentinel(&payload) && !self.tracker.saw_finish_reason {
+                            self.tracker.observe(&payload, usage);
+                            let chunk = self.tracker.finish_only();
+                            tracing::warn!(
+                                "上游流给了终止哨兵却没给 {}，已在哨兵之前补发终止帧",
+                                if self.tracker.anthropic { "stop_reason" } else { "finish_reason" }
+                            );
+                            self.stats.failed.store(true, Ordering::SeqCst);
+                            out.extend_from_slice(chunk.as_bytes());
+                            if let Some(capture) = &mut self.capture {
+                                capture.push(chunk.as_bytes());
+                            }
+                            self.tracker.backfilled = true;
+                            out.extend_from_slice(&line);
+                            continue;
+                        }
+                        self.tracker.observe(&payload, usage);
+                        out.extend_from_slice(&line);
+                    }
+                    if out.is_empty() {
+                        // 整个 chunk 都是半行：不转发，继续拉上游
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
                 }
-                self.stats.record_once();
-                Poll::Ready(Some(Err(actix_web::error::ErrorInternalServerError(
-                    "upstream stream error",
-                ))))
+                Poll::Ready(Some(Err(e))) => {
+                    // 上游流错误：SSE 已经开始，改不了 HTTP 状态码，
+                    // 直接返回错误会把事件流从中间截断（客户端只看到半个 chunk）。
+                    // 正确做法是发一个 error 帧 + 补收尾帧，让客户端拿到明确原因。
+                    tracing::warn!("同协议流式上游错误: {}", e);
+                    self.stats.failed.store(true, Ordering::SeqCst);
+                    let mut out = String::new();
+                    if !self.tracker.backfilled {
+                        if self.tracker.anthropic {
+                            let evt = serde_json::json!({
+                                "type": "error",
+                                "error": {"type": "api_error", "message": "upstream stream error"}
+                            });
+                            out.push_str(&format!("event: error\ndata: {evt}\n\n"));
+                        } else {
+                            let evt = serde_json::json!({
+                                "error": {"message": "upstream stream error", "type": "upstream_error"}
+                            });
+                            out.push_str(&format!("data: {evt}\n\n"));
+                        }
+                        self.tracker.backfilled = true;
+                        out.push_str(&self.tracker.error_tail());
+                    }
+                    if let Some(capture) = &mut self.capture {
+                        capture.push(out.as_bytes());
+                        capture.flush();
+                    }
+                    self.stats.record_once();
+                    self.finished = true;
+                    if out.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
+                }
             }
         }
     }
@@ -1400,6 +1736,8 @@ fn handle_stream(
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
     pricing: Option<crate::models::pricing::Pricing>,
+    // 客户端协议与上游相同，据此决定补发收尾帧的形态
+    client_anthropic: bool,
     start: Instant,
     pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
@@ -1421,15 +1759,19 @@ fn handle_stream(
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
     let body = StreamPassthroughBody {
         inner: Box::pin(resp.bytes_stream()),
-        buffer: String::new(),
+        buffer: Vec::new(),
         stats,
         capture,
+        tracker: PassthroughTracker::new(client_anthropic),
+        finished: false,
     };
 
     HttpResponse::Ok()
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
+        // 反代（nginx）默认会缓冲 text/event-stream，这条头是让它别缓冲
+        .insert_header(("X-Accel-Buffering", "no"))
         .streaming(body)
 }
 
@@ -1535,6 +1877,8 @@ fn handle_stream_convert(
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
+        // 反代（nginx）默认会缓冲 text/event-stream，这条头是让它别缓冲
+        .insert_header(("X-Accel-Buffering", "no"))
         .streaming(body)
 }
 
@@ -1662,18 +2006,21 @@ impl Stream for PrivateStreamBody {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         use std::sync::atomic::Ordering;
         loop {
+            if self.finished {
+                return Poll::Ready(None);
+            }
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
-                    if self.finished {
-                        return Poll::Ready(None);
-                    }
                     self.finished = true;
                     let events = self.normalizer.finish();
                     let mut out = String::new();
                     for event in events {
                         out.push_str(&self.render_event(event));
                     }
+                    // Anthropic 客户端：归一化器只补了 OpenAI 形态的终止 chunk，
+                    // message_delta / message_stop 得由转换器收尾才能发出来
+                    out.push_str(&self.flush_converter());
                     if let Some(capture) = &mut self.capture {
                         capture.flush();
                     }
@@ -1700,16 +2047,38 @@ impl Stream for PrivateStreamBody {
                     return Poll::Ready(Some(Ok(Bytes::from(out))));
                 }
                 Poll::Ready(Some(Err(e))) => {
+                    // 上游流错误：直接返回 Err 会把 SSE 从中间截断，客户端只看到
+                    // 半条事件流（表现为 Stream ended without finish_reason）。
+                    // 改成发错误帧 + 正常收尾，客户端能拿到明确原因。
                     tracing::warn!("私有协议上游流错误: {}", e);
                     self.stats.failed.store(true, Ordering::SeqCst);
+                    self.finished = true;
+                    let mut out = String::new();
+                    if let Some(mut converter) = self.converter.take() {
+                        // Anthropic 客户端：转换器负责 error 事件 + message_delta + message_stop
+                        out.push_str(&converter.emit_error("upstream stream error"));
+                        let (pi, po, cr, cw) = converter.usage();
+                        self.stats.absorb_usage(pi, po, cr, cw);
+                    } else {
+                        let payload = serde_json::json!({
+                            "error": {"message": "upstream stream error", "type": "upstream_error"}
+                        });
+                        out.push_str(&format!("data: {payload}\n\n"));
+                        // 归一化器补一个带 finish_reason 的终止 chunk，最后是 [DONE]
+                        for event in self.normalizer.finish() {
+                            out.push_str(&self.render_event(event));
+                        }
+                        out.push_str("data: [DONE]\n\n");
+                    }
                     if let Some(capture) = &mut self.capture {
+                        capture.push(out.as_bytes());
                         capture.flush();
                     }
                     self.stats.record_once();
-                    self.finished = true;
-                    return Poll::Ready(Some(Err(actix_web::error::ErrorInternalServerError(
-                        "upstream stream error",
-                    ))));
+                    if out.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
                 }
             }
         }
@@ -1717,6 +2086,20 @@ impl Stream for PrivateStreamBody {
 }
 
 impl PrivateStreamBody {
+    /// 收尾转换器（仅 Anthropic 客户端会走这条）。
+    /// 归一化器发出的终止 chunk 会让转换器进入 finished，此处 take 掉并补发剩余事件。
+    fn flush_converter(&mut self) -> String {
+        match self.converter.take() {
+            Some(mut converter) => {
+                let out = converter.finish();
+                let (pi, po, cr, cw) = converter.usage();
+                self.stats.absorb_usage(pi, po, cr, cw);
+                out
+            }
+            None => String::new(),
+        }
+    }
+
     /// 把一个归一化事件渲染成要发给客户端的字节。
     fn render_event(
         &mut self,
@@ -1804,6 +2187,8 @@ fn handle_private_stream(
         .content_type("text/event-stream")
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
+        // 反代（nginx）默认会缓冲 text/event-stream，这条头是让它别缓冲
+        .insert_header(("X-Accel-Buffering", "no"))
         .streaming(body)
 }
 
@@ -1980,7 +2365,8 @@ fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> Http
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_forward_url, truncate_utf8};
+    use super::{sanitize_forward_url, truncate_utf8, PassthroughTracker};
+    use actix_web::web::Bytes;
 
     #[test]
     fn utf8_truncation_never_splits_a_character() {
@@ -2008,5 +2394,449 @@ mod tests {
             "https://api.example.com/v1?auth=redacted"
         );
         assert_eq!(sanitize_forward_url("not a url", ""), "[invalid url]");
+    }
+
+    // ============ 同协议透传的收尾看护 ============
+
+    /// 喂若干 payload（模拟 `data:` 后面的内容），返回 (tracker, 收尾帧)
+    fn feed(anthropic: bool, payloads: &[&str]) -> (PassthroughTracker, String) {
+        let mut t = PassthroughTracker::new(anthropic);
+        for p in payloads {
+            let usage = super::extract_stream_usage(p);
+            t.observe(p, usage);
+        }
+        let tail = t.backfill();
+        (t, tail)
+    }
+
+    #[test]
+    fn complete_openai_stream_is_passed_through_untouched() {
+        // 上游给了 finish_reason 和 [DONE]：一个字节都不该补，否则是重复帧
+        let (_, tail) = feed(
+            false,
+            &[
+                r#"{"id":"a","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}"#,
+                r#"{"id":"a","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                "[DONE]",
+            ],
+        );
+        assert!(tail.is_empty(), "正常收尾的流不该被补帧，实际补了：{tail}");
+    }
+
+    #[test]
+    fn truncated_openai_stream_gets_finish_reason_and_done() {
+        // 复现实测的那 0.3%：上游生成中途断流，既没 finish_reason 也没 [DONE]
+        let (t, tail) = feed(
+            false,
+            &[
+                r#"{"id":"chatcmpl-1","model":"agnes","created":1700000000,"choices":[{"index":0,"delta":{"content":"半句"},"finish_reason":null}]}"#,
+                r#"{"id":"chatcmpl-1","model":"agnes","created":1700000000,"choices":[{"index":0,"delta":{"content":"话"},"finish_reason":null}]}"#,
+            ],
+        );
+        assert!(t.needs_backfill());
+        let frames: Vec<&str> = tail.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(frames.len(), 2, "应补 finish 帧 + [DONE]，实际：{tail}");
+        let chunk: serde_json::Value =
+            serde_json::from_str(frames[0].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+        // 沿用上游的 id/model/created，客户端才认得出这是同一条响应
+        assert_eq!(chunk["id"], "chatcmpl-1");
+        assert_eq!(chunk["model"], "agnes");
+        assert_eq!(chunk["created"], 1700000000i64);
+        assert_eq!(frames[1], "data: [DONE]");
+    }
+
+    #[test]
+    fn done_without_finish_reason_still_gets_finish_reason() {
+        // 只有 [DONE] 没有 finish_reason：客户端仍会报 Stream ended without finish_reason
+        let (_, tail) = feed(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}"#,
+                "[DONE]",
+            ],
+        );
+        assert!(tail.contains(r#""finish_reason":"stop""#), "实际：{tail}");
+        // [DONE] 已经给过了，不能再补一个
+        assert_eq!(tail.matches("[DONE]").count(), 0, "不该重复补 [DONE]：{tail}");
+    }
+
+    #[test]
+    fn finish_reason_without_done_only_gets_done() {
+        let (_, tail) = feed(
+            false,
+            &[
+                r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":"length"}]}"#,
+            ],
+        );
+        assert_eq!(tail, "data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn truncated_tool_call_stream_reports_tool_calls() {
+        // 断在 tool_calls 中间：补 stop 会让客户端丢掉工具调用，必须补 tool_calls
+        let (_, tail) = feed(
+            false,
+            &[r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":""}}]},"finish_reason":null}]}"#],
+        );
+        assert!(tail.contains(r#""finish_reason":"tool_calls""#), "实际：{tail}");
+    }
+
+    #[test]
+    fn complete_anthropic_stream_is_passed_through_untouched() {
+        let (_, tail) = feed(
+            true,
+            &[
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}"#,
+                r#"{"type":"message_stop"}"#,
+            ],
+        );
+        assert!(tail.is_empty(), "正常收尾的流不该被补帧，实际补了：{tail}");
+    }
+
+    #[test]
+    fn truncated_anthropic_stream_gets_delta_then_stop() {
+        // OpenAI SDK 的 Stream ended without finish_reason 在 Anthropic 侧对应
+        // stopReason 停在 "pending"，靠 message_delta 的 stop_reason 解掉
+        let (_, tail) = feed(
+            true,
+            &[
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":5}}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"半句"}}"#,
+            ],
+        );
+        let delta_at = tail.find("event: message_delta").expect("缺 message_delta");
+        let stop_at = tail.find("event: message_stop").expect("缺 message_stop");
+        assert!(delta_at < stop_at, "message_delta 必须在 message_stop 之前：{tail}");
+        let data: &str = tail
+            .lines()
+            .find(|l| l.starts_with("data: {") && l.contains("message_delta"))
+            .unwrap()
+            .trim_start_matches("data: ");
+        let evt: serde_json::Value = serde_json::from_str(data).unwrap();
+        assert_eq!(evt["delta"]["stop_reason"], "end_turn");
+        assert_eq!(evt["usage"]["output_tokens"], 0);
+    }
+
+    #[test]
+    fn anthropic_tool_use_block_marks_tool_call() {
+        // Anthropic 客户端这条上不写 stop_reason 的值，但 tool_use 出现必须被记住，
+        // 以免将来改成按工具改写时静默丢工具
+        let (t, _) = feed(
+            true,
+            &[r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu1","name":"f"}}"#],
+        );
+        assert!(t.saw_tool_call);
+    }
+
+    #[test]
+    fn backfill_happens_only_once() {
+        let mut t = PassthroughTracker::new(false);
+        t.observe(r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}"#, None);
+        let first = t.backfill();
+        assert!(!first.is_empty());
+        assert!(t.backfill().is_empty(), "第二次不该再补帧");
+    }
+
+    #[test]
+    fn error_tail_is_always_complete_regardless_of_backfilled_flag() {
+        // 上游报错那条路：错误帧之后必须还有完整的终止序列，否则
+        // 客户端只会看到半条流并报 Stream ended without finish_reason
+        let mut t = PassthroughTracker::new(false);
+        t.observe(r#"{"id":"a","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}"#, None);
+        let _ = t.backfill();
+        t.backfilled = true;
+        let tail = t.error_tail();
+        assert!(tail.contains(r#""finish_reason":"stop""#), "实际：{tail}");
+        assert!(tail.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn malformed_payload_is_ignored_not_panicked() {
+        let (t, tail) = feed(false, &["not json", "{broken", ""]);
+        // 没看到任何收尾信息 → 仍然按需要补帧，且不 panic
+        assert!(t.needs_backfill());
+        assert!(tail.contains("data: [DONE]"));
+    }
+
+    // ============ 端到端：真正跑 StreamPassthroughBody 的 poll 循环 ============
+
+    /// 临时库上的 StatsWriter（只为让 body 能构造出来；不校验落库结果）
+    fn test_stats_writer(tag: &str) -> (crate::cache::StatsWriter, std::path::PathBuf) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-db");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join(format!("stream-{tag}-{}.db", uuid::Uuid::new_v4()));
+        let pool = crate::db::init_pool(&path).expect("init test db");
+        (
+            crate::cache::StatsWriter::start(pool, crate::events::EventHub::new()),
+            path,
+        )
+    }
+
+    fn test_stat_base() -> crate::models::stats::RequestStat {
+        crate::models::stats::RequestStat {
+            id: 0,
+            proxy_id: "p".into(),
+            route_id: "r".into(),
+            backend_id: "b".into(),
+            status_code: 200,
+            latency_ms: 0,
+            token_input: None,
+            token_output: None,
+            error_type: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            ttft_ms: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            is_stream: true,
+            api_key_id: None,
+            cost: None,
+            cache_savings: None,
+            request_id: None,
+            replayed_from: None,
+            path: None,
+            credits: None,
+        }
+    }
+
+    /// 用一批假的上游 chunk 跑完整的 body，收集实际发给客户端的字节
+    async fn run_body(
+        tag: &str,
+        anthropic: bool,
+        chunks: Vec<Result<Bytes, reqwest::Error>>,
+    ) -> String {
+        use futures_util::StreamExt;
+        let (writer, path) = test_stats_writer(tag);
+        let stats = std::sync::Arc::new(super::StreamStatCtx::new(
+            test_stat_base(),
+            &writer,
+            std::time::Instant::now(),
+            None,
+            chrono::Local::now(),
+        ));
+        let body = super::StreamPassthroughBody {
+            inner: Box::pin(futures_util::stream::iter(chunks)),
+            buffer: Vec::new(),
+            stats,
+            capture: None,
+            tracker: PassthroughTracker::new(anthropic),
+            finished: false,
+        };
+        let collected: Vec<Result<Bytes, actix_web::Error>> = Box::pin(body).collect().await;
+        let mut out = String::new();
+        for item in collected {
+            out.push_str(&String::from_utf8_lossy(&item.expect("body 不该返回 Err")));
+        }
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+        out
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_truncated_stream_gets_terminal_frames() {
+        // 上游真实形态：内容帧若干，然后连接直接断掉（没有 finish_reason、没有 [DONE]）
+        let out = run_body(
+            "trunc",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"id\":\"chatcmpl-9\",\"model\":\"agnes\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Ok(Bytes::from(
+                    "data: {\"id\":\"chatcmpl-9\",\"model\":\"agnes\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"句\"},\"finish_reason\":null}]}\n\n",
+                )),
+            ],
+        )
+        .await;
+        // 上游两帧原样还在
+        assert_eq!(out.matches("\"content\":\"半\"").count(), 1);
+        assert_eq!(out.matches("\"content\":\"句\"").count(), 1);
+        // 末尾补上了终止序列，客户端不会再报 Stream ended without finish_reason
+        assert!(out.contains(r#""finish_reason":"stop""#), "实际：{out}");
+        assert!(out.trim_end().ends_with("data: [DONE]"), "实际：{out}");
+        assert_eq!(out.matches("data: [DONE]").count(), 1);
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_done_without_finish_reason_gets_frame_before_the_sentinel() {
+        // 上游给了 [DONE] 却没给 finish_reason。
+        // 终止帧必须落在 [DONE] 之前：OpenAI SDK 读到 [DONE] 立刻 break，
+        // 补在它后面的帧永远读不到，客户端照样报 Stream ended without finish_reason。
+        let out = run_body(
+            "doneonly",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半句\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Ok(Bytes::from("data: [DONE]\n\n")),
+            ],
+        )
+        .await;
+        let finish_at = out.find(r#""finish_reason":"stop""#).expect("必须补终止帧");
+        let done_at = out.find("data: [DONE]").expect("[DONE] 必须在");
+        assert!(finish_at < done_at, "终止帧必须在 [DONE] 之前，实际：{out}");
+        assert_eq!(out.matches("data: [DONE]").count(), 1, "哨兵不能被补重复：{out}");
+        assert_eq!(out.matches(r#""finish_reason":"stop""#).count(), 1, "实际：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_done_split_across_chunks_still_gets_terminal_frame() {
+        // `[DONE]` 被 TCP 切成两段：按行转发才能落在事件边界上判断
+        let out = run_body(
+            "split",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\ndata: [DO",
+                )),
+                Ok(Bytes::from("NE]\n\n")),
+            ],
+        )
+        .await;
+        let finish_at = out.find(r#""finish_reason":"stop""#).expect("必须补终止帧");
+        let done_at = out.find("data: [DONE]").expect("[DONE] 必须在");
+        assert!(finish_at < done_at, "实际：{out}");
+        assert_eq!(out.matches("data: [DONE]").count(), 1, "实际：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_multibyte_char_split_across_chunks_is_not_mangled() {
+        // 一个 chunk 可能把一个汉字切成两半。缓冲必须是字节级的：
+        // 用 String::from_utf8_lossy 逐 chunk 拼接会把汉字写成 U+FFFD。
+        let full = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半句话\"},\"finish_reason\":null}]}\n\n";
+        let bytes = full.as_bytes();
+        // 切在第二个字符「句」的第一个字节之后（3 字节 UTF-8）
+        let cut = full.find('句').expect("测试数据里应有「句」") + 1;
+        assert!(cut < bytes.len());
+        let out = run_body(
+            "mb",
+            false,
+            vec![
+                Ok(Bytes::from(bytes[..cut].to_vec())),
+                Ok(Bytes::from(bytes[cut..].to_vec())),
+            ],
+        )
+        .await;
+        assert!(!out.contains('\u{FFFD}'), "汉字被写坏了：{out}");
+        assert!(out.contains("半句话"), "内容应完整还原：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_anthropic_message_stop_without_stop_reason_gets_delta_before_it() {
+        // Anthropic 上游给了 message_stop 却没给 stop_reason。
+        // message_delta 必须落在 message_stop 之前，否则 stopReason 停在 pending，
+        // 客户端报 Stream ended without finish_reason。
+        let out = run_body(
+            "anth_done",
+            true,
+            vec![
+                Ok(Bytes::from(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
+                )),
+                Ok(Bytes::from(
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"半句\"}}\n\n",
+                )),
+                Ok(Bytes::from("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")),
+            ],
+        )
+        .await;
+        let delta_at = out.find(r#""stop_reason":"end_turn""#).expect("必须补 message_delta");
+        let stop_at = out.find("\"type\":\"message_stop\"").expect("message_stop 必须在");
+        assert!(delta_at < stop_at, "message_delta 必须在 message_stop 之前，实际：{out}");
+        // 上游的 message_stop 原样保留且只有一份
+        assert_eq!(out.matches("\"type\":\"message_stop\"").count(), 1, "实际：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_sentinel_without_trailing_newline_still_gets_frame_before_it() {
+        // 上游最后一帧 `[DONE]` 没有换行就断流：它会留在 buffer 残行里，
+        // 补的终止帧仍必须排在它之前。
+        let out = run_body(
+            "nonl",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Ok(Bytes::from("data: [DONE]")),
+            ],
+        )
+        .await;
+        let finish_at = out.find(r#""finish_reason":"stop""#).expect("必须补终止帧");
+        let done_at = out.find("data: [DONE]").expect("[DONE] 必须在");
+        assert!(finish_at < done_at, "实际：{out}");
+        assert_eq!(out.matches("data: [DONE]").count(), 1, "哨兵不能重复：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_complete_stream_is_byte_identical() {
+        // 正常流一个字节都不能变：透传是热路径，补帧只能发生在异常流上
+        let expected = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let out = run_body(
+            "intact",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                )),
+            ],
+        )
+        .await;
+        assert_eq!(out, expected);
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_upstream_error_does_not_truncate_the_event_stream() {
+        // 上游在流中途报错：以前直接返回 Err 会把 SSE 截断，
+        // 客户端只看到半条流 → 报 Stream ended without finish_reason
+        let err = reqwest::Client::new()
+            .get("http://[")
+            .build()
+            .expect_err("非法 URL 应产生 reqwest::Error");
+        let out = run_body(
+            "err",
+            false,
+            vec![
+                Ok(Bytes::from(
+                    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",
+                )),
+                Err(err),
+            ],
+        )
+        .await;
+        // 错误原因对客户端可见
+        assert!(out.contains("\"error\""), "实际：{out}");
+        assert!(out.contains("upstream stream error"), "实际：{out}");
+        // 而且收尾序列完整
+        assert!(out.contains(r#""finish_reason":"stop""#), "实际：{out}");
+        assert!(out.trim_end().ends_with("data: [DONE]"), "实际：{out}");
+    }
+
+    #[actix_web::test]
+    async fn wall_wire_truncated_anthropic_stream_ends_with_message_stop() {
+        let out = run_body(
+            "anth",
+            true,
+            vec![Ok(Bytes::from(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"半句\"}}\n\n",
+            ))],
+        )
+        .await;
+        assert!(out.trim_end().ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}"), "实际：{out}");
+        // stop_reason 必须出现，否则 Anthropic 客户端 stopReason 停在 pending
+        assert!(out.contains(r#""stop_reason":"end_turn""#), "实际：{out}");
     }
 }
