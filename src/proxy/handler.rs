@@ -548,7 +548,8 @@ fn credit_ok(
     if !budget.is_finite() || budget <= 0.0 {
         return true;
     }
-    let price = rb.backend.credit_price.unwrap_or(0.0);
+    // 用乘数后的实际价格判断余额：否则「倍率 0.5 的模型」会被按原价误判为余额不足
+    let price = rb.backend.effective_credit_price().unwrap_or(0.0);
     if !price.is_finite() || price <= 0.0 {
         return true;
     }
@@ -595,7 +596,7 @@ async fn reserve_credit(
     let platform_id = resolved.platform.id.clone();
     let budget = resolved.platform.credit_budget;
     let window = resolved.platform.credit_window.clone();
-    let price = resolved.backend.credit_price;
+    let price = resolved.backend.effective_credit_price();
     let request_id = request_id.to_string();
     let model_id = resolved.backend.model_id.clone();
     web::block(move || {
@@ -684,7 +685,7 @@ async fn handle_request(
     let pricing_at = chrono::Local::now();
     // 只有真的会按次计费的平台才查状态；没有积分配置的路由零额外查询。
     let credit_enabled = resolved_route.backends.iter().any(|rb| {
-        rb.platform.credit_budget.is_some() && rb.backend.credit_price.unwrap_or(0.0) > 0.0
+        rb.platform.credit_budget.is_some() && rb.backend.effective_credit_price().unwrap_or(0.0) > 0.0
     });
 
     for attempt in 0..=max_retries {
@@ -696,11 +697,20 @@ async fn handle_request(
             .collect();
         let mut candidates: Vec<crate::models::route::Backend> = active.iter()
             .filter(|rb| credit_ok(rb, credit_map.as_ref()))
+            // 冷却中的后端不参与本轮：上游刚报过配额耗尽/风控，立刻再打只会延长封禁
+            .filter(|rb| !is_cooling_down(&rb.backend.id))
             .map(|rb| rb.backend.clone())
             .collect();
         if candidates.is_empty() {
             if active.is_empty() {
                 return Err(AppError::Internal("No available backend".to_string()));
+            }
+            // 全部在冷却：区分「额度耗尽」与「上游风控」，给出可操作的提示
+            let all_cooling = active.iter().all(|rb| is_cooling_down(&rb.backend.id));
+            if all_cooling {
+                return Err(AppError::TooManyRequests(
+                    "所有上游后端均在冷却中（配额耗尽或风控），请稍后重试".to_string(),
+                ));
             }
             return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
         }
@@ -720,7 +730,7 @@ async fn handle_request(
                 .cloned()
                 .ok_or_else(|| AppError::Internal("Backend not found in cache".to_string()))?;
             let needs_reserve = resolved.platform.credit_budget.is_some()
-                && resolved.backend.credit_price.unwrap_or(0.0) > 0.0;
+                && resolved.backend.effective_credit_price().unwrap_or(0.0) > 0.0;
             let reserve = if needs_reserve {
                 reserve_credit(state, &resolved, &request_id).await?
             } else if resolved.platform.credit_budget.is_some() {
@@ -753,7 +763,39 @@ async fn handle_request(
         let started_at = chrono::Utc::now().to_rfc3339();
         let attempt_no = attempt as i64 + 1;
 
-        let (forward_body, forward_url_raw) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+        // 三条路径的判定：标准协议走原来的 build_forward_request，
+        // 私有协议（Trae / WorkBuddy）由 upstream 适配层给出完整转发计划。
+        let adapter = crate::models::adapter::PlatformAdapter::resolve(
+            resolved.platform.adapter.as_deref(),
+            &resolved.platform.platform_type,
+        );
+        let adapter_credential = resolved.credential.as_ref().map(|secret| {
+            crate::proxy::upstream::AdapterCredential {
+                access_token: secret.access_token.as_str(),
+                refresh_token: secret.refresh_token.as_deref(),
+                uid: secret.uid.as_deref(),
+                enterprise_id: secret.enterprise_id.as_deref(),
+                domain: secret.domain.as_deref(),
+                device_id: secret.device_id.as_deref(),
+                machine_id: secret.machine_id.as_deref(),
+            }
+        });
+        let plan = crate::proxy::upstream::build(
+            adapter,
+            &resolved.platform,
+            &resolved.backend,
+            &unified,
+            adapter_credential.as_ref(),
+            resolved_route.default_max_tokens,
+        )?;
+
+        let (forward_body, forward_url_raw) = match &plan {
+            Some(plan) => (plan.body.clone(), plan.url.clone()),
+            None => {
+                let (body, url) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+                (body, url)
+            }
+        };
         let forward_url = sanitize_forward_url(&forward_url_raw, &resolved.platform.api_key);
 
         let mut req_builder = state.http_client.post(&forward_url_raw)
@@ -765,7 +807,12 @@ async fn handle_request(
             }))
             .header("Content-Type", "application/json");
 
-        if !resolved.platform.api_key.is_empty() {
+        // 私有协议：适配器给的请求头里已含鉴权，直接照发
+        if let Some(plan) = &plan {
+            for (name, value) in &plan.headers {
+                req_builder = req_builder.header(name.as_str(), value.as_str());
+            }
+        } else if !resolved.platform.api_key.is_empty() {
             match resolved.platform.platform_type {
                 crate::models::platform::PlatformType::Anthropic => {
                     req_builder = req_builder.header("x-api-key", &resolved.platform.api_key).header("anthropic-version", "2023-06-01");
@@ -776,6 +823,9 @@ async fn handle_request(
         if let Some(headers) = resolved.platform.custom_headers.as_object() {
             for (k, v) in headers { if let Some(vs) = v.as_str() { req_builder = req_builder.header(k.as_str(), vs); } }
         }
+
+        // 私有协议上游总是回 SSE（即使客户端要非流式）。这个事实由 `private_protocol_kind`
+        // 在响应分支里判断——那里同时决定「透传 SSE」还是「聚合后再返回 JSON」。
 
         let result = req_builder.json(&forward_body).send().await;
         state.selector.dec_connection(&resolved_route.route_id, &backend.id);
@@ -799,7 +849,10 @@ async fn handle_request(
                         started_at.clone(),
                         Some(forward_url.clone()),
                     ));
-                    if is_stream {
+                    // 私有协议上游总是回 SSE：即便客户端要非流式，也要走流式路径再聚合，
+                    // 否则会把 SSE 正文当 JSON 解析（得到空响应）。
+                    let private_protocol = plan.as_ref().map(|p| p.always_sse).unwrap_or(false);
+                    if is_stream || private_protocol {
                         // 流式：统计由 handle_stream / handle_stream_convert 在流结束时记录一次（含 SSE usage token）
                         let mut base = make_stat(
                             &resolved_route.proxy_id,
@@ -830,6 +883,45 @@ async fn handle_request(
                         } else {
                             None
                         };
+                        // 私有协议：先把上游 SSE 归一化成 OpenAI 形态，再决定透传还是转换
+                        if let Some(kind) = private_protocol_kind(adapter) {
+                            // 关键分支：客户端要非流式时，必须把整条 SSE 读完后聚合成 JSON，
+                            // 不能直接把 SSE 透传给一个等 JSON 的客户端。
+                            if !is_stream {
+                                tracing::info!("私有协议非流式聚合（流式路径内）：adapter={:?}", adapter);
+                                return Ok(handle_private_aggregate(
+                                    resp,
+                                    &state.stats_writer,
+                                    base,
+                                    backend.pricing_snapshot(),
+                                    kind,
+                                    client_anthropic,
+                                    &virtual_model,
+                                    start,
+                                    pricing_at,
+                                )
+                                .await);
+                            }
+                            tracing::info!(
+                                "私有协议流式：adapter={:?} 客户端={}",
+                                adapter,
+                                if client_anthropic { "anthropic" } else { "openai" }
+                            );
+                            return Ok(handle_private_stream(
+                                resp,
+                                &state.stats_writer,
+                                base,
+                                backend.pricing_snapshot(),
+                                kind,
+                                client_anthropic,
+                                &virtual_model,
+                                &backend.id,
+                                &backend.model_id,
+                                start,
+                                pricing_at,
+                                capture,
+                            ));
+                        }
                         if client_anthropic == upstream_anthropic {
                             return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), start, pricing_at, capture));
                         }
@@ -838,6 +930,8 @@ async fn handle_request(
                             if upstream_anthropic { "anthropic" } else { "openai" });
                         return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture));
                     }
+                    // 走到这里说明是标准协议（私有协议已在上面 `is_stream || private_protocol`
+                    // 分支里全部处理完，因为它们的 always_sse 恒为 true）。
                     let body = resp.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
                     capture_response_body(
                         state,
@@ -927,9 +1021,29 @@ async fn handle_request(
                     if let Some(r) = reservation.take() {
                         release_credit(state, r, &request_id, &backend.model_id).await;
                     }
+                    let eb = resp.text().await.unwrap_or_default();
+                    // 错误分类：私有协议要按上游业务码判（Trae 4008/4010/4015、
+                    // WorkBuddy 14018 等），标准协议按 HTTP 状态码判。
+                    // 这一步决定「换号 / 冷却 / 直接失败」，走错桶会让单账号封禁
+                    // 升级成 IP 段封禁，或让必然失败的请求在每个账号上轮流撞一遍。
+                    let failure = classify_upstream_failure(adapter, status.as_u16(), &eb);
+                    if failure.should_cooldown() {
+                        if let Some(secs) = failure.cooldown_secs() {
+                            cooldown_backend(state, &backend.id, secs);
+                            tracing::warn!(
+                                "上游失败冷却：platform={} backend={} 冷却 {}s（{:?}）",
+                                resolved.platform.name, backend.id, secs, failure
+                            );
+                        }
+                        if failure.should_alert() {
+                            tracing::error!(
+                                "上游风控告警：platform={} —— {}；继续换号会放大封禁，已停止轮转",
+                                resolved.platform.name, failure_message(&failure)
+                            );
+                        }
+                    }
                     let et = format!("{:?}", classify_error(status.as_u16()));
                     last_error = Some(format!("upstream {} ({})", status.as_u16(), et));
-                    let eb = resp.text().await.unwrap_or_default();
                     capture_response_body(
                         state,
                         &request_id,
@@ -950,16 +1064,28 @@ async fn handle_request(
                         started_at.clone(),
                         Some(forward_url.clone()),
                     ));
-                    if should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
+                    // 是否换后端重试：ClientError / RiskControl 一律不重试
+                    // （前者换号也没用，后者换号会放大封禁）。
+                    let retry_worthwhile = failure.should_try_another_backend()
+                        || matches!(
+                            failure,
+                            crate::proxy::upstream::error_map::UpstreamFailure::UpstreamBusy { .. }
+                        );
+                    if retry_worthwhile
+                        && should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error)
+                        && attempt < max_retries
+                    {
                         tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
                         continue;
                     }
-                    // 最终失败：记录一条统计并透传原始响应体
+                    // 最终失败：记录一条统计，并对客户端回映射后的状态码。
+                    // Agnes 的 402 要转成 429（客户端只认 429 是「限流/额度」）。
+                    let client_status = failure.client_status();
                     state.stats_writer.record(make_stat(
                         &resolved_route.proxy_id,
                         &resolved_route.route_id,
                         &backend.id,
-                        status.as_u16() as i32,
+                        client_status as i32,
                         latency_ms,
                         None,
                         None,
@@ -970,7 +1096,11 @@ async fn handle_request(
                         replayed_from,
                         path,
                     ));
-                    return Ok(HttpResponse::build(actix_web::http::StatusCode::from_u16(status.as_u16()).unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY)).body(eb));
+                    return Ok(HttpResponse::build(
+                        actix_web::http::StatusCode::from_u16(client_status)
+                            .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
+                    )
+                    .body(eb));
                 }
             }
             Err(e) => {
@@ -1406,6 +1536,394 @@ fn handle_stream_convert(
         .insert_header(("Cache-Control", "no-cache"))
         .insert_header(("Connection", "keep-alive"))
         .streaming(body)
+}
+
+/// 私有协议 adapter → SSE 归一化种类。标准协议返回 None。
+fn private_protocol_kind(
+    adapter: crate::models::adapter::PlatformAdapter,
+) -> Option<crate::proxy::upstream::private_sse::ProtocolKind> {
+    use crate::models::adapter::PlatformAdapter;
+    use crate::proxy::upstream::private_sse::ProtocolKind;
+    match adapter {
+        PlatformAdapter::Trae => Some(ProtocolKind::Trae),
+        PlatformAdapter::WorkBuddy => Some(ProtocolKind::WorkBuddy),
+        _ => None,
+    }
+}
+
+/// 把上游失败归类成「换号 / 冷却 / 直接失败」。
+///
+/// 私有协议先看响应体里的业务码（Trae 4008/4010/4015、WorkBuddy 14018 等），
+/// 解析不出业务码时退回 HTTP 状态码；标准协议直接按状态码。
+///
+/// **这一步的正确性直接决定账号安全**：
+/// - 把 4001（模型不在目录）当成可重试 → 每个账号都撞一遍，白等 N × 超时
+/// - 把 4010/4015/4017（风控）当成配额去换号 → 单账号封禁升级成 IP 段封禁
+fn classify_upstream_failure(
+    adapter: crate::models::adapter::PlatformAdapter,
+    status: u16,
+    body: &str,
+) -> crate::proxy::upstream::error_map::UpstreamFailure {
+    use crate::models::adapter::PlatformAdapter;
+    use crate::proxy::upstream::error_map as em;
+
+    let business_code = match adapter {
+        PlatformAdapter::Trae => crate::proxy::upstream::trae::parse_business_error(body)
+            .and_then(|e| e.code),
+        PlatformAdapter::WorkBuddy => crate::proxy::upstream::workbuddy::parse_business_error(body)
+            .and_then(|e| e.code),
+        _ => None,
+    };
+
+    match (adapter, business_code) {
+        (PlatformAdapter::Trae, Some(code)) => em::classify_trae(code, body),
+        (PlatformAdapter::WorkBuddy, Some(code)) => em::classify_workbuddy(Some(code), status, body),
+        (PlatformAdapter::WorkBuddy, None) => em::classify_workbuddy(None, status, body),
+        _ => em::classify_http(status, body),
+    }
+}
+
+fn failure_message(failure: &crate::proxy::upstream::error_map::UpstreamFailure) -> &str {
+    use crate::proxy::upstream::error_map::UpstreamFailure;
+    match failure {
+        UpstreamFailure::ClientError { message, .. }
+        | UpstreamFailure::QuotaExhausted { message, .. }
+        | UpstreamFailure::RiskControl { message, .. }
+        | UpstreamFailure::Unauthorized { message }
+        | UpstreamFailure::Transport { message }
+        | UpstreamFailure::UpstreamBusy { message, .. } => message,
+    }
+}
+
+/// 归一化种类 → adapter。流内业务错误需要知道是哪个协议才能正确分类。
+fn adapter_of_kind(
+    kind: crate::proxy::upstream::private_sse::ProtocolKind,
+) -> crate::models::adapter::PlatformAdapter {
+    use crate::models::adapter::PlatformAdapter;
+    use crate::proxy::upstream::private_sse::ProtocolKind;
+    match kind {
+        ProtocolKind::Trae => PlatformAdapter::Trae,
+        ProtocolKind::WorkBuddy => PlatformAdapter::WorkBuddy,
+    }
+}
+
+/// 后端冷却表：backend_id → 冷却截止时刻。
+///
+/// 为什么放在 handler 而不是 `BackendSelector`：选择器只做「按策略挑一个」，
+/// 冷却状态是「上游健康度」，属于代理层关注点。用进程内 DashMap 而不是 DB：
+/// 冷却是一过性状态，重启后重新探测即可，没必要持久化。
+fn cooldown_map() -> &'static dashmap::DashMap<String, std::time::Instant> {
+    static COOLDOWN: once_cell::sync::Lazy<dashmap::DashMap<String, std::time::Instant>> =
+        once_cell::sync::Lazy::new(dashmap::DashMap::new);
+    &COOLDOWN
+}
+
+fn cooldown_backend(_state: &Arc<ProxyState>, backend_id: &str, secs: u64) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    cooldown_map().insert(backend_id.to_string(), until);
+}
+
+/// 该后端是否还在冷却中。冷却过期的条目顺手清掉，避免表无限增长。
+fn is_cooling_down(backend_id: &str) -> bool {
+    if let Some(entry) = cooldown_map().get(backend_id) {
+        if *entry.value() > std::time::Instant::now() {
+            return true;
+        }
+        drop(entry);
+        cooldown_map().remove(backend_id);
+    }
+    false
+}
+
+/// 私有协议流式 body：把上游 SSE 归一化成 OpenAI 形态，
+/// 再按客户端协议选择「直接透传 OpenAI 事件」或「转成 Anthropic 事件」。
+struct PrivateStreamBody {
+    inner: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>,
+    normalizer: crate::proxy::upstream::private_sse::PrivateSseNormalizer,
+    /// 非 None 时把 OpenAI 形态再转成 Anthropic 事件
+    converter: Option<crate::proxy::stream_convert::StreamConverter>,
+    stats: Arc<StreamStatCtx>,
+    capture: Option<StreamCapture>,
+    finished: bool,
+}
+
+impl Drop for PrivateStreamBody {
+    fn drop(&mut self) {
+        self.stats.record_once();
+        if let Some(capture) = &mut self.capture {
+            capture.flush();
+        }
+    }
+}
+
+impl Stream for PrivateStreamBody {
+    type Item = Result<Bytes, actix_web::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use std::sync::atomic::Ordering;
+        loop {
+            match self.inner.as_mut().poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    if self.finished {
+                        return Poll::Ready(None);
+                    }
+                    self.finished = true;
+                    let events = self.normalizer.finish();
+                    let mut out = String::new();
+                    for event in events {
+                        out.push_str(&self.render_event(event));
+                    }
+                    if let Some(capture) = &mut self.capture {
+                        capture.flush();
+                    }
+                    self.stats.record_once();
+                    if out.is_empty() {
+                        return Poll::Ready(None);
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
+                }
+                Poll::Ready(Some(Ok(bytes))) => {
+                    self.stats.mark_first_token();
+                    if let Some(capture) = &mut self.capture {
+                        capture.push(&bytes);
+                    }
+                    let events = self.normalizer.push(&bytes);
+                    let mut out = String::new();
+                    for event in events {
+                        out.push_str(&self.render_event(event));
+                    }
+                    if out.is_empty() {
+                        // 这一帧没有可转发的内容（心跳/纯 usage），继续拉下一帧
+                        continue;
+                    }
+                    return Poll::Ready(Some(Ok(Bytes::from(out))));
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    tracing::warn!("私有协议上游流错误: {}", e);
+                    self.stats.failed.store(true, Ordering::SeqCst);
+                    if let Some(capture) = &mut self.capture {
+                        capture.flush();
+                    }
+                    self.stats.record_once();
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(actix_web::error::ErrorInternalServerError(
+                        "upstream stream error",
+                    ))));
+                }
+            }
+        }
+    }
+}
+
+impl PrivateStreamBody {
+    /// 把一个归一化事件渲染成要发给客户端的字节。
+    fn render_event(
+        &mut self,
+        event: crate::proxy::upstream::private_sse::NormalizedEvent,
+    ) -> String {
+        use crate::proxy::upstream::private_sse::NormalizedEvent;
+        match event {
+            NormalizedEvent::Ignore => String::new(),
+            NormalizedEvent::BusinessError(err) => {
+                tracing::warn!("私有协议流内业务错误: code={:?} msg={}", err.code, err.message);
+                self.stats.failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                // 流已开始，无法改 HTTP 状态码；发一个 error 帧让客户端能看到原因
+                let payload = serde_json::json!({
+                    "error": {
+                        "message": err.message,
+                        "type": "upstream_error",
+                        "code": err.code
+                    }
+                });
+                format!("data: {payload}\n\n")
+            }
+            NormalizedEvent::Chunk(chunk) => {
+                // 统计旁路：从归一化后的 chunk 里取 usage
+                if let Some(usage) = chunk.get("usage") {
+                    let p = usage.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let c = usage.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let cr = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    if p > 0 || c > 0 || cr > 0 {
+                        self.stats.absorb_usage(p, c, cr, 0);
+                    }
+                }
+                let payload = chunk.to_string();
+                if let Some(converter) = self.converter.as_mut() {
+                    // 客户端是 Anthropic：把 OpenAI chunk 转成 Anthropic 事件
+                    let line = format!("data: {payload}\n\n");
+                    converter.push_chunk(line.as_bytes())
+                } else {
+                    format!("data: {payload}\n\n")
+                }
+            }
+        }
+    }
+}
+
+/// 处理私有协议流式响应。
+#[allow(clippy::too_many_arguments)]
+fn handle_private_stream(
+    resp: reqwest::Response,
+    stats_writer: &StatsWriter,
+    stat_base: RequestStat,
+    pricing: Option<crate::models::pricing::Pricing>,
+    kind: crate::proxy::upstream::private_sse::ProtocolKind,
+    client_anthropic: bool,
+    model: &str,
+    backend_id: &str,
+    upstream_model: &str,
+    start: Instant,
+    pricing_at: chrono::DateTime<chrono::Local>,
+    capture: Option<StreamCapture>,
+) -> HttpResponse {
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
+    let converter = if client_anthropic {
+        Some(crate::proxy::stream_convert::StreamConverter::new(
+            true,
+            model,
+            backend_id,
+            upstream_model,
+        ))
+    } else {
+        None
+    };
+    let body = PrivateStreamBody {
+        inner: Box::pin(resp.bytes_stream()),
+        normalizer: crate::proxy::upstream::private_sse::PrivateSseNormalizer::new(kind, model),
+        converter,
+        stats,
+        capture,
+        finished: false,
+    };
+    HttpResponse::Ok()
+        .content_type("text/event-stream")
+        .insert_header(("Cache-Control", "no-cache"))
+        .insert_header(("Connection", "keep-alive"))
+        .streaming(body)
+}
+
+/// 私有协议的非流式聚合：把整条 SSE 读完，拼成一个 `chat.completion` 响应。
+///
+/// 为什么必须这么做：Trae 与 WorkBuddy 的上游**无论客户端要什么都回 SSE**，
+/// 直接把响应体当 JSON 解析会得到空对象（表现为「模型没返回内容」）。
+#[allow(clippy::too_many_arguments)]
+async fn handle_private_aggregate(
+    resp: reqwest::Response,
+    stats_writer: &StatsWriter,
+    stat_base: RequestStat,
+    pricing: Option<crate::models::pricing::Pricing>,
+    kind: crate::proxy::upstream::private_sse::ProtocolKind,
+    client_anthropic: bool,
+    model: &str,
+    start: Instant,
+    pricing_at: chrono::DateTime<chrono::Local>,
+) -> HttpResponse {
+    use futures_util::StreamExt;
+
+    let mut normalizer = crate::proxy::upstream::private_sse::PrivateSseNormalizer::new(kind, model);
+    let mut stream = resp.bytes_stream();
+    let mut failed = false;
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                for event in normalizer.push(&bytes) {
+                    if let crate::proxy::upstream::private_sse::NormalizedEvent::BusinessError(err) = event {
+                        tracing::warn!("私有协议聚合遇到业务错误: code={:?} msg={}", err.code, err.message);
+                        failed = true;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("私有协议聚合时上游流错误: {}", e);
+                failed = true;
+                break;
+            }
+        }
+    }
+    let _ = normalizer.finish();
+    let latency_ms = start.elapsed().as_millis() as i64;
+
+    // 统计：token 从 usage 里取（上游不一定给，缺就记 None）
+    let (token_in, token_out) = normalizer
+        .usage
+        .as_ref()
+        .map(|u| {
+            (
+                u.get("prompt_tokens").and_then(|v| v.as_i64()),
+                u.get("completion_tokens").and_then(|v| v.as_i64()),
+            )
+        })
+        .unwrap_or((None, None));
+
+    let mut stat = stat_base;
+    stat.latency_ms = latency_ms;
+    stat.token_input = token_in;
+    stat.token_output = token_out;
+    if failed {
+        stat.status_code = 0;
+        stat.error_type = Some("StreamError".to_string());
+    }
+    let _ = pricing;
+    let _ = pricing_at;
+    stats_writer.record(stat);
+
+    // 流内业务错误必须变成真正的错误响应。
+    //
+    // 这是上游协议的一个陷阱：Trae / WorkBuddy 把配额耗尽、风控这类**业务失败**
+    // 放在 `200 OK` 的 SSE 里（Trae 4008、WorkBuddy 14018）。如果只当成一个普通
+    // 事件吞掉，客户端会收到「成功但 content 为空」的响应，完全看不出是额度问题。
+    if let Some(err) = normalizer.business_error.clone() {
+        // 流内错误没有 HTTP 状态码，必须走专用入口（否则风控码会被误判成请求级错误）
+        let failure = crate::proxy::upstream::error_map::classify_business_error(
+            adapter_of_kind(kind),
+            err.code,
+            &err.message,
+        );
+        let client_status = failure.client_status();
+        tracing::warn!(
+            "私有协议流内业务错误：code={:?} → 对客户端回 {}（{:?}）",
+            err.code,
+            client_status,
+            failure
+        );
+        let message = if err.message.is_empty() {
+            format!("upstream business error {:?}", err.code)
+        } else {
+            err.message.clone()
+        };
+        return HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(client_status)
+                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
+        )
+        .json(serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "upstream_error",
+                "code": err.code,
+            }
+        }));
+    }
+
+    let response = normalizer.into_response();
+    if client_anthropic {
+        // 客户端要 Anthropic 形态：先按 OpenAI 解析成统一格式，再用现有转换器输出。
+        // 解析失败时不能静默回 OpenAI 形态——那会让 Anthropic 客户端收到看不懂的响应，
+        // 必须记日志（这种失败通常意味着归一化产出的 chunk 形态有问题）。
+        match crate::protocol::openai::parse_response(response.clone()) {
+            Ok(unified) => {
+                return HttpResponse::Ok().json(crate::protocol::anthropic::to_response(&unified));
+            }
+            Err(e) => {
+                tracing::error!("私有协议聚合后按 OpenAI 解析失败（将回退 OpenAI 形态）: {}", e);
+            }
+        }
+    }
+    HttpResponse::Ok().json(response)
 }
 
 /// 从流式 SSE 数据中提取 usage（流结束后的统计用）。

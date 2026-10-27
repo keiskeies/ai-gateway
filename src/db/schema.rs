@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 27;
+pub const CURRENT_SCHEMA_VERSION: i64 = 28;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -227,6 +227,23 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V27 (request_bodies.truncated for partial capture)");
     }
 
+    if current_version < 28 {
+        // 私有协议上游（Trae / WorkBuddy）：adapter 决定请求怎么构造，NULL = 由 type 推出。
+        // credit_unit 决定额度怎么记账，NULL = 不计量；与 credit_budget 正交：
+        // 同一个 credit_budget 在 credits 下走台账、在 currency 下走 cost、在 requests 下只限流。
+        add_column_if_missing(conn, "platforms", "adapter",
+            "ALTER TABLE platforms ADD COLUMN adapter TEXT")?;
+        add_column_if_missing(conn, "platforms", "credit_unit",
+            "ALTER TABLE platforms ADD COLUMN credit_unit TEXT")?;
+        // WorkBuddy 的模型目录直接给积分倍率（"x0.79 credits"），比“每次 1 分”精确；
+        // NULL 视为 1.0，旧数据行为不变。
+        add_column_if_missing(conn, "models", "credit_multiplier",
+            "ALTER TABLE models ADD COLUMN credit_multiplier REAL")?;
+        conn.execute_batch(SCHEMA_V28_TABLES)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 28)", [])?;
+        tracing::info!("Database migrated to V28 (platform adapter / credit unit / credential vault)");
+    }
+
     Ok(())
 }
 
@@ -327,6 +344,32 @@ CREATE TABLE IF NOT EXISTS response_bodies (
 "#;
 
 /// V24：上游积分额度。`credit_window` 只允许 day/week/month，NULL 表示不启用；
+/// V28：私有协议上游的凭据保险箱。
+///
+/// 为什么不复用 `platforms.api_key`：那个字段是单个字符串，而 Trae / WorkBuddy 的凭据是
+/// 结构体（access_token + refresh_token + uid + enterprise_id + domain + 到期时间），
+/// 还有独立生命周期（刷新、失效、多账号）。塞进字符串再用 JSON 解析，会让
+/// Key 掩码、测试连接、配置导出全部要特判。
+///
+/// `secret_blob` 是 AES-256-GCM 加密后的 base64（nonce||ciphertext||tag），密钥来自
+/// config.toml 的 `encrypt_key`。管理接口只返回元信息，明文永不出进程。
+///
+/// `allow_self_refresh` 默认 0：Trae 的 ExchangeToken 会轮换整个令牌族，网关一刷，
+/// 同账号在官方客户端的登录就静默失效。用户显式打开才自刷。
+const SCHEMA_V28_TABLES: &str = r#"
+CREATE TABLE IF NOT EXISTS platform_credentials (
+    platform_id        TEXT PRIMARY KEY,
+    secret_blob        TEXT NOT NULL,
+    kind               TEXT NOT NULL DEFAULT 'api_key',
+    refreshed_at       TEXT,
+    failure_count      INTEGER NOT NULL DEFAULT 0,
+    last_error         TEXT,
+    allow_self_refresh INTEGER NOT NULL DEFAULT 0,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL
+);
+"#;
+
 /// 预算与窗口必须同时存在，避免“有预算但没有重置口径”的半套配置。
 /// `platform_credit_state` 是独立台账：清理 request_stats 不能把上游已扣的积分退回来。
 const SCHEMA_V24_TABLES: &str = r#"

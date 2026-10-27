@@ -40,7 +40,7 @@ async fn main() -> std::io::Result<()> {
     let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
     let selector = Arc::new(BackendSelector::new());
     // 初始化内存缓存（启动时从 DB 加载，后续由管理操作触发刷新）
-    let cache = RouteCache::new(db_pool.clone());
+    let cache = RouteCache::new(db_pool.clone(), shared_config.read().security.encrypt_key.clone());
 
     // 控制台实时事件总线：统计写入器和管理接口各自发布，/api/events 订阅
     let events_hub = ai_gateway::events::EventHub::new();

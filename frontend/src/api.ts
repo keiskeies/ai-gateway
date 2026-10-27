@@ -106,6 +106,18 @@ export const createPlatform = (data: any) => api.post('/platforms', data).then(r
 export const updatePlatform = (id: string, data: any) => api.put(`/platforms/${id}`, data).then(r => r.data)
 export const deletePlatform = (id: string) => api.delete(`/platforms/${id}`)
 export const listPresets = () => api.get('/platforms/presets').then(r => r.data)
+// Key 申请快捷入口注册表（后端内置，改 URL 不用重建前端）
+export const listKeyLinks = () => api.get('/platforms/key-links').then(r => r.data)
+export const findKeyLink = (params: { preset?: string; base_url?: string }) =>
+  api.get('/platforms/key-link', { params }).then(r => r.data)
+// 上游凭据保险箱（Trae / WorkBuddy 等私有协议上游）。
+// 读接口只返回元信息，明文永不出服务端。
+export const getCredential = (id: string) => api.get(`/platforms/${id}/credentials`).then(r => r.data)
+export const putCredential = (id: string, data: Record<string, unknown>) =>
+  api.put(`/platforms/${id}/credentials`, data)
+export const deleteCredential = (id: string) => api.delete(`/platforms/${id}/credentials`)
+export const refreshCredential = (id: string) =>
+  api.post(`/platforms/${id}/credentials/refresh`).then(r => r.data)
 export const fetchRemoteModels = (id: string) => api.get(`/platforms/${id}/remote-models`).then(r => r.data)
 // 把远端列表落库：只补缺失行，已有行不动，也不删除
 export const syncPlatformModels = (id: string) => api.post(`/platforms/${id}/models/sync`).then(r => r.data)

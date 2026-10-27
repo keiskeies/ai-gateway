@@ -43,6 +43,10 @@ pub struct Model {
     /// 每次成功请求消耗的上游积分；NULL = 未定价，按 0 计。
     /// 与 input/output_price 的“每 100 万 token”口径不同，单位是“次”。
     pub credit_price: Option<f64>,
+    /// 积分倍率（如 WorkBuddy 目录给的 "x0.79 credits"）。NULL = 1.0。
+    /// 实际消耗 = credit_price × credit_multiplier，所以倍率 0 表示该模型不扣积分。
+    #[serde(default)]
+    pub credit_multiplier: Option<f64>,
     pub capabilities: Vec<Capability>,
     pub status: ModelStatus,
 }
@@ -66,6 +70,9 @@ pub struct CreateModelRequest {
     pub peak_pricing: Option<serde_json::Value>,
     #[serde(default)]
     pub credit_price: Option<f64>,
+    /// 积分倍率；NULL = 1.0
+    #[serde(default)]
+    pub credit_multiplier: Option<f64>,
     #[serde(default)]
     pub capabilities: Vec<Capability>,
 }
@@ -161,6 +168,9 @@ pub struct UpdateModelRequest {
     /// 三态：没写 = 不改，null = 清空（未定价），数字 = 设值。
     #[serde(default = "keep_number")]
     pub credit_price: NullableNumber,
+    /// 三态：没写 = 不改，null = 清空（回落 1.0），数字 = 设值。
+    #[serde(default = "keep_number")]
+    pub credit_multiplier: NullableNumber,
     #[serde(default = "keep_number")]
     pub cache_read_price: NullableNumber,
     #[serde(default = "keep_number")]
@@ -186,6 +196,8 @@ pub struct BatchModelPatch {
     #[serde(default = "keep_number")]
     pub credit_price: NullableNumber,
     #[serde(default = "keep_number")]
+    pub credit_multiplier: NullableNumber,
+    #[serde(default = "keep_number")]
     pub cache_read_price: NullableNumber,
     #[serde(default = "keep_number")]
     pub cache_write_price: NullableNumber,
@@ -197,6 +209,7 @@ impl BatchModelPatch {
         self.input_price != NullableNumber::Keep
             || self.output_price != NullableNumber::Keep
             || self.credit_price != NullableNumber::Keep
+            || self.credit_multiplier != NullableNumber::Keep
             || self.cache_read_price != NullableNumber::Keep
             || self.cache_write_price != NullableNumber::Keep
             || self.capabilities.is_some()

@@ -1,4 +1,5 @@
 pub mod platform;
+pub mod adapter;
 pub mod alert;
 pub mod backup;
 pub mod model;
@@ -10,8 +11,10 @@ pub mod credit;
 pub mod pricing;
 pub mod auth;
 pub mod config_transfer;
+pub mod key_link;
 
 pub use platform::*;
+pub use adapter::*;
 pub use model::*;
 pub use proxy::*;
 pub use route::*;
@@ -21,3 +24,4 @@ pub use credit::*;
 pub use pricing::*;
 pub use auth::*;
 pub use config_transfer::*;
+pub use key_link::*;

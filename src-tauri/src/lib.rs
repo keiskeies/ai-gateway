@@ -316,7 +316,7 @@ fn start_backend_server() {
         let selector = Arc::new(ai_gateway::lb::BackendSelector::new());
 
         // 初始化内存缓存和异步统计写入器
-        let cache = RouteCache::new(db_pool.clone());
+        let cache = RouteCache::new(db_pool.clone(), shared_config.read().security.encrypt_key.clone());
         // 控制台实时事件总线：与独立服务模式同一套语义
         let events_hub = ai_gateway::events::EventHub::new();
         let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());

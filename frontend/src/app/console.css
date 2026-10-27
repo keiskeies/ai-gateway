@@ -2792,6 +2792,32 @@ h4,
   color: var(--warn);
 }
 
+/* Key 申请快捷入口：放在 Base URL 标签右侧，与标签同基线。
+   用 inline-flex 而不是绝对定位，避免长品牌名在窄屏被裁切。 */
+.console-inline-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.console-keylink {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.console-keylink:hover {
+  text-decoration: underline;
+}
+
 .console-form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

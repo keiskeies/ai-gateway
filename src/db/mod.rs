@@ -2,6 +2,7 @@ pub mod schema;
 pub mod alert;
 pub mod backup;
 pub mod platform;
+pub mod credential;
 pub mod model;
 pub mod proxy;
 pub mod route;

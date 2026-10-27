@@ -45,3 +45,6 @@ __pycache__/
 .trae/
 .workbuddy/
 .dsh-acl-recovery/
+
+# 本机构建包装器（MSVC 环境 + TEMP + CARGO_TARGET_DIR，因人而异，不入库）
+/build.bat

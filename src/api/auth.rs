@@ -674,7 +674,7 @@ mod tests {
     #[actix_web::test]
     async fn v1_models_remains_public() {
         let (pool, path) = test_db();
-        let cache = crate::cache::RouteCache::new(pool.clone());
+        let cache = crate::cache::RouteCache::new(pool.clone(), "test-key".to_string());
         let stats_writer = crate::cache::StatsWriter::start(pool.clone(), crate::events::EventHub::new());
         let proxy_state = Arc::new(crate::proxy::handler::ProxyState {
             db: pool.clone(),

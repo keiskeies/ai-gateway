@@ -8,7 +8,7 @@ use crate::db::DbPool;
 const BACKEND_COLS: &str = "b.id, b.route_id, b.platform_id, b.model_id, b.weight, b.priority, \
     b.max_concurrent, b.capabilities, b.status, b.param_overrides, b.unknown_params, \
     b.reasoning_style, b.reasoning_echo, m.input_price, m.output_price, m.credit_price, \
-    m.cache_read_price, m.cache_write_price, m.peak_pricing";
+    m.cache_read_price, m.cache_write_price, m.peak_pricing, m.credit_multiplier";
 const BACKEND_FROM: &str = "FROM backends b \
     LEFT JOIN platforms p ON p.id = b.platform_id \
     LEFT JOIN models m ON m.catalog_key = p.catalog_key AND m.model_id = b.model_id";
@@ -32,6 +32,7 @@ fn map_backend(row: &rusqlite::Row) -> rusqlite::Result<Backend> {
         cache_write_price: row.get(17)?,
         peak_pricing: row.get::<_, Option<String>>(18)?
             .and_then(|raw| serde_json::from_str(&raw).ok()),
+        credit_multiplier: row.get(19)?,
     })
 }
 
@@ -267,6 +268,8 @@ mod tests {
             custom_headers: serde_json::Value::Null,
             credit_budget: None,
             credit_window: None,
+            credit_unit: None,
+            adapter: None,
         }).expect("create platform");
         let proxy = crate::db::proxy::create(&pool, &CreateProxyRequest { name: "virtual-model".into() })
             .expect("create proxy");
@@ -298,6 +301,7 @@ mod tests {
             max_tokens: 4096, context_window: 8192,
             input_price: Some(2.5), output_price: None,
             credit_price: None,
+            credit_multiplier: None,
             cache_read_price: None,
             cache_write_price: None,
             peak_pricing: None,
@@ -323,6 +327,8 @@ mod tests {
             base_url: "http://127.0.0.1:2/v1".into(), api_key: "sk-2".into(),
             organization: None, custom_headers: serde_json::Value::Null,
             credit_budget: None, credit_window: None,
+            credit_unit: None,
+            adapter: None,
         }).expect("create second platform");
         let mut conn = pool.get().unwrap();
         conn.execute("INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status) VALUES ('m-other', ?1, 'gpt-test', 'Other', 4096, 8192, 9.9, 9.9, '[]', 'Active')",

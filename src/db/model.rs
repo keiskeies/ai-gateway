@@ -6,7 +6,7 @@ use crate::models::model::*;
 /// platform_id 只表示这条目录行登记在哪个账号下，不再代表价格归属。
 const MODEL_COLS: &str = "id, platform_id, catalog_key, model_id, display_name, max_tokens, \
     context_window, input_price, output_price, cache_read_price, cache_write_price, \
-    credit_price, peak_pricing, capabilities, status";
+    credit_price, peak_pricing, capabilities, status, credit_multiplier";
 
 fn model_from_row(row: &rusqlite::Row) -> rusqlite::Result<Model> {
     Ok(Model {
@@ -26,6 +26,7 @@ fn model_from_row(row: &rusqlite::Row) -> rusqlite::Result<Model> {
             .and_then(|raw| serde_json::from_str(&raw).ok()),
         capabilities: serde_json::from_str(&row.get::<_, String>(13)?).unwrap_or_default(),
         status: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or(ModelStatus::Active),
+        credit_multiplier: row.get(15)?,
     })
 }
 
@@ -94,18 +95,20 @@ pub fn create(pool: &DbPool, req: &CreateModelRequest) -> AppResult<Model> {
         cache_read_price: req.cache_read_price,
         cache_write_price: req.cache_write_price,
         credit_price: req.credit_price,
+        credit_multiplier: req.credit_multiplier,
         peak_pricing: peak.as_deref().and_then(|s| serde_json::from_str(s).ok()),
         capabilities: req.capabilities.clone(),
         status: ModelStatus::Active,
     };
     conn.execute(
-        &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+        &format!("INSERT INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
         rusqlite::params![
             model.id, model.platform_id, catalog_key, model.model_id, model.display_name,
             model.max_tokens, model.context_window, model.input_price, model.output_price,
             model.cache_read_price, model.cache_write_price, model.credit_price, peak,
             serde_json::to_string(&model.capabilities)?,
             serde_json::to_string(&model.status)?,
+            model.credit_multiplier,
         ],
     )?;
     Ok(model)
@@ -131,18 +134,20 @@ pub fn batch_create(pool: &DbPool, models: Vec<CreateModelRequest>) -> AppResult
             cache_read_price: req.cache_read_price,
             cache_write_price: req.cache_write_price,
             credit_price: req.credit_price,
+            credit_multiplier: req.credit_multiplier,
             peak_pricing: peak.as_deref().and_then(|s| serde_json::from_str(s).ok()),
             capabilities: req.capabilities.clone(),
             status: ModelStatus::Active,
         };
         conn.execute(
-            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
             rusqlite::params![
                 model.id, model.platform_id, catalog_key, model.model_id, model.display_name,
                 model.max_tokens, model.context_window, model.input_price, model.output_price,
                 model.cache_read_price, model.cache_write_price, model.credit_price, peak,
                 serde_json::to_string(&model.capabilities)?,
                 serde_json::to_string(&model.status)?,
+                model.credit_multiplier,
             ],
         )?;
         result.push(model);
@@ -183,6 +188,7 @@ pub fn import_model_ids(pool: &DbPool, platform_id: &str, model_ids: &[String]) 
             cache_write_price: None,
             peak_pricing: None,
             credit_price: None,
+            credit_multiplier: None,
             capabilities: vec![],
         }).collect())?;
     }
@@ -440,6 +446,7 @@ mod tests {
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            credit_multiplier: NullableNumber::Keep,
             cache_read_price: NullableNumber::Keep,
             cache_write_price: NullableNumber::Keep,
             peak_pricing: None,
@@ -458,6 +465,8 @@ mod tests {
             custom_headers: serde_json::Value::Null,
             credit_budget: None,
             credit_window: None,
+            credit_unit: None,
+            adapter: None,
         })
         .expect("create platform")
         .id
@@ -497,6 +506,7 @@ mod tests {
             input_price: Some(1.0),
             output_price: Some(2.0),
             credit_price: None,
+            credit_multiplier: None,
             cache_read_price: None,
             cache_write_price: None,
             peak_pricing: None,
@@ -536,6 +546,8 @@ mod tests {
             custom_headers: serde_json::Value::Null,
             credit_budget: None,
             credit_window: None,
+            credit_unit: None,
+            adapter: None,
         })
         .expect("create other platform")
         .id
@@ -551,6 +563,7 @@ mod tests {
             input_price: Some(price),
             output_price: Some(price),
             credit_price: None,
+            credit_multiplier: None,
             cache_read_price: None,
             cache_write_price: None,
             peak_pricing: None,
@@ -573,6 +586,7 @@ mod tests {
             input_price: NullableNumber::Set(0.8),
             output_price: NullableNumber::Clear,
             credit_price: NullableNumber::Keep,
+            credit_multiplier: NullableNumber::Keep,
             cache_read_price: NullableNumber::Keep,
             cache_write_price: NullableNumber::Keep,
             capabilities: Some(vec![Capability::Reasoning, Capability::Tool]),
@@ -595,6 +609,7 @@ mod tests {
             input_price: NullableNumber::Keep,
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            credit_multiplier: NullableNumber::Keep,
             cache_read_price: NullableNumber::Keep,
             cache_write_price: NullableNumber::Keep,
             capabilities: Some(vec![]),
@@ -622,6 +637,7 @@ mod tests {
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            credit_multiplier: NullableNumber::Keep,
             cache_read_price: NullableNumber::Keep,
             cache_write_price: NullableNumber::Keep,
             capabilities: None,
@@ -638,6 +654,7 @@ mod tests {
             input_price: NullableNumber::Set(2.0),
             output_price: NullableNumber::Keep,
             credit_price: NullableNumber::Keep,
+            credit_multiplier: NullableNumber::Keep,
             cache_read_price: NullableNumber::Keep,
             cache_write_price: NullableNumber::Keep,
             capabilities: None,
@@ -661,6 +678,7 @@ mod tests {
             input_price: Some(1.5),
             output_price: Some(3.0),
             credit_price: None,
+            credit_multiplier: None,
             cache_read_price: None,
             cache_write_price: None,
             peak_pricing: None,
@@ -754,6 +772,8 @@ mod tests {
             custom_headers: serde_json::Value::Null,
             credit_budget: Some(250.0),
             credit_window: Some("day".into()),
+            credit_unit: Some("credits".into()),
+            adapter: None,
         }).expect("create sibling account").id;
 
         let model_id = seed_model(&pool, &first, "shared-model", 1.0);
@@ -782,6 +802,70 @@ mod tests {
         let remaining = list_by_platform(&pool, &second).expect("shared model survives owner deletion");
         assert!(remaining.iter().any(|m| m.model_id == "shared-model"),
                 "删除登记账号时共享目录应改挂兄弟账号");
+
+        cleanup_db(&path);
+    }
+
+    /// V28 回归：给既有平台补写 adapter 时，标准 adapter 不能改变 catalog_key。
+    ///
+    /// 这是升级安全的关键——`update()` 每次都会重算 catalog_key。若标准 adapter
+    /// 参与哈希，用户只要编辑一次平台名，catalog_key 就变了，旧模型行会变成孤儿
+    /// 被 delete_orphan_catalogs 清掉（表现为「模型列表突然空了」）。
+    #[test]
+    fn editing_platform_keeps_catalog_key_for_standard_adapter() {
+        let (pool, path) = test_db();
+        let id = seed_platform(&pool);
+        let before = crate::db::platform::get(&pool, &id).unwrap().catalog_key.unwrap();
+
+        // 只改名字，adapter 保持 Keep（旧行是 NULL）
+        let req: crate::models::platform::UpdatePlatformRequest = serde_json::from_value(
+            serde_json::json!({ "name": "renamed" }),
+        )
+        .unwrap();
+        let after = crate::db::platform::update(&pool, &id, &req).unwrap();
+        assert_eq!(
+            after.catalog_key.as_deref(),
+            Some(before.as_str()),
+            "编辑平台名不该改变 catalog_key"
+        );
+
+        // 显式写标准 adapter 也一样
+        let req: crate::models::platform::UpdatePlatformRequest = serde_json::from_value(
+            serde_json::json!({ "adapter": "OpenAI" }),
+        )
+        .unwrap();
+        let after = crate::db::platform::update(&pool, &id, &req).unwrap();
+        assert_eq!(after.catalog_key.as_deref(), Some(before.as_str()));
+        assert_eq!(after.adapter.as_deref(), Some("OpenAI"));
+
+        cleanup_db(&path);
+    }
+
+    /// V28 回归：切成私有 adapter 必须换 catalog_key（否则会与 OpenAI 目录混用）。
+    #[test]
+    fn switching_to_proprietary_adapter_changes_catalog_key() {
+        let (pool, path) = test_db();
+        let id = seed_platform(&pool);
+        let before = crate::db::platform::get(&pool, &id).unwrap().catalog_key.unwrap();
+
+        let req: crate::models::platform::UpdatePlatformRequest = serde_json::from_value(
+            serde_json::json!({ "adapter": "Trae" }),
+        )
+        .unwrap();
+        let after = crate::db::platform::update(&pool, &id, &req).unwrap();
+        assert_ne!(
+            after.catalog_key.as_deref(),
+            Some(before.as_str()),
+            "切成 Trae 必须换目录键，避免与同域名的 OpenAI 目录混用"
+        );
+        // 存进去的必须能读回来（小写 key_str 与 resolve 的一致性）
+        assert_eq!(
+            crate::models::adapter::PlatformAdapter::resolve(
+                after.adapter.as_deref(),
+                &after.platform_type
+            ),
+            crate::models::adapter::PlatformAdapter::Trae
+        );
 
         cleanup_db(&path);
     }

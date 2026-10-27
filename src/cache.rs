@@ -14,6 +14,13 @@ use crate::models::stats::{RequestAttempt, RequestStat};
 pub struct ResolvedBackend {
     pub backend: Backend,
     pub platform: Platform,
+    /// 私有协议上游（Trae / WorkBuddy）的解密后凭据。
+    /// 标准上游为 None——它们用 `platform.api_key`。
+    ///
+    /// **明文驻留内存的取舍**：与现有 `platforms.api_key` 同等级（那个也是明文常驻）。
+    /// 每次请求都解一遍 AES 没必要，凭据变化是低频事件（刷新/用户修改），
+    /// 刷新后 `cache.refresh()` 会重新解密。这里不落日志、不出 HTTP 响应。
+    pub credential: Option<crate::db::credential::CredentialSecret>,
 }
 
 /// 已解析的路由：包含所有后端及其对应平台信息
@@ -48,22 +55,33 @@ struct RouteCacheInner {
     api_keys: DashMap<String, StoredApiKey>,
     /// DB 连接池（仅用于刷新缓存）
     db: DbPool,
+    /// 凭据解密用的密钥（来自 config.toml 的 encrypt_key）。
+    /// 用 RwLock 而不是快照：`PUT /api/settings` 可以改 encrypt_key，
+    /// 改完必须能立刻解出用新密钥写入的凭据。
+    encrypt_key: parking_lot::RwLock<String>,
 }
 
 impl RouteCache {
     /// 创建缓存并从 DB 加载初始数据
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(db: DbPool, encrypt_key: String) -> Self {
         let cache = Self {
             inner: Arc::new(RouteCacheInner {
                 entries: DashMap::new(),
                 api_keys: DashMap::new(),
                 db,
+                encrypt_key: parking_lot::RwLock::new(encrypt_key),
             }),
         };
         // 初始加载
         cache.refresh();
         cache.refresh_api_keys();
         cache
+    }
+
+    /// 更新凭据解密密钥并重建缓存（settings 改了 encrypt_key 后调用）。
+    pub fn set_encrypt_key(&self, key: String) {
+        *self.inner.encrypt_key.write() = key;
+        self.refresh();
     }
 
     /// 从 DB 重建整个缓存（在管理操作后调用）
@@ -86,12 +104,36 @@ impl RouteCache {
             };
 
             let mut resolved_backends = Vec::new();
+            let encrypt_key = self.inner.encrypt_key.read().clone();
             for backend in &route.backends {
                 match crate::db::platform::get(db, &backend.platform_id) {
                     Ok(platform) => {
+                        // 私有协议上游需要凭据；解密失败不静默当成「没配」——
+                        // 那会让请求以一个看不懂的错误失败（比如空 token）。
+                        let credential = if crate::models::adapter::PlatformAdapter::resolve(
+                            platform.adapter.as_deref(),
+                            &platform.platform_type,
+                        )
+                        .is_proprietary()
+                        {
+                            match crate::db::credential::get(db, &platform.id, &encrypt_key) {
+                                Ok(found) => found.map(|stored| stored.secret),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "平台 {} 的凭据解密失败（请求将因缺凭据而失败）: {}",
+                                        platform.id,
+                                        e
+                                    );
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
                         resolved_backends.push(ResolvedBackend {
                             backend: backend.clone(),
                             platform,
+                            credential,
                         });
                     }
                     Err(e) => {

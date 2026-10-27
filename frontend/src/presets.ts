@@ -7,6 +7,12 @@ export interface PlatformPreset {
   platform_type: string
   base_url: string
   models: ModelPreset[]
+  /** 请求构造方式：OpenAI / Anthropic / Trae / WorkBuddy。缺省由 platform_type 推出 */
+  adapter?: string
+  /** 额度计量单位：none / credits / currency / requests。缺省 none */
+  credit_unit?: string
+  /** 私有协议上游（无官方 API，逆向客户端协议）——UI 要显示风险提示 */
+  proprietary?: boolean
 }
 
 export interface ModelPreset {
@@ -151,6 +157,78 @@ export const platformPresets: PlatformPreset[] = [
     platform_type: 'Azure', base_url: '',
     models: [
       { model_id: 'gpt-4o', display_name: 'GPT-4o', display_name_zh: 'GPT-4o', max_tokens: 16384, context_window: 128000, capabilities: ['Vision'] },
+    ]
+  },
+  // ---- 新增：Agnes AI（国内 / 海外两套独立站点与 base_url）----
+  {
+    name: 'Agnes AI（海外）', nameZh: 'Agnes AI（海外）', nameEn: 'Agnes AI (Global)',
+    platform_type: 'OpenAI', base_url: 'https://apihub.agnes-ai.com/v1',
+    adapter: 'OpenAI', credit_unit: 'requests',
+    models: [
+      { model_id: 'agnes-3.0-flash', display_name: 'Agnes 3.0 Flash', display_name_zh: 'Agnes 3.0 Flash', max_tokens: 8192, context_window: 128000, capabilities: ['Tool'] },
+      { model_id: 'agnes-2.5-flash', display_name: 'Agnes 2.5 Flash', display_name_zh: 'Agnes 2.5 Flash', max_tokens: 8192, context_window: 128000, capabilities: ['Tool'] },
+      { model_id: 'agnes-2.5-pro', display_name: 'Agnes 2.5 Pro', display_name_zh: 'Agnes 2.5 Pro', max_tokens: 8192, context_window: 128000, capabilities: ['Tool', 'Reasoning'] },
+    ]
+  },
+  {
+    name: 'Agnes AI（国内）', nameZh: 'Agnes AI（国内）', nameEn: 'Agnes AI (CN)',
+    platform_type: 'OpenAI', base_url: 'https://api.agnes-ai.cn/v1',
+    adapter: 'OpenAI', credit_unit: 'currency',
+    models: [
+      { model_id: 'agnes-3.0-flash', display_name: 'Agnes 3.0 Flash', display_name_zh: 'Agnes 3.0 Flash', max_tokens: 8192, context_window: 128000, capabilities: ['Tool'] },
+      { model_id: 'agnes-2.5-flash', display_name: 'Agnes 2.5 Flash', display_name_zh: 'Agnes 2.5 Flash', max_tokens: 8192, context_window: 128000, capabilities: ['Tool'] },
+    ]
+  },
+  // ---- 新增：魔搭社区（用户口语称「魔塔」）----
+  {
+    name: 'ModelScope 魔搭', nameZh: '魔搭社区', nameEn: 'ModelScope',
+    platform_type: 'OpenAI', base_url: 'https://api-inference.modelscope.cn/v1',
+    adapter: 'OpenAI', credit_unit: 'requests',
+    models: [
+      { model_id: 'Qwen/Qwen3-235B-A22B-Instruct', display_name: 'Qwen3 235B', display_name_zh: '通义千问3 235B', max_tokens: 8192, context_window: 131072, capabilities: ['Tool'] },
+      { model_id: 'deepseek-ai/DeepSeek-V4-Pro', display_name: 'DeepSeek V4 Pro', display_name_zh: 'DeepSeek V4 Pro', max_tokens: 8192, context_window: 131072, capabilities: ['Reasoning'] },
+    ]
+  },
+  // ---- 新增：Trae（私有协议，无官方 API）----
+  {
+    name: 'Trae（国内）', nameZh: 'Trae（国内）', nameEn: 'Trae (CN)',
+    platform_type: 'OpenAI', base_url: 'https://trae-api-cn.mchost.guru',
+    adapter: 'Trae', credit_unit: 'requests', proprietary: true,
+    models: [
+      { model_id: 'glm-5.2', display_name: 'GLM-5.2', display_name_zh: 'GLM-5.2', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'glm-5.3', display_name: 'GLM-5.3', display_name_zh: 'GLM-5.3', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'kimi-k3', display_name: 'Kimi K3', display_name_zh: 'Kimi K3', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'DeepSeek-V4-Pro', display_name: 'DeepSeek V4 Pro', display_name_zh: 'DeepSeek V4 Pro', max_tokens: 8192, context_window: 200000, capabilities: ['Reasoning'] },
+    ]
+  },
+  {
+    name: 'Trae（海外）', nameZh: 'Trae（海外）', nameEn: 'Trae (Global)',
+    platform_type: 'OpenAI', base_url: 'https://core-normal.traeapi.us',
+    adapter: 'Trae', credit_unit: 'currency', proprietary: true,
+    models: [
+      { model_id: 'gpt-5.4', display_name: 'GPT-5.4', display_name_zh: 'GPT-5.4', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'gpt-5.2', display_name: 'GPT-5.2', display_name_zh: 'GPT-5.2', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'gemini-3.1-pro', display_name: 'Gemini 3.1 Pro', display_name_zh: 'Gemini 3.1 Pro', max_tokens: 8192, context_window: 1000000, capabilities: ['Tool'] },
+    ]
+  },
+  // ---- 新增：WorkBuddy（私有协议，上游正在收紧）----
+  {
+    name: 'WorkBuddy（国内）', nameZh: 'WorkBuddy（国内）', nameEn: 'WorkBuddy (CN)',
+    platform_type: 'OpenAI', base_url: 'https://copilot.tencent.com',
+    adapter: 'WorkBuddy', credit_unit: 'credits', proprietary: true,
+    models: [
+      { model_id: 'glm-5.3', display_name: 'GLM-5.3', display_name_zh: 'GLM-5.3', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'deepseek-v4-pro', display_name: 'DeepSeek V4 Pro', display_name_zh: 'DeepSeek V4 Pro', max_tokens: 8192, context_window: 1000000, capabilities: ['Reasoning'] },
+      { model_id: 'kimi-k3', display_name: 'Kimi K3', display_name_zh: 'Kimi K3', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+    ]
+  },
+  {
+    name: 'WorkBuddy（海外）', nameZh: 'WorkBuddy（海外）', nameEn: 'WorkBuddy (Global)',
+    platform_type: 'OpenAI', base_url: 'https://www.workbuddy.ai',
+    adapter: 'WorkBuddy', credit_unit: 'credits', proprietary: true,
+    models: [
+      { model_id: 'glm-5.3', display_name: 'GLM-5.3', display_name_zh: 'GLM-5.3', max_tokens: 8192, context_window: 200000, capabilities: ['Tool'] },
+      { model_id: 'claude-sonnet-4.6', display_name: 'Claude Sonnet 4.6', display_name_zh: 'Claude Sonnet 4.6', max_tokens: 8192, context_window: 200000, capabilities: ['Tool', 'Vision'] },
     ]
   },
 ]

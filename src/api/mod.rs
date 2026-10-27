@@ -1,4 +1,5 @@
 pub mod platform;
+pub mod credential;
 pub mod alert;
 pub mod backup;
 pub mod model;
@@ -35,9 +36,17 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/platforms/test", web::post().to(platform::test_config))
                 // 静态段必须在 `{id}` 之前注册，否则 /platforms/credits 会被当成平台 id
                 .route("/platforms/credits", web::get().to(platform::credits))
+                .route("/platforms/key-links", web::get().to(credential::key_links))
+                .route("/platforms/key-link", web::get().to(credential::key_link_for))
                 .route("/platforms/{id}", web::get().to(platform::get))
                 .route("/platforms/{id}", web::put().to(platform::update))
                 .route("/platforms/{id}", web::delete().to(platform::delete))
+                // 上游凭据保险箱（Trae / WorkBuddy 等私有协议上游）
+                .route("/platforms/{id}/credentials", web::get().to(credential::get))
+                .route("/platforms/{id}/credentials", web::put().to(credential::put))
+                .route("/platforms/{id}/credentials", web::delete().to(credential::delete))
+                .route("/platforms/{id}/credentials/refresh", web::post().to(credential::refresh))
+                .route("/platforms/{id}/quota-sync", web::post().to(credential::quota_sync))
                 .route("/platforms/{id}/remote-models", web::get().to(platform::fetch_remote_models))
                 .route("/platforms/{id}/models/sync", web::post().to(platform::sync_models))
                 .route("/platforms/{id}/models/import", web::post().to(platform::import_models))

@@ -158,9 +158,25 @@ pub struct Backend {
     /// 每次请求消耗的上游积分；口径同 models.credit_price
     #[serde(default)]
     pub credit_price: Option<f64>,
+    /// 积分倍率；口径同 models.credit_multiplier，NULL = 1.0
+    #[serde(default)]
+    pub credit_multiplier: Option<f64>,
 }
 
 impl Backend {
+    /// 本次请求实际消耗的积分 = 单价 × 倍率。
+    ///
+    /// 返回 None 表示「未定价」——与 `credit_price = None` 同义，
+    /// 调用方据此走 `CreditReserve::Free`（记 0 但仍在台账里留痕）。
+    /// 倍率为 0 是**有效值**（WorkBuddy 的 "x0.00 credits" 模型不扣积分），
+    /// 不能和「未定价」混为一谈。
+    pub fn effective_credit_price(&self) -> Option<f64> {
+        self.credit_price.map(|price| {
+            let multiplier = self.credit_multiplier.unwrap_or(1.0);
+            price * multiplier
+        })
+    }
+
     /// 单价对（每 100 万 token）。入价或出价任一侧缺失就返回 None——半截价格算不出成本，
     /// 与其猜一个方向，不如整单不估算（成本列为 NULL，聚合也不把它算进覆盖率）。
     pub fn price_pair(&self) -> Option<(f64, f64)> {
@@ -299,6 +315,7 @@ mod tests {
             cache_write_price: None,
             peak_pricing: None,
             credit_price: None,
+            credit_multiplier: None,
         }
     }
 
@@ -310,6 +327,39 @@ mod tests {
         assert!((cost - 0.0045).abs() < 1e-12, "实际 {cost}");
         // 零用量就是零成本：与该行自己记录的 token 保持一致
         assert_eq!(b.estimate_cost(Some(0), Some(0)), Some(0.0));
+    }
+
+    #[test]
+    fn credit_multiplier_scales_the_effective_price() {
+        let mut b = priced(None, None);
+        b.credit_price = Some(2.0);
+        // 没设乘数 = 1.0，价格不变
+        assert_eq!(b.effective_credit_price(), Some(2.0));
+        // WorkBuddy 目录给的 "x0.79 credits"
+        b.credit_multiplier = Some(0.79);
+        let effective = b.effective_credit_price().unwrap();
+        assert!((effective - 1.58).abs() < 1e-12, "实际 {effective}");
+    }
+
+    #[test]
+    fn zero_multiplier_means_free_but_not_unpriced() {
+        // "x0.00 credits" 是有效值（该模型不扣积分），
+        // 必须与「未定价（credit_price = None）」区分开：
+        // 前者记 0 但仍在台账留痕，后者根本不进台账。
+        let mut b = priced(None, None);
+        b.credit_price = Some(2.0);
+        b.credit_multiplier = Some(0.0);
+        assert_eq!(b.effective_credit_price(), Some(0.0));
+
+        let unpriced = priced(None, None);
+        assert_eq!(unpriced.effective_credit_price(), None);
+    }
+
+    #[test]
+    fn missing_credit_price_stays_unpriced_even_with_multiplier() {
+        let mut b = priced(None, None);
+        b.credit_multiplier = Some(0.79);
+        assert_eq!(b.effective_credit_price(), None, "没有单价就不该凭空算出价格");
     }
 
     #[test]
