@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Autocomplete,
@@ -16,6 +16,7 @@ import {
   IconArrowLeft,
   IconCopy,
   IconEdit,
+  IconGripVertical,
   IconPlus,
   IconRefresh,
   IconTrash,
@@ -35,6 +36,7 @@ import {
   listBackends,
   listModels,
   listPlatforms,
+  reorderBackends,
   updateBackend,
   updateProxy,
   updateRoute,
@@ -202,6 +204,13 @@ export default function ModelDetail() {
   const [deleteModelOpen, setDeleteModelOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [rename, setRename] = useState('')
+  const [orderOverride, setOrderOverride] = useState<string[] | null>(null)
+  const [dragIndex, setDragIndex] = useState<number | null>(null)
+  const [orderSaving, setOrderSaving] = useState(false)
+  // 路由配置草稿是否被用户改过；refetch 不许覆盖正在编辑的内容
+  const routeDraftTouched = useRef(false)
+  // 改序请求串行执行：并发 PUT 到达顺序不保证，后到的旧列表会把新次序写回去
+  const commitChain = useRef<Promise<void>>(Promise.resolve())
 
   const modelQuery = useQuery({
     queryKey: ['model', id],
@@ -290,23 +299,28 @@ export default function ModelDetail() {
     setBackendModalOpen(false)
     setDeleteBackendTarget(null)
     setDeleteModelOpen(false)
+    routeDraftTouched.current = false
   }, [id])
 
   useEffect(() => {
     if (!detail) return
     setRename(detail.proxy.name)
     const firstRoute = detail.routes[0]
-    setRouteDraft(firstRoute ? {
-      strategy: firstRoute.lb_strategy || 'RoundRobin',
-      retries: firstRoute.retry_policy?.max_retries ?? 2,
-      backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
-      maxTokens: firstRoute.default_max_tokens ?? 4096,
-    } : {
-      strategy: 'RoundRobin',
-      retries: 2,
-      backoff: 500,
-      maxTokens: 4096,
-    })
+    // 拖拽/增删后端都会触发 refetch：直接回填会把没保存的路由配置悄悄冲掉，
+    // 所以只在用户没动过表单时用服务端值初始化。
+    if (!routeDraftTouched.current) {
+      setRouteDraft(firstRoute ? {
+        strategy: firstRoute.lb_strategy || 'RoundRobin',
+        retries: firstRoute.retry_policy?.max_retries ?? 2,
+        backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
+        maxTokens: firstRoute.default_max_tokens ?? 4096,
+      } : {
+        strategy: 'RoundRobin',
+        retries: 2,
+        backoff: 500,
+        maxTokens: 4096,
+      })
+    }
     setSelectedBackendId(current => (
       current && firstRoute?.backends?.some(backend => backend.id === current)
         ? current
@@ -349,6 +363,59 @@ export default function ModelDetail() {
     await queryClient.invalidateQueries({ queryKey: ['model', id] })
     await queryClient.invalidateQueries({ queryKey: ['models'] })
     await queryClient.invalidateQueries({ queryKey: ['model-stats', id] })
+  }
+
+  // 轮询取的是后端切片的下标（lb::select → backends[counter % len]），
+  // 而切片来自 ORDER BY priority —— 所以主干次序就是实际的轮询次序。
+  const orderedBackends = useMemo(() => {
+    if (!orderOverride) return backends
+    const byId = new Map(backends.map(backend => [backend.id, backend]))
+    const moved = orderOverride.map(backendId => byId.get(backendId)).filter(Boolean) as BackendInfo[]
+    for (const backend of backends) {
+      if (!orderOverride.includes(backend.id)) moved.push(backend)
+    }
+    return moved
+  }, [backends, orderOverride])
+
+  const moveBackend = (from: number, to: number): string[] | null => {
+    if (from === to || to < 0 || to >= backends.length) return null
+    const ids = orderOverride ?? backends.map(backend => backend.id)
+    const next = [...ids]
+    const [moved] = next.splice(from, 1)
+    next.splice(to, 0, moved)
+    setOrderOverride(next)
+    return next
+  }
+
+  const editRouteDraft = (patch: Partial<typeof routeDraft>) => {
+    routeDraftTouched.current = true
+    setRouteDraft(prev => ({ ...prev, ...patch }))
+  }
+
+  const sameOrder = (a: string[], b: string[]) =>
+    a.length === b.length && a.every((id, index) => id === b[index])
+
+  const commitOrder = (ids: string[]) => {
+    if (!route) return
+    // 拖出去又拖回原位不该写库：那会把全 0 的 priority 固化成 0..n
+    if (sameOrder(ids, backends.map(backend => backend.id))) {
+      setOrderOverride(null)
+      return
+    }
+    const routeId = route.id
+    commitChain.current = commitChain.current.then(async () => {
+      setOrderSaving(true)
+      try {
+        await reorderBackends(routeId, ids)
+        await invalidate()
+      } catch {
+        notifications.show({ message: t(locale, 'reorderFailed'), color: 'red' })
+      } finally {
+        // 只清自己提交的那一版；期间又拖了一次就别抢它的草稿
+        setOrderOverride(current => (current && sameOrder(current, ids) ? null : current))
+        setOrderSaving(false)
+      }
+    })
   }
 
   const openAddBackend = () => {
@@ -452,6 +519,8 @@ export default function ModelDetail() {
         },
         default_max_tokens: routeDraft.maxTokens,
       })
+      // 存过之后草稿就是服务端值了，让回填重新接管（拿到后端归一化后的结果）
+      routeDraftTouched.current = false
       await invalidate()
       notifications.show({ message: t(locale, 'updateSuccess'), color: 'green' })
     } catch {
@@ -614,7 +683,7 @@ export default function ModelDetail() {
       {tab === 'routing' && (
         <>
           <div className="console-model-layout">
-            <aside className="console-panel console-route-config">
+            <aside className="console-panel console-route-config" aria-label={t(locale, 'routeConfig')}>
               <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'routeConfig')}</div><span className="console-panel-sub">{t(locale, 'routeLabel')}</span></div>
               <div className="console-panel-body">
                 {route ? (
@@ -624,36 +693,39 @@ export default function ModelDetail() {
                         size="xs"
                         data={LB_OPTIONS.map(option => ({ value: option.value, label: option[locale] }))}
                         value={routeDraft.strategy}
-                        onChange={value => setRouteDraft(prev => ({ ...prev, strategy: value || 'RoundRobin' }))}
+                        onChange={value => editRouteDraft({ strategy: value || 'RoundRobin' })}
                         allowDeselect={false}
                       />
                     </Field>
                     <Field label={t(locale, 'retryAttempts')}>
-                      <NumberInput size="xs" min={0} max={10} value={routeDraft.retries} onChange={value => setRouteDraft(prev => ({ ...prev, retries: Number(value) || 0 }))} />
+                      <NumberInput size="xs" min={0} max={10} value={routeDraft.retries} onChange={value => editRouteDraft({ retries: Number(value) || 0 })} />
                     </Field>
                     <Field label={t(locale, 'backoffMs')}>
-                      <NumberInput size="xs" min={100} value={routeDraft.backoff} onChange={value => setRouteDraft(prev => ({ ...prev, backoff: Number(value) || 100 }))} />
+                      <NumberInput size="xs" min={100} value={routeDraft.backoff} onChange={value => editRouteDraft({ backoff: Number(value) || 100 })} />
                     </Field>
                     <Field label={t(locale, 'defaultMaxTokens')}>
-                      <NumberInput size="xs" min={1} value={routeDraft.maxTokens} onChange={value => setRouteDraft(prev => ({ ...prev, maxTokens: Number(value) || 1 }))} />
+                      <NumberInput size="xs" min={1} value={routeDraft.maxTokens} onChange={value => editRouteDraft({ maxTokens: Number(value) || 1 })} />
                     </Field>
                     <div className="console-field">
                       <label>{t(locale, 'weightDistribution')}</label>
                       <div className="console-weight-preview">
-                        {backends.map((backend, index) => (
+                        {orderedBackends.map((backend, index) => (
                           <span key={backend.id} style={{ flex: Math.max(1, backend.weight), opacity: 1 - index * 0.14 }} />
                         ))}
                       </div>
-                      <div className="console-weight-labels">{backends.map(backend => <span key={backend.id}>w{backend.weight}</span>)}</div>
+                      <div className="console-weight-labels">{orderedBackends.map(backend => <span key={backend.id}>w{backend.weight}</span>)}</div>
                     </div>
                     <div className="console-route-actions">
                       <Button size="xs" loading={saving} onClick={() => void saveRoute()}>{t(locale, 'saveRoute')}</Button>
-                      <Button size="xs" variant="default" onClick={() => setRouteDraft({
-                        strategy: route.lb_strategy || 'RoundRobin',
-                        retries: route.retry_policy?.max_retries ?? 2,
-                        backoff: route.retry_policy?.backoff_ms ?? 500,
-                        maxTokens: route.default_max_tokens ?? 4096,
-                      })}>{t(locale, 'discardChanges')}</Button>
+                      <Button size="xs" variant="default" onClick={() => {
+                        routeDraftTouched.current = false
+                        setRouteDraft({
+                          strategy: route.lb_strategy || 'RoundRobin',
+                          retries: route.retry_policy?.max_retries ?? 2,
+                          backoff: route.retry_policy?.backoff_ms ?? 500,
+                          maxTokens: route.default_max_tokens ?? 4096,
+                        })
+                      }}>{t(locale, 'discardChanges')}</Button>
                     </div>
                   </>
                 ) : (
@@ -686,15 +758,42 @@ export default function ModelDetail() {
                       </div>
                       <div className="console-patch-bus" />
                       <div className="console-backend-stack">
-                        {backends.map((backend, index) => {
+                        {orderedBackends.map((backend, index) => {
                           const platform = platforms.find(item => item.id === backend.platform_id)
                           return (
                             <button
                               type="button"
                               key={backend.id}
-                              className={`console-backend-card${selectedBackend?.id === backend.id ? ' selected' : ''}${backend.status === 'Disabled' ? ' degraded' : ''}`}
+                              className={`console-backend-card${selectedBackend?.id === backend.id ? ' selected' : ''}${backend.status === 'Disabled' ? ' degraded' : ''}${dragIndex === index ? ' dragging' : ''}`}
                               onClick={() => setSelectedBackendId(backend.id)}
+                              draggable
+                              title={t(locale, 'reorderHint')}
+                              aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                              onDragStart={event => {
+                                setDragIndex(index)
+                                setOrderOverride(orderOverride ?? backends.map(item => item.id))
+                                event.dataTransfer.effectAllowed = 'move'
+                              }}
+                              onDragOver={event => {
+                                if (dragIndex === null || dragIndex === index) return
+                                event.preventDefault()
+                                moveBackend(dragIndex, index)
+                                setDragIndex(index)
+                              }}
+                              onDrop={event => event.preventDefault()}
+                              onDragEnd={() => {
+                                setDragIndex(null)
+                                if (orderOverride) void commitOrder(orderOverride)
+                              }}
+                              onKeyDown={event => {
+                                if (!event.altKey) return
+                                if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return
+                                event.preventDefault()
+                                const ids = moveBackend(index, index + (event.key === 'ArrowUp' ? -1 : 1))
+                                if (ids) void commitOrder(ids)
+                              }}
                             >
+                              <IconGripVertical className="grip" size={13} aria-hidden />
                               <span className="idx">{String(index + 1).padStart(2, '0')}</span>
                               <span className="main">
                                 <span className="title">{platform?.name || backend.platform_id}</span>
@@ -712,6 +811,9 @@ export default function ModelDetail() {
                     </div>
                     <div className="console-patch-foot">
                       <span>{t(locale, 'weightTotalValue', String(weightTotal))} · {t(locale, 'weightTotalHint')}</span>
+                      <span className={orderSaving ? 'saving' : ''}>
+                        {orderSaving ? t(locale, 'reorderSaving') : t(locale, 'reorderHint')}
+                      </span>
                       <span>{t(locale, 'weightedSignal')}</span>
                     </div>
                   </>
@@ -725,7 +827,10 @@ export default function ModelDetail() {
               </div>
             </section>
 
-            <aside className="console-panel console-backend-inspector">
+            <aside
+              className="console-panel console-backend-inspector"
+              aria-label={selectedBackend ? t(locale, 'backendDetail') : t(locale, 'backends')}
+            >
               <div className="console-panel-head">
                 <div className="console-panel-title">{selectedBackend ? t(locale, 'backendDetail') : t(locale, 'backends')}</div>
                 {selectedBackend && <StatusPill tone={backendTone(selectedBackend)}>{selectedBackend.status === 'Active' ? t(locale, 'modelStatusActive') : t(locale, 'modelStatusDisabled')}</StatusPill>}

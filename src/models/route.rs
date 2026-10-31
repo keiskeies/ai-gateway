@@ -293,6 +293,11 @@ pub struct UpdateBackendRequest {
     pub reasoning_echo: Option<ReasoningEcho>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReorderBackendsRequest {
+    pub backend_ids: Vec<String>,
+}
+
 fn default_lb_strategy() -> LBStrategy { LBStrategy::RoundRobin }
 fn default_weight() -> u32 { 1 }
 

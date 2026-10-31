@@ -100,6 +100,21 @@ pub async fn update_backend(
     Ok(HttpResponse::Ok().json(backend))
 }
 
+/// 批量重排后端次序（主干拖拽）。逐条 PUT 会写出半套 priority，也会把缓存重建 N 次。
+pub async fn reorder_backends(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+    path: web::Path<String>,
+    body: web::Json<ReorderBackendsRequest>,
+) -> AppResult<HttpResponse> {
+    let route_id = path.into_inner();
+    let req = body.into_inner();
+    let db = db.into_inner();
+    let backends = db_block!(db, crate::db::route::set_order(&db, &route_id, &req.backend_ids));
+    cache.refresh();
+    Ok(HttpResponse::Ok().json(backends))
+}
+
 pub async fn delete_backend(
     db: web::Data<DbPool>,
     cache: web::Data<Arc<RouteCache>>,

@@ -76,6 +76,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .route("/routes/{id}", web::delete().to(route::delete))
                 .route("/routes/{route_id}/backends", web::get().to(route::list_backends))
                 .route("/routes/{route_id}/backends", web::post().to(route::add_backend))
+                .route("/routes/{route_id}/backends/order", web::put().to(route::reorder_backends))
                 .route("/backends/{id}", web::put().to(route::update_backend))
                 .route("/backends/{id}", web::delete().to(route::delete_backend))
                 // API Keys

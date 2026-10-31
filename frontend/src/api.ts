@@ -221,6 +221,9 @@ export const listBackends = (routeId: string) => api.get(`/routes/${routeId}/bac
 export const addBackend = (routeId: string, data: any) => api.post(`/routes/${routeId}/backends`, data).then(r => r.data)
 export const updateBackend = (id: string, data: any) => api.put(`/backends/${id}`, data).then(r => r.data)
 export const deleteBackend = (id: string) => api.delete(`/backends/${id}`)
+// 一次写完整份次序：逐条 PUT priority 会留下半套顺序，且每次都要重建路由缓存
+export const reorderBackends = (routeId: string, backendIds: string[]) =>
+  api.put(`/routes/${routeId}/backends/order`, { backend_ids: backendIds }).then(r => r.data)
 
 // API Keys
 export const listApiKeys = () => api.get('/api-keys').then(r => r.data)

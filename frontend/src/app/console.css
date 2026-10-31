@@ -2392,7 +2392,8 @@ h4,
 
 .console-route-meta {
   margin-top: 5px;
-  color: var(--text-3);
+  /* 路由节点底色掺了 7% accent，浅色方案下 --text-3 只有 4.3:1，差一点过不了 */
+  color: var(--text-2);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.7;
@@ -2482,11 +2483,37 @@ h4,
   background: var(--err);
 }
 
+.console-backend-card .grip {
+  flex: none;
+  margin-left: -3px;
+  color: var(--text-3);
+  opacity: .3;
+  transition: opacity .15s ease;
+}
+
+.console-backend-card:hover .grip,
+.console-backend-card:focus-visible .grip,
+.console-backend-card.dragging .grip {
+  opacity: .85;
+}
+
+.console-backend-card.dragging {
+  opacity: .45;
+  cursor: grabbing;
+}
+
 .console-backend-card .idx {
   width: 18px;
   color: var(--text-3);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+/* 选中态底色掺了 accent，--text-3 在上面只有 4.42:1（深）/ 4.26:1（浅），
+   两条都差一点点过 4.5:1 —— 只有这一种底色需要提一级。 */
+.console-backend-card.selected .idx,
+.console-backend-card.selected .sub {
+  color: var(--text-2);
 }
 
 .console-backend-card .main {
@@ -2554,6 +2581,10 @@ h4,
   color: var(--text-3);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+
+.console-patch-foot .saving {
+  color: var(--accent);
 }
 
 .console-backend-inspector .console-panel-body {

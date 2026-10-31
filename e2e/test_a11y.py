@@ -34,10 +34,12 @@ def test_console_pages_pass_axe(console, page, api, errors, mock_stack, browser_
 
     light = browser_factory(api, init=f"{INIT}; localStorage.setItem('theme', 'light')")
     handles = [("深色", console, page), ("浅色", light, light.new_page())]
+    # 详情页要真实 id 才能进 DOM：假上游那套已经有平台 + 虚拟模型 + 一个后端
+    routes = PAGES + [(f"/models/{mock_stack['proxy']['id']}", ".console-shell")]
     findings: dict[str, list[dict]] = {}
     try:
         for scheme, owner, handle in handles:
-            for route, mount in PAGES:
+            for route, mount in routes:
                 owner.goto(handle, route, mount)
                 # 首屏查询落地之后再审：否则审到的是骨架屏，表格里的可访问名根本没进 DOM
                 handle.wait_for_timeout(800)

@@ -120,7 +120,9 @@ pub fn list_all(pool: &DbPool) -> AppResult<Vec<Route>> {
 
     let mut grouped: std::collections::HashMap<String, Vec<Backend>> = std::collections::HashMap::new();
     {
-        let sql = format!("SELECT {} {} ORDER BY b.priority, b.weight", BACKEND_COLS, BACKEND_FROM);
+        // rowid 兜底：priority/weight 全等时（新建路由的默认值）没有第三列就是未定义顺序，
+        // list_all 全表扫和 list_backends_by_route 带 WHERE 会给出不同次序，主干列表会自己重排。
+        let sql = format!("SELECT {} {} ORDER BY b.priority, b.weight, b.rowid", BACKEND_COLS, BACKEND_FROM);
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], map_backend)?;
         for backend in rows {
@@ -187,7 +189,7 @@ pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
 pub fn list_backends_by_route(pool: &DbPool, route_id: &str) -> AppResult<Vec<Backend>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let sql = format!(
-        "SELECT {} {} WHERE b.route_id=?1 ORDER BY b.priority, b.weight",
+        "SELECT {} {} WHERE b.route_id=?1 ORDER BY b.priority, b.weight, b.rowid",
         BACKEND_COLS, BACKEND_FROM
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -224,6 +226,36 @@ pub fn update_backend(pool: &DbPool, id: &str, req: &UpdateBackendRequest) -> Ap
         rusqlite::params![id, b.weight, b.priority, b.max_concurrent, serde_json::to_string(&b.capabilities)?, serde_json::to_string(&b.status)?, serde_json::to_string(&b.param_overrides)?, serde_json::to_string(&b.unknown_params)?, serde_json::to_string(&b.reasoning_style)?, serde_json::to_string(&b.reasoning_echo)?],
     )?;
     Ok(b)
+}
+
+/// 按给定次序把 priority 重写成 0..n。轮询取的是后端切片的下标，
+/// 所以这个次序就是实际的轮询次序；优先级策略下它同时是故障转移次序。
+pub fn set_order(pool: &DbPool, route_id: &str, ordered_ids: &[String]) -> AppResult<Vec<Backend>> {
+    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+
+    let existing: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM backends WHERE route_id=?1 ORDER BY rowid")?;
+        let rows = stmt.query_map([route_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if existing.len() != ordered_ids.len() || existing.iter().collect::<std::collections::HashSet<_>>()
+        != ordered_ids.iter().collect::<std::collections::HashSet<_>>()
+    {
+        return Err(crate::error::AppError::BadRequest(
+            "顺序列表必须覆盖该路由的全部后端，且不能重复".to_string(),
+        ));
+    }
+
+    let tx = conn.transaction()?;
+    for (index, id) in ordered_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE backends SET priority=?1 WHERE id=?2 AND route_id=?3",
+            rusqlite::params![index as u32, id, route_id],
+        )?;
+    }
+    tx.commit()?;
+
+    list_backends_by_route(pool, route_id)
 }
 
 pub fn delete_backend(pool: &DbPool, id: &str) -> AppResult<()> {
