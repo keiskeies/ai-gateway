@@ -19,16 +19,21 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use chrono::Timelike;
 use serde::Serialize;
 
 use crate::api::settings::SharedAppConfig;
-use crate::db::{checkin as db, DbPool};
+use crate::db::{checkin as db, checkin_task as db_task, DbPool};
 use crate::error::{AppError, AppResult};
 
 pub const MODELSCOPE: &str = "modelscope";
 
 /// attempt 的有效期：用户从登录窗口切回表单、填完平台信息再保存的时间裕量。
 const ATTEMPT_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// 任务内/任务间的重试间隔：魔搭的每日奖励可能晚于零点发放，
+/// 首轮没到账时 3 小时后再看一次。
+const RETRY_AFTER: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// 登录窗口的注入点：core 不依赖 tauri，由桌面端在启动时注册。
 /// 参数：平台 key、attempt id（绑定到哪个平台由 attempt 自己记着）。
@@ -103,6 +108,20 @@ pub struct AccountView {
     pub daily_amount: Option<f64>,
     pub daily_done: bool,
     pub updated_at: String,
+}
+
+/// 一条定时领取任务。账号用平台行 id 引用，界面自己拿平台列表翻译成名字。
+#[derive(Debug, Serialize, Clone)]
+pub struct TaskView {
+    pub id: String,
+    pub name: String,
+    /// `'HH:MM'` 本地时间
+    pub time: String,
+    pub platform_ids: Vec<String>,
+    pub enabled: bool,
+    pub last_run_at: Option<String>,
+    pub last_run_day: Option<String>,
+    pub last_message: String,
 }
 
 /// 这个平台记录能不能做「登录/领取」。依据 Key 申请注册表里的品牌判断，
@@ -420,6 +439,186 @@ pub async fn run_all(pool: &DbPool, encrypt_key: &str) -> AppResult<Vec<AccountV
     Ok(views)
 }
 
+// ── 定时任务 ────────────────────────────────────────────────
+
+/// `'HH:MM'` → 当天第几分钟；格式不合法返回 None（脏数据宁可跳过也不猜）
+fn minutes_of(raw: &str) -> Option<u32> {
+    let raw = raw.trim();
+    let (hour, minute) = raw.split_once(':')?;
+    if hour.is_empty() || hour.len() > 2 || minute.len() != 2 {
+        return None;
+    }
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(hour * 60 + minute)
+}
+
+fn normalize_time(raw: &str) -> AppResult<String> {
+    let minutes = minutes_of(raw).ok_or_else(|| {
+        AppError::BadRequest("时间格式应为 HH:MM，例如 00:05".to_string())
+    })?;
+    Ok(format!("{:02}:{:02}", minutes / 60, minutes % 60))
+}
+
+/// 任务里的账号必须是「支持登录领取的平台行」。按 base_url 前缀识别，不按名字。
+fn validate_targets(pool: &DbPool, ids: &[String]) -> AppResult<Vec<String>> {
+    if ids.is_empty() {
+        return Err(AppError::BadRequest("至少选择一个账号".to_string()));
+    }
+    let mut kept: Vec<String> = Vec::new();
+    for id in ids {
+        if kept.contains(id) {
+            continue;
+        }
+        let platform = crate::db::platform::get(pool, id)
+            .map_err(|_| AppError::BadRequest(format!("账号不存在：{id}")))?;
+        if platform_key_for(&platform.name, &platform.base_url).is_none() {
+            return Err(AppError::BadRequest(format!(
+                "「{}」不支持登录领取",
+                platform.name
+            )));
+        }
+        kept.push(id.clone());
+    }
+    Ok(kept)
+}
+
+pub fn tasks(pool: &DbPool) -> AppResult<Vec<TaskView>> {
+    Ok(db_task::list(pool)?.into_iter().map(TaskView::from_row).collect())
+}
+
+/// 「立即运行」要先拿到任务行（含账号清单）才能跑；跑完再回读视图给前端。
+pub fn task_row(pool: &DbPool, id: &str) -> AppResult<db_task::CheckinTaskRow> {
+    db_task::get(pool, id)?.ok_or_else(|| AppError::NotFound("定时任务不存在".to_string()))
+}
+
+fn task_by_id(pool: &DbPool, id: &str) -> AppResult<TaskView> {
+    db_task::get(pool, id)?
+        .map(TaskView::from_row)
+        .ok_or_else(|| AppError::NotFound("定时任务不存在".to_string()))
+}
+
+pub fn task_view(pool: &DbPool, id: &str) -> AppResult<TaskView> {
+    task_by_id(pool, id)
+}
+
+pub fn create_task(
+    pool: &DbPool,
+    name: &str,
+    time: &str,
+    platform_ids: &[String],
+    enabled: Option<bool>,
+) -> AppResult<TaskView> {
+    let time = normalize_time(time)?;
+    let ids = validate_targets(pool, platform_ids)?;
+    let id = db_task::create(pool, name.trim(), &time, &ids, enabled.unwrap_or(true))?;
+    task_by_id(pool, &id)
+}
+
+pub fn update_task(
+    pool: &DbPool,
+    id: &str,
+    name: &str,
+    time: &str,
+    platform_ids: &[String],
+    enabled: Option<bool>,
+) -> AppResult<TaskView> {
+    let time = normalize_time(time)?;
+    let ids = validate_targets(pool, platform_ids)?;
+    // 没带 enabled 就维持现状：改点位不该顺手把停用的任务打开
+    let keep = task_row(pool, id)?.enabled;
+    if !db_task::update(pool, id, name.trim(), &time, &ids, enabled.unwrap_or(keep))? {
+        return Err(AppError::NotFound("定时任务不存在".to_string()));
+    }
+    task_by_id(pool, id)
+}
+
+pub fn delete_task(pool: &DbPool, id: &str) -> AppResult<()> {
+    if !db_task::remove(pool, id)? {
+        return Err(AppError::NotFound("定时任务不存在".to_string()));
+    }
+    Ok(())
+}
+
+/// 跑一条任务。`force`（界面上的「立即运行」）绕过账号级的「今天已领/不足 3 小时」过滤。
+/// 逐个账号串行领取：同一站点同时来多个账号的请求没有好处。
+pub async fn run_task(
+    pool: &DbPool,
+    encrypt_key: &str,
+    task: &db_task::CheckinTaskRow,
+    force: bool,
+) -> AppResult<String> {
+    let accounts = db::list(pool)?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let now = chrono::Utc::now();
+    let run_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+
+    let mut credited = 0;
+    let mut waiting = 0;
+    let mut relogin = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    let mut offline = 0;
+
+    for id in &task.platform_ids {
+        let Some(account) = accounts.iter().find(|row| &row.platform_id == id) else {
+            // 任务建好后退出登录或删了平台：这一行没有会话可领
+            offline += 1;
+            continue;
+        };
+        if !force && !needs_run(account, &today, now) {
+            if account.status == "expired" {
+                relogin += 1;
+            } else {
+                skipped += 1;
+            }
+            continue;
+        }
+        match run_once(pool, encrypt_key, id).await {
+            Ok(view) => match view.status.as_str() {
+                "ok" => credited += 1,
+                "waiting" => waiting += 1,
+                "expired" => relogin += 1,
+                _ => failed += 1,
+            },
+            Err(error) => {
+                tracing::warn!("定时领取（{id}）失败: {error}");
+                failed += 1;
+            }
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if credited > 0 {
+        parts.push(format!("{credited} 已到账"));
+    }
+    if waiting > 0 {
+        parts.push(format!("{waiting} 待发放"));
+    }
+    if relogin > 0 {
+        parts.push(format!("{relogin} 需重新登录"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} 领取失败"));
+    }
+    if skipped > 0 {
+        parts.push(format!("{skipped} 今日已领"));
+    }
+    if offline > 0 {
+        parts.push(format!("{offline} 未登录"));
+    }
+    let message = if parts.is_empty() {
+        "已全部到账".to_string()
+    } else {
+        parts.join(" · ")
+    };
+    db_task::update_run(pool, &task.id, &run_at, &today, &message)?;
+    Ok(message)
+}
+
 /// 成功读到余额后，用它校准平台的积分台账（`spent = budget - 上游可用余额`）。
 ///
 /// 为什么不是直接把余额当「剩余」显示：余额只在领取时读一次，请求期间不会变，
@@ -543,48 +742,83 @@ async fn execute(pool: &DbPool, encrypt_key: &str, row: &db::CheckinAccountRow) 
     )
 }
 
-/// 后台线程：启动即跑一轮，之后每 30 分钟看一次。是否真的请求由 `needs_run` 决定：
-/// 今天没到账的账号每 3 小时重试一次（发放时间可能晚于零点），到账后当天不再打扰。
-pub fn spawn_daily_runner(pool: DbPool, config: SharedAppConfig) {
+/// 后台线程：每 60 秒看一次任务表。
+///
+/// 为什么用「本地时分 ≥ 点位」而不是精确唤醒：应用可能在整个点位上没开（或机器在睡觉），
+/// 当天首次 tick 就把错过的任务补跑一次，比错过一整天好。跑过之后每 3 小时跟进仍未到账的
+/// 账号（发放可能晚于零点），全部到账后账号级 `needs_run` 会挡住真实请求。
+pub fn spawn_checkin_runner(pool: DbPool, config: SharedAppConfig) {
     std::thread::spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
-                tracing::error!("每日领取线程无法创建 tokio runtime: {}", error);
+                tracing::error!("定时领取线程无法创建 tokio runtime: {}", error);
                 return;
             }
         };
         loop {
             runtime.block_on(tick(&pool, &config));
-            std::thread::sleep(Duration::from_secs(30 * 60));
+            std::thread::sleep(Duration::from_secs(60));
         }
     });
 }
 
 async fn tick(pool: &DbPool, config: &SharedAppConfig) {
     let encrypt_key = config.read().security.encrypt_key.clone();
-    let rows = match db::list(pool) {
-        Ok(rows) => rows,
+    let tasks = match db_task::list(pool) {
+        Ok(tasks) => tasks,
         Err(error) => {
-            tracing::warn!("每日领取读取账号失败: {}", error);
+            tracing::warn!("定时领取读取任务失败: {}", error);
             return;
         }
     };
-    let now = chrono::Utc::now();
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    for row in rows {
-        if !needs_run(&row, &today, now) {
+    let now_local = chrono::Local::now();
+    let today = now_local.format("%Y-%m-%d").to_string();
+    for task in tasks {
+        if !task_due(&task, &today, now_local) {
             continue;
         }
-        match run_once(pool, &encrypt_key, &row.platform_id).await {
-            Ok(view) => tracing::info!(
-                "每日领取（{}）：{} — {}",
-                row.platform,
-                view.status,
-                view.message
+        match run_task(pool, &encrypt_key, &task, false).await {
+            Ok(message) => tracing::info!(
+                "定时领取（{} · {}）：{}",
+                task.time,
+                if task.name.is_empty() { "任务" } else { &task.name },
+                message
             ),
-            Err(error) => tracing::warn!("每日领取（{}）失败: {}", row.platform, error),
+            Err(error) => tracing::warn!("定时领取任务（{}）失败: {}", task.id, error),
         }
+    }
+}
+
+/// 到点没有：启用 + 本地时分已过点位 + 今天还没跑过（或跑过但已满 3 小时的跟进间隔）
+fn task_due(
+    task: &db_task::CheckinTaskRow,
+    today: &str,
+    now_local: chrono::DateTime<chrono::Local>,
+) -> bool {
+    if !task.enabled {
+        return false;
+    }
+    let Some(target) = minutes_of(&task.time) else {
+        return false;
+    };
+    if now_local.hour() * 60 + now_local.minute() < target {
+        return false;
+    }
+    if task.last_run_day.as_deref() != Some(today) {
+        return true;
+    }
+    let Some(last) = task.last_run_at.as_deref() else {
+        return true;
+    };
+    let now = now_local.with_timezone(&chrono::Utc);
+    match chrono::DateTime::parse_from_rfc3339(last) {
+        Ok(at) => {
+            now.signed_duration_since(at.with_timezone(&chrono::Utc))
+                >= chrono::Duration::seconds(RETRY_AFTER.as_secs() as i64)
+        }
+        // 时间读不懂就当作没跑过，让这一轮重新记账
+        Err(_) => true,
     }
 }
 
@@ -602,7 +836,8 @@ fn needs_run(row: &db::CheckinAccountRow, today: &str, now: chrono::DateTime<chr
         .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
     {
         Some(at) => {
-            now.signed_duration_since(at.with_timezone(&chrono::Utc)) >= chrono::Duration::hours(3)
+            now.signed_duration_since(at.with_timezone(&chrono::Utc))
+                >= chrono::Duration::seconds(RETRY_AFTER.as_secs() as i64)
         }
         None => true,
     }
@@ -624,6 +859,21 @@ impl AccountView {
             daily_amount: row.daily_amount,
             daily_done: row.daily_done,
             updated_at: row.updated_at,
+        }
+    }
+}
+
+impl TaskView {
+    fn from_row(row: db_task::CheckinTaskRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name,
+            time: row.time,
+            platform_ids: row.platform_ids,
+            enabled: row.enabled,
+            last_run_at: row.last_run_at,
+            last_run_day: row.last_run_day,
+            last_message: row.last_message,
         }
     }
 }
@@ -804,5 +1054,146 @@ mod tests {
             Some(MODELSCOPE)
         );
         assert_eq!(platform_key_for("DeepSeek", "https://api.deepseek.com/v1"), None);
+    }
+
+    fn task(
+        time: &str,
+        enabled: bool,
+        last_run_day: Option<&str>,
+        last_run_at: Option<&str>,
+    ) -> db_task::CheckinTaskRow {
+        db_task::CheckinTaskRow {
+            id: "task".into(),
+            name: String::new(),
+            time: time.into(),
+            platform_ids: vec!["p1".into()],
+            enabled,
+            last_run_at: last_run_at.map(str::to_string),
+            last_run_day: last_run_day.map(str::to_string),
+            last_message: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// 把「今天」的本地钟点固定下来，点位判定才能测
+    fn local_at(hour: u32, minute: u32) -> chrono::DateTime<chrono::Local> {
+        chrono::Local::now()
+            .with_hour(hour)
+            .and_then(|at| at.with_minute(minute))
+            .and_then(|at| at.with_second(0))
+            .expect("fix the local clock")
+    }
+
+    #[test]
+    fn task_time_is_validated_and_canonicalised() {
+        assert_eq!(normalize_time("00:05").expect("valid"), "00:05");
+        assert_eq!(normalize_time(" 7:30 ").expect("补零"), "07:30");
+        assert_eq!(normalize_time("23:59").expect("valid"), "23:59");
+        for bad in ["24:00", "7:60", "7:5", "abc", "0730", ""] {
+            let error = normalize_time(bad).unwrap_err().to_string();
+            assert!(error.contains("HH:MM"), "{bad} 要报格式错：{error}");
+        }
+        assert_eq!(minutes_of("23:59"), Some(24 * 60 - 1));
+    }
+
+    #[test]
+    fn task_due_waits_for_the_point_and_follows_up_every_three_hours() {
+        // 点位之前不跑；点位之后（哪怕错过了大半天）当天补跑一次
+        assert!(!task_due(&task("00:05", true, None, None), "2026-11-01", local_at(0, 4)));
+        assert!(task_due(&task("00:05", true, None, None), "2026-11-01", local_at(0, 5)));
+        assert!(task_due(&task("00:05", true, None, None), "2026-11-01", local_at(23, 0)));
+        assert!(!task_due(&task("00:05", false, None, None), "2026-11-01", local_at(23, 0)));
+        assert!(!task_due(&task("25:00", true, None, None), "2026-11-01", local_at(23, 0)));
+
+        // 今天跑过之后按 3 小时间隔跟进；跑过但时间读不懂则重新记账
+        let ran = local_at(20, 0);
+        let ago = |hours: i64| {
+            (ran.with_timezone(&chrono::Utc) - chrono::Duration::hours(hours))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+        };
+        assert!(!task_due(&task("00:05", true, Some("2026-11-01"), Some(&ago(2))), "2026-11-01", ran));
+        assert!(task_due(&task("00:05", true, Some("2026-11-01"), Some(&ago(3))), "2026-11-01", ran));
+        assert!(task_due(&task("00:05", true, Some("2026-10-31"), Some(&ago(2))), "2026-11-01", ran));
+        assert!(task_due(&task("00:05", true, Some("2026-11-01"), Some("nope")), "2026-11-01", ran));
+    }
+
+    fn add_platform(pool: &DbPool, name: &str, base_url: &str) -> String {
+        crate::db::platform::create(
+            pool,
+            &crate::models::platform::CreatePlatformRequest {
+                name: name.into(),
+                platform_type: crate::models::platform::PlatformType::OpenAI,
+                base_url: base_url.into(),
+                api_key: "sk-test".into(),
+                organization: None,
+                custom_headers: serde_json::Value::Null,
+                credit_budget: None,
+                credit_window: None,
+                credit_unit: None,
+                adapter: None,
+                login_attempt: None,
+            },
+        )
+        .expect("create platform")
+        .id
+    }
+
+    #[test]
+    fn task_targets_must_be_supported_accounts() {
+        let (pool, path) = test_db();
+        let modelscope = add_platform(&pool, "ModelScope 魔搭", "https://api-inference.modelscope.cn/v1");
+        let deepseek = add_platform(&pool, "DeepSeek", "https://api.deepseek.com/v1");
+
+        let empty = create_task(&pool, "", "00:05", &[], Some(true)).unwrap_err().to_string();
+        assert!(empty.contains("至少选择一个账号"), "{empty}");
+
+        let unsupported = create_task(&pool, "", "00:05", &[deepseek.clone()], Some(true))
+            .unwrap_err()
+            .to_string();
+        assert!(unsupported.contains("DeepSeek"), "要点名是哪一行：{unsupported}");
+
+        let view = create_task(
+            &pool,
+            " 每日 ",
+            "7:05",
+            &[modelscope.clone(), modelscope.clone()],
+            None,
+        )
+        .expect("create task");
+        assert_eq!(view.time, "07:05", "点位规范化后才落库");
+        assert_eq!(view.name, "每日", "名称两侧空白去掉");
+        assert_eq!(view.platform_ids, vec![modelscope.clone()], "重复账号只留一份");
+        assert!(view.enabled, "没表态就是启用");
+
+        let updated = update_task(&pool, &view.id, "早上", "23:59", &[modelscope.clone()], None)
+            .expect("update task");
+        assert_eq!((updated.time.as_str(), updated.name.as_str()), ("23:59", "早上"));
+        assert!(updated.enabled, "改点位不能顺手把开关打开或关掉");
+
+        let paused = update_task(&pool, &view.id, "早上", "23:59", &[modelscope.clone()], Some(false))
+            .expect("pause task");
+        assert!(!paused.enabled);
+        assert_eq!(tasks(&pool).expect("list").len(), 1);
+
+        delete_task(&pool, &view.id).expect("delete");
+        assert!(tasks(&pool).expect("list").is_empty());
+        assert!(delete_task(&pool, &view.id).is_err(), "重复删除要报错而不是假装成功");
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn deleting_a_platform_drops_it_from_every_task() {
+        let (pool, path) = test_db();
+        let keep = add_platform(&pool, "ModelScope 魔搭 1", "https://api-inference.modelscope.cn/v1");
+        let gone = add_platform(&pool, "ModelScope 魔搭 2", "https://api-inference.modelscope.cn/v1");
+        let view =
+            create_task(&pool, "", "00:05", &[keep.clone(), gone.clone()], Some(true)).expect("create");
+
+        crate::db::platform::delete(&pool, &gone).expect("delete platform");
+
+        let after = task_view(&pool, &view.id).expect("read task");
+        assert_eq!(after.platform_ids, vec![keep], "任务不能继续带着一个已删除的账号");
+        cleanup_db(&path);
     }
 }

@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 32;
+pub const CURRENT_SCHEMA_VERSION: i64 = 33;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -276,6 +276,12 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V32 (checkin_accounts.balance_at)");
     }
 
+    if current_version < 33 {
+        conn.execute_batch(SCHEMA_V33_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 33)", [])?;
+        tracing::info!("Database migrated to V33 (checkin_tasks for scheduled claiming)");
+    }
+
     Ok(())
 }
 
@@ -468,6 +474,24 @@ CREATE TABLE IF NOT EXISTS checkin_accounts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_checkin_accounts_platform
     ON checkin_accounts(platform_id);
+"#;
+
+/// V33：定时领取任务。任务 = 一个本地时间点位 + 一批平台行 id（平台即账号，
+/// 所以「魔搭1 + 魔搭2」就是两个 id）。只做领取：登录需要人在键盘前，不属于定时任务。
+/// `platform_ids` 存 JSON 数组而不是关联表——行数就是个位数，且整串读写比 JOIN 简单。
+const SCHEMA_V33_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS checkin_tasks (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL DEFAULT '',
+    time          TEXT NOT NULL,
+    platform_ids  TEXT NOT NULL DEFAULT '[]',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    last_run_at   TEXT,
+    last_run_day  TEXT,
+    last_message  TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
 "#;
 
 /// 请求正文只在显式开启时落库，默认关（见 §2 原则 10"默认不存请求正文"）。

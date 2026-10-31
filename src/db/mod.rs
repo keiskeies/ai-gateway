@@ -13,6 +13,7 @@ pub mod auth;
 pub mod config_transfer;
 pub mod client_config;
 pub mod checkin;
+pub mod checkin_task;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

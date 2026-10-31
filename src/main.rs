@@ -49,8 +49,8 @@ async fn main() -> std::io::Result<()> {
     let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());
     // 自动清理历史明细（默认关闭；设置里开启后才真正执行）
     ai_gateway::maintenance::spawn_auto_purge(db_pool.clone(), shared_config.clone());
-    // 每日领取：启动即补跑今天还没到账的账号，之后每 30 分钟看一眼
-    ai_gateway::checkin::spawn_daily_runner(db_pool.clone(), shared_config.clone());
+    // 每日领取：按平台页配的定时任务跑，每 60 秒看一眼任务表
+    ai_gateway::checkin::spawn_checkin_runner(db_pool.clone(), shared_config.clone());
 
     let proxy_state = Arc::new(ProxyState {
         db: db_pool.clone(),

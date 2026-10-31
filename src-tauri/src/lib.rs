@@ -468,7 +468,8 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
         let events_hub = ai_gateway::events::EventHub::new();
         let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());
         ai_gateway::maintenance::spawn_auto_purge(db_pool.clone(), shared_config.clone());
-        ai_gateway::checkin::spawn_daily_runner(db_pool.clone(), shared_config.clone());
+        // 每日领取：按平台页配的定时任务跑，每 60 秒看一眼任务表
+        ai_gateway::checkin::spawn_checkin_runner(db_pool.clone(), shared_config.clone());
         let api_cache = Arc::new(cache.clone());
         let login_limiter = web::Data::new(ai_gateway::api::auth::LoginLimiter::new());
 

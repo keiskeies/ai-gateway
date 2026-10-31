@@ -154,7 +154,12 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         .route("/platforms/{platform_id}/login", web::post().to(checkin::login_platform))
                         .route("/platforms/{platform_id}/run", web::post().to(checkin::run))
                         .route("/platforms/{platform_id}/session", web::delete().to(checkin::clear_session))
-                        .route("/run-all", web::post().to(checkin::run_all)),
+                        .route("/run-all", web::post().to(checkin::run_all))
+                        // 定时领取任务：清单随 /accounts 一起返回，这里只有写操作
+                        .route("/tasks", web::post().to(checkin::create_task))
+                        .route("/tasks/{task_id}", web::put().to(checkin::update_task))
+                        .route("/tasks/{task_id}", web::delete().to(checkin::delete_task))
+                        .route("/tasks/{task_id}/run", web::post().to(checkin::run_task_now)),
                 )
         );
 }

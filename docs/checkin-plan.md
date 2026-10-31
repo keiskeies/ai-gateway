@@ -88,7 +88,7 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
    失败的一次领取既不校准也不刷新余额；
 5. 状态：`Expired → expired`；成功且到账 `→ ok`；成功未到账 `→ waiting`。
 
-后台线程：启动即跑，之后每 30 分钟检查；今天没到账的账号每 3 小时重试；`expired` 不再重试（重新登录重置成 `new`）。
+后台线程：每 60 秒 tick 一次，是否真的发请求由任务判定（见 §9）；`expired` 不再重试（重新登录重置成 `new`）。
 
 ## 6. API
 
@@ -114,7 +114,59 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
   - 新建平台弹窗：匹配到能力表时出现「登录并获取 Key」，成功后回填名称与 API Key，保存时带 `login_attempt`。
 - 所有文案走 i18n（zh/en）。
 
-## 8. 风险与待验证
+## 8. 定时任务（V33）
+
+任务 = **一个时间点位 + 多选账号**，只做「领取」。登录不在范围内：登录要在 WebView 里输密码、
+过验证码，到点没人坐在电脑前时弹窗口只会晾在那里；未登录/已过期的账号在任务里**跳过**并在结果里点名。
+
+### 表
+
+`checkin_tasks(id, name, time, platform_ids, enabled, last_run_at, last_run_day, last_message, created_at, updated_at)`
+
+- `time` 是 `'HH:MM'` **本地**时间（与 `_schema_version` 之外所有「今天」的口径一致，都按 `chrono::Local`）；
+- `platform_ids` 是 JSON 数组，存平台行 id——平台即账号，所以「魔搭1 + 魔搭2」就是两个 id；
+- `last_run_day` 记本地日期，用于「今天已经跑过」判定。
+
+### 调度
+
+runner 每 60 秒 tick，`task_due`：
+
+1. `enabled`；
+2. 本地时分 **≥** `time`（不是精确相等——应用没开或电脑睡着错过点位时，当天首次启动就补跑）；
+3. 且满足其一：`last_run_day != 今天`（当天首轮），或距 `last_run_at` ≥ 3 小时（跟进仍未到账的账号）。
+
+原来的「启动即全量领一遍 + 每 3 小时重试所有账号」隐式行为**取消**：当天首轮改由任务负责，
+否则「00:05」这个时间点是假的。3 小时跟进保留，但只在任务今天已经跑过之后发生。
+
+### 执行
+
+`run_task(pool, config, task, force)`：目标 = `platform_ids` ∩ 有会话的账号；非 `force` 时再按
+`needs_run`（今天已到账 / `expired` / 距上次不足 3 小时 → 跳过）过滤；逐个串行 `run_once`
+（不并发，避免同一站点同时收到多个账号的请求）。汇总写 `last_message`，例如
+`3 个账号：2 已到账 · 1 待发放 · 1 需重新登录`。
+
+### API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/checkin/accounts` | 响应新增 `tasks`，平台页一次请求拿到账号与任务 |
+| POST | `/api/checkin/tasks` | `{name?, time, platform_ids}` |
+| PUT | `/api/checkin/tasks/{id}` | 同上 |
+| DELETE | `/api/checkin/tasks/{id}` | |
+| POST | `/api/checkin/tasks/{id}/run` | 立即运行（`force`，绕过 `needs_run`） |
+
+校验：`time` 必须是合法 `HH:MM`；`platform_ids` 非空，且每一行都能在能力表里匹配到受支持平台
+（按 base_url 前缀，不按名字）——否则 400 并点名是哪一行。删平台时和 `checkin_accounts` 一起在
+同一事务里从所有任务的 `platform_ids` 中剔除。
+
+### 前端
+
+平台页头部「定时任务」（与「一键登录/领取」同样只在 `local_console && checkin_login` 时出现）：
+弹窗内是任务列表（时间 · 账号 · 上次结果 · 启用开关 · 立即运行/编辑/删除）和新建表单
+（名称可选、时/分两个 Select、账号 MultiSelect 只列已登录的受支持平台行）。
+顶部一行说明：到点需要应用正在运行（关窗口不算，进程还在），错过顺延到下次启动补跑。
+
+## 9. 风险与待验证
 
 | 风险 | 处理 |
 | --- | --- |

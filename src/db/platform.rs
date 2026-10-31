@@ -280,5 +280,7 @@ pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
     tx.commit().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     drop(conn);
     let _ = crate::db::model::delete_orphan_catalogs(pool);
+    // 定时任务里引用的账号也要一并剔除，否则任务会一直带着一个已经不存在的账号
+    let _ = crate::db::checkin_task::drop_platform(pool, id);
     Ok(())
 }
