@@ -50,7 +50,7 @@ fn backend_by_id(pool: &DbPool, id: &str) -> AppResult<Backend> {
 pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let result = conn.query_row(
-        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens FROM routes WHERE proxy_id=?1",
+        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes WHERE proxy_id=?1",
         [proxy_id],
         |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -58,6 +58,7 @@ pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
             retry_policy: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
+            request_nonce: row.get::<_, i64>(6)? != 0,
             backends: vec![],
         }),
     );
@@ -75,7 +76,7 @@ pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
 pub fn get(pool: &DbPool, id: &str) -> AppResult<Route> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let mut route = conn.query_row(
-        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens FROM routes WHERE id=?1",
+        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes WHERE id=?1",
         [id],
         |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -83,6 +84,7 @@ pub fn get(pool: &DbPool, id: &str) -> AppResult<Route> {
             retry_policy: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
+            request_nonce: row.get::<_, i64>(6)? != 0,
             backends: vec![],
         }),
     )?;
@@ -105,7 +107,7 @@ pub fn list_all(pool: &DbPool) -> AppResult<Vec<Route>> {
 
     let mut routes: Vec<Route> = {
         let mut stmt = conn.prepare(
-            "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens FROM routes",
+            "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes",
         )?;
         let rows = stmt.query_map([], |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -113,6 +115,7 @@ pub fn list_all(pool: &DbPool) -> AppResult<Vec<Route>> {
             retry_policy: serde_json::from_str(&row.get::<_, String>(3)?).unwrap_or_default(),
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
+            request_nonce: row.get::<_, i64>(6)? != 0,
             backends: vec![],
         }))?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -141,9 +144,9 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
     let route_id = uuid::Uuid::new_v4().to_string();
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens) VALUES (?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         rusqlite::params![route_id, proxy_id, serde_json::to_string(&req.lb_strategy)?,
-            serde_json::to_string(&req.retry_policy)?, req.fallback, req.default_max_tokens],
+            serde_json::to_string(&req.retry_policy)?, req.fallback, req.default_max_tokens, req.request_nonce],
     )?;
     drop(conn);
 
@@ -161,6 +164,7 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
         id: route_id, proxy_id: proxy_id.to_string(),
         lb_strategy: req.lb_strategy.clone(), retry_policy: req.retry_policy.clone(),
         fallback: req.fallback.clone(), backends, default_max_tokens: req.default_max_tokens,
+        request_nonce: req.request_nonce,
     })
 }
 
@@ -170,11 +174,12 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateRouteRequest) -> AppResult<Ro
     if let Some(r) = &req.retry_policy { route.retry_policy = r.clone(); }
     if let Some(f) = &req.fallback { route.fallback = Some(f.clone()); }
     if let Some(m) = req.default_max_tokens { route.default_max_tokens = Some(m); }
+    if let Some(n) = req.request_nonce { route.request_nonce = n; }
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5 WHERE id=?1",
+        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5, request_nonce=?6 WHERE id=?1",
         rusqlite::params![id, serde_json::to_string(&route.lb_strategy)?,
-            serde_json::to_string(&route.retry_policy)?, route.fallback, route.default_max_tokens],
+            serde_json::to_string(&route.retry_policy)?, route.fallback, route.default_max_tokens, route.request_nonce],
     )?;
     Ok(route)
 }
@@ -312,6 +317,7 @@ mod tests {
             retry_policy: RetryPolicy::default(),
             fallback: None,
             default_max_tokens: None,
+            request_nonce: false,
             backends: vec![CreateBackendRequest {
                 platform_id: platform.id.clone(),
                 model_id: "gpt-test".into(),

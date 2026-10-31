@@ -34,6 +34,8 @@ pub struct ResolvedRoute {
     pub fallback: Option<String>,
     /// 客户端未传 max_tokens 时填充的默认值（None = 不干预）
     pub default_max_tokens: Option<u32>,
+    /// 每次上游尝试前置 16~32 位随机数字串
+    pub request_nonce: bool,
 }
 
 /// 缓存条目：proxy name → ResolvedRoute
@@ -153,6 +155,7 @@ impl RouteCache {
                         retry_policy: route.retry_policy,
                         fallback: route.fallback,
                         default_max_tokens: route.default_max_tokens,
+                        request_nonce: route.request_nonce,
                     },
                 },
             ));

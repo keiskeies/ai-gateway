@@ -16,7 +16,7 @@ const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, cu
 const MODEL_COLS: &str = "id, platform_id, model_id, display_name, max_tokens, context_window, \
     input_price, output_price, cache_read_price, cache_write_price, credit_price, peak_pricing, \
     catalog_key, capabilities, status";
-const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens";
+const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce";
 const BACKEND_COLS: &str = "id, route_id, platform_id, model_id, weight, priority, max_concurrent, \
     capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo";
 const API_KEY_COLS: &str = "id, name, key_hash, key_mask, proxy_id, created_at, last_used, \
@@ -102,6 +102,7 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
         retry_policy: decode(row.get::<_, String>(3)?, RetryPolicy::default()),
         fallback: row.get(4)?,
         default_max_tokens: row.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u32),
+        request_nonce: row.get::<_, i64>(6)? != 0,
     }))? {
         doc.routes.push(row?);
     }
@@ -488,7 +489,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
             continue;
         }
         tx.execute(
-            &format!("INSERT INTO routes ({ROUTE_COLS}) VALUES (?1,?2,?3,?4,?5,?6)"),
+            &format!("INSERT INTO routes ({ROUTE_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7)"),
             rusqlite::params![
                 row.id,
                 row.proxy_id,
@@ -496,6 +497,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 encode(&row.retry_policy)?,
                 row.fallback,
                 row.default_max_tokens.map(|v| v as i64),
+                row.request_nonce as i64,
             ],
         )?;
         result.routes.add += 1;

@@ -780,11 +780,29 @@ async fn handle_request(
                 machine_id: secret.machine_id.as_deref(),
             }
         });
+        // 打开路由开关时，每次上游尝试都在整段 prompt 最前面插一串 16~32 位随机数字。
+        // 注入面按目标协议选：Anthropic 与私有适配器读 system 字段，OpenAI 兼容上游只渲染 messages。
+        let nonce_surface = if adapter.is_proprietary()
+            || resolved.platform.platform_type == crate::models::platform::PlatformType::Anthropic
+        {
+            crate::protocol::nonce::Surface::SystemField
+        } else {
+            crate::protocol::nonce::Surface::Messages
+        };
+        let mut nonced_unified;
+        let unified_ref: &UnifiedRequest = if resolved_route.request_nonce {
+            nonced_unified = unified.clone();
+            crate::protocol::nonce::apply(&mut nonced_unified, nonce_surface);
+            &nonced_unified
+        } else {
+            &unified
+        };
+
         let plan = crate::proxy::upstream::build(
             adapter,
             &resolved.platform,
             &resolved.backend,
-            &unified,
+            unified_ref,
             adapter_credential.as_ref(),
             resolved_route.default_max_tokens,
         )?;
@@ -792,7 +810,7 @@ async fn handle_request(
         let (forward_body, forward_url_raw) = match &plan {
             Some(plan) => (plan.body.clone(), plan.url.clone()),
             None => {
-                let (body, url) = build_forward_request(&unified, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+                let (body, url) = build_forward_request(unified_ref, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
                 (body, url)
             }
         };

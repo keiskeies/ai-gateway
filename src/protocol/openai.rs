@@ -278,7 +278,7 @@ pub fn to_request(
     target: &ReasoningTarget,
 ) -> serde_json::Value {
     let keep_reasoning = matches!(target.echo, ReasoningEcho::Keep);
-    let messages: Vec<OpenAIMessage> = unified.messages.iter().map(|m| {
+    let mut messages: Vec<OpenAIMessage> = unified.messages.iter().map(|m| {
         let role = match m.role {
             Role::System => "system",
             Role::User => "user",
@@ -301,6 +301,23 @@ pub fn to_request(
             name: m.name.clone(),
         }
     }).collect();
+
+    // 跨协议入口把 system 放在顶层字段（Anthropic 的 system 不在 messages 里），
+    // 这一层不补就会整段丢掉。OpenAI 入口已经把 system 也放进了 messages，不能重复插。
+    if let Some(system) = &unified.system {
+        if !messages.iter().any(|message| message.role == "system") {
+            messages.insert(0, OpenAIMessage {
+                role: "system".to_string(),
+                content: Some(serde_json::Value::String(system.clone())),
+                reasoning_content: None,
+                reasoning: None,
+                reasoning_details: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+        }
+    }
 
     let mut req = serde_json::Map::new();
     req.insert("model".into(), serde_json::Value::String(target_model.to_string()));
@@ -677,5 +694,47 @@ mod tests {
         assert_eq!(keep["messages"][0]["reasoning_content"], "thought");
         let drop = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
         assert!(drop["messages"][0].get("reasoning_content").is_none());
+    }
+}
+
+#[cfg(test)]
+mod system_bridge_tests {
+    use super::*;
+    use crate::models::route::{ReasoningEcho, ReasoningStyle};
+
+    fn target() -> ReasoningTarget {
+        ReasoningTarget::new(ReasoningStyle::Auto, "b1", "m1", ReasoningEcho::Drop)
+    }
+
+    #[test]
+    fn anthropic_source_keeps_system_for_openai_target() {
+        // Claude Code 之类走 Anthropic 协议：system 在顶层字段，messages 里没有。
+        let unified = crate::protocol::anthropic::parse_request(serde_json::json!({
+            "model": "claude",
+            "max_tokens": 64,
+            "system": "你是严谨的助手",
+            "messages": [{"role": "user", "content": "hi"}]
+        })).unwrap();
+        let body = to_request(&unified, "target", UnknownParams::Auto, &target());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system", "system 被丢掉了: {body}");
+        assert_eq!(messages[0]["content"], "你是严谨的助手");
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn openai_source_does_not_duplicate_system() {
+        let unified = parse_request(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"}
+            ]
+        })).unwrap();
+        let body = to_request(&unified, "target", UnknownParams::Auto, &target());
+        let messages = body["messages"].as_array().unwrap();
+        let systems = messages.iter().filter(|m| m["role"] == "system").count();
+        assert_eq!(systems, 1, "system 重复了: {body}");
+        assert_eq!(messages[0]["content"], "sys");
     }
 }

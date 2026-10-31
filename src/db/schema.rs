@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 28;
+pub const CURRENT_SCHEMA_VERSION: i64 = 29;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -242,6 +242,15 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         conn.execute_batch(SCHEMA_V28_TABLES)?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 28)", [])?;
         tracing::info!("Database migrated to V28 (platform adapter / credit unit / credential vault)");
+    }
+
+    if current_version < 29 {
+        // 路由级开关：每次上游尝试在整段 prompt 最前面插入 16~32 位随机数字串，
+        // 让上游看到的前缀每次都不同。默认 0 = 关，老库行为不变。
+        add_column_if_missing(conn, "routes", "request_nonce",
+            "ALTER TABLE routes ADD COLUMN request_nonce INTEGER NOT NULL DEFAULT 0")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 29)", [])?;
+        tracing::info!("Database migrated to V29 (routes.request_nonce)");
     }
 
     Ok(())

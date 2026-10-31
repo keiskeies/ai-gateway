@@ -7,6 +7,7 @@ import {
   MultiSelect,
   NumberInput,
   Select,
+  Switch,
   TextInput,
   Textarea,
   Tooltip,
@@ -76,6 +77,7 @@ interface RouteInfo {
   retry_policy: { max_retries: number; retry_on_error: string[]; backoff_ms: number }
   fallback?: string | null
   default_max_tokens?: number | null
+  request_nonce?: boolean | null
   backends: BackendInfo[]
 }
 
@@ -289,6 +291,7 @@ export default function ModelDetail() {
 
   const [routeDraft, setRouteDraft] = useState({
     strategy: 'RoundRobin',
+    nonce: false,
     retries: 2,
     backoff: 500,
     maxTokens: 4096,
@@ -311,11 +314,13 @@ export default function ModelDetail() {
     if (!routeDraftTouched.current) {
       setRouteDraft(firstRoute ? {
         strategy: firstRoute.lb_strategy || 'RoundRobin',
+        nonce: firstRoute.request_nonce ?? false,
         retries: firstRoute.retry_policy?.max_retries ?? 2,
         backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
         maxTokens: firstRoute.default_max_tokens ?? 4096,
       } : {
         strategy: 'RoundRobin',
+        nonce: false,
         retries: 2,
         backoff: 500,
         maxTokens: 4096,
@@ -518,6 +523,7 @@ export default function ModelDetail() {
           backoff_ms: routeDraft.backoff,
         },
         default_max_tokens: routeDraft.maxTokens,
+        request_nonce: routeDraft.nonce,
       })
       // 存过之后草稿就是服务端值了，让回填重新接管（拿到后端归一化后的结果）
       routeDraftTouched.current = false
@@ -706,6 +712,15 @@ export default function ModelDetail() {
                     <Field label={t(locale, 'defaultMaxTokens')}>
                       <NumberInput size="xs" min={1} value={routeDraft.maxTokens} onChange={value => editRouteDraft({ maxTokens: Number(value) || 1 })} />
                     </Field>
+                    <div className="console-field console-form-full">
+                      <Switch
+                        size="xs"
+                        checked={routeDraft.nonce}
+                        label={t(locale, 'nonceToggle')}
+                        onChange={event => editRouteDraft({ nonce: event.currentTarget.checked })}
+                      />
+                      <div className="console-note">{t(locale, 'nonceToggleHint')}</div>
+                    </div>
                     <div className="console-field">
                       <label>{t(locale, 'weightDistribution')}</label>
                       <div className="console-weight-preview">
@@ -721,6 +736,7 @@ export default function ModelDetail() {
                         routeDraftTouched.current = false
                         setRouteDraft({
                           strategy: route.lb_strategy || 'RoundRobin',
+                          nonce: route.request_nonce ?? false,
                           retries: route.retry_policy?.max_retries ?? 2,
                           backoff: route.retry_policy?.backoff_ms ?? 500,
                           maxTokens: route.default_max_tokens ?? 4096,
