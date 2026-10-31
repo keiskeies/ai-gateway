@@ -245,7 +245,7 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
     }
 
     if current_version < 29 {
-        // 路由级开关：每次上游尝试在整段 prompt 最前面插入 16~32 位随机数字串，
+        // 路由级开关：每次上游尝试在整段 prompt 最前面插入 32~128 位随机数字串，
         // 让上游看到的前缀每次都不同。默认 0 = 关，老库行为不变。
         add_column_if_missing(conn, "routes", "request_nonce",
             "ALTER TABLE routes ADD COLUMN request_nonce INTEGER NOT NULL DEFAULT 0")?;

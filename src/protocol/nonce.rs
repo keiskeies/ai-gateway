@@ -14,11 +14,11 @@ pub enum Surface {
     Messages,
 }
 
-/// 16..=32 位十进制数字串，长度本身也随机。
+/// 32..=128 位十进制数字串，长度本身也随机。
 pub(crate) fn random_digits() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let len = rng.gen_range(16..=32);
+    let len = rng.gen_range(32..=128);
     (0..len).map(|_| char::from(b'0' + rng.gen_range(0..10u8))).collect()
 }
 
@@ -117,10 +117,10 @@ mod tests {
     }
 
     #[test]
-    fn nonce_is_16_to_32_digits() {
+    fn nonce_is_32_to_128_digits() {
         for _ in 0..1000 {
             let n = random_digits();
-            assert!((16..=32).contains(&n.len()), "长度越界: {}", n.len());
+            assert!((32..=128).contains(&n.len()), "长度越界: {}", n.len());
             assert!(n.chars().all(|c| c.is_ascii_digit()), "含非数字: {n}");
         }
     }
@@ -138,7 +138,7 @@ mod tests {
         apply(&mut u, Surface::SystemField);
         let system = u.system.clone().unwrap();
         let (nonce, rest) = system.split_once('\n').expect("应有换行分隔");
-        assert!((16..=32).contains(&nonce.len()) && nonce.chars().all(|c| c.is_ascii_digit()));
+        assert!((32..=128).contains(&nonce.len()) && nonce.chars().all(|c| c.is_ascii_digit()));
         assert_eq!(rest, "你是严谨的助手");
         assert_eq!(u.messages.len(), 1, "有 system 时不应插消息");
     }
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(u.messages.len(), 2);
         assert_eq!(u.messages[0].role, Role::User);
         let nonce = first_text(&u.messages[0]);
-        assert!((16..=32).contains(&nonce.len()));
+        assert!((32..=128).contains(&nonce.len()));
         assert_eq!(first_text(&u.messages[1]), "hi");
     }
 
@@ -163,7 +163,7 @@ mod tests {
         apply(&mut u, Surface::Messages);
         let text = first_text(&u.messages[0]);
         let (nonce, rest) = text.split_once('\n').expect("应有换行分隔");
-        assert!((16..=32).contains(&nonce.len()));
+        assert!((32..=128).contains(&nonce.len()));
         assert_eq!(rest, "sys");
         assert_eq!(u.messages.len(), 2, "不应插消息");
     }
@@ -189,7 +189,7 @@ mod tests {
         apply(&mut u, Surface::Messages);
         let system = u.system.clone().unwrap();
         let (nonce, rest) = system.split_once('\n').expect("应有换行分隔");
-        assert!((16..=32).contains(&nonce.len()));
+        assert!((32..=128).contains(&nonce.len()));
         assert_eq!(rest, "你是严谨的助手");
         assert_eq!(u.messages.len(), 1, "不应插消息");
     }

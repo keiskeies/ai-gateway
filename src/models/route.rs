@@ -114,7 +114,7 @@ pub struct Route {
     /// 客户端未传 max_tokens 时填充的默认值（None = 不干预；Anthropic 必填，兜底 4096）
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
-    /// 每次上游尝试在整段 prompt 最前面插入 16~32 位随机数字串（默认关）
+    /// 每次上游尝试在整段 prompt 最前面插入 32~128 位随机数字串（默认关）
     #[serde(default)]
     pub request_nonce: bool,
 }
