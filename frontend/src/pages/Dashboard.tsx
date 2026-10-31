@@ -10,6 +10,9 @@ import {
   Pagination,
   Select,
 } from '@mantine/core'
+// 手机宽度下 9 个指标挤不进一行：SegmentedControl 是 inline-flex + overflow:hidden，
+// 物理上不能换行，所以窄屏换成下拉。
+import { useMediaQuery } from '@mantine/hooks'
 import {
   LineChart as ReLineChart,
   Line,
@@ -212,6 +215,19 @@ const METRIC_LABEL_KEYS: Record<Metric, TranslationKey> = {
   output_speed_tps: 'metricSpeed',
   cache_read_tokens: 'metricCacheRead',
   total_cost: 'costEstimate',
+}
+
+// 分段控件里的短标签：一行要放下 9 个，桌面宽度靠它。手机换成下拉后改用上面的全称。
+const METRIC_SHORT_KEYS: Record<Metric, TranslationKey> = {
+  requests: 'mShortRequests',
+  failed_requests: 'mShortFailed',
+  token_input: 'mShortTokenIn',
+  token_output: 'mShortTokenOut',
+  avg_latency_ms: 'mShortLatency',
+  avg_ttft_ms: 'mShortTtft',
+  output_speed_tps: 'mShortSpeed',
+  cache_read_tokens: 'mShortCache',
+  total_cost: 'cost',
 }
 
 // 可求和指标（计数/token/成本）：排行按求和；平均类指标（延时/首字/速度）按请求数加权
@@ -493,6 +509,16 @@ export default function Dashboard() {
   const { locale, isDark } = useAppContext()
   const navigate = useNavigate()
   const palette = isDark ? MODEL_PALETTE.dark : MODEL_PALETTE.light
+  const narrow = useMediaQuery('(max-width: 767px)')
+  // 顺序 = 分段控件的排列顺序（METRIC_LABEL_KEYS 的字面顺序）
+  const metricShortOptions = useMemo(
+    () => (Object.keys(METRIC_SHORT_KEYS) as Metric[]).map(value => ({ value, label: t(locale, METRIC_SHORT_KEYS[value]) })),
+    [locale],
+  )
+  const metricLongOptions = useMemo(
+    () => (Object.keys(METRIC_LABEL_KEYS) as Metric[]).map(value => ({ value, label: t(locale, METRIC_LABEL_KEYS[value]) })),
+    [locale],
+  )
 
   const [stats, setStats] = useState<OverviewStats>({
     total_requests: 0, success_rate: 0, avg_latency_ms: 0,
@@ -1315,22 +1341,24 @@ export default function Dashboard() {
                 </Group>
               )}
               {trendMode === 'all' && (
-                <SegmentedControl
-                  size="xs"
-                  value={metric}
-                  onChange={(v) => setMetric(v as Metric)}
-                  data={[
-                    { label: t(locale, 'mShortRequests'), value: 'requests' },
-                    { label: t(locale, 'mShortFailed'), value: 'failed_requests' },
-                    { label: t(locale, 'mShortTokenIn'), value: 'token_input' },
-                    { label: t(locale, 'mShortTokenOut'), value: 'token_output' },
-                    { label: t(locale, 'mShortLatency'), value: 'avg_latency_ms' },
-                    { label: t(locale, 'mShortTtft'), value: 'avg_ttft_ms' },
-                    { label: t(locale, 'mShortSpeed'), value: 'output_speed_tps' },
-                    { label: t(locale, 'mShortCache'), value: 'cache_read_tokens' },
-                    { label: t(locale, 'cost'), value: 'total_cost' },
-                  ]}
-                />
+                narrow ? (
+                  <Select
+                    size="xs"
+                    w={150}
+                    aria-label={t(locale, 'metricLabel')}
+                    value={metric}
+                    onChange={(v) => { if (v) setMetric(v as Metric) }}
+                    data={metricLongOptions}
+                    allowDeselect={false}
+                  />
+                ) : (
+                  <SegmentedControl
+                    size="xs"
+                    value={metric}
+                    onChange={(v) => setMetric(v as Metric)}
+                    data={metricShortOptions}
+                  />
+                )
               )}
               <SegmentedControl
                 size="xs"

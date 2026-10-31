@@ -319,6 +319,27 @@ html.wall-fullscreen .wall-trend-panel.wall-trend-single {
   font-variant-numeric: tabular-nums;
 }
 
+/* 手机：标题独占一行、控件换到下一行从左排。
+   单行 44px 带在窄屏放不下，标题会被 flex 压成 20px 宽，字直接叠在一起。 */
+@media (max-width: 767px) {
+  .wall-panel-head {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 8px;
+    padding: 9px 14px;
+  }
+
+  .wall-panel-title {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .wall-panel-head > :last-child {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+}
+
 /* ---- 单模型分时：共享悬停读数条 + 分面 lane ----
    读数条是 10 个指标唯一的浮层；图上只保留共享竖线，避免 5 张图各弹一份 tooltip。 */
 .wall-timeline {

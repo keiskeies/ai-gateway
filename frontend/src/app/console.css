@@ -2654,6 +2654,11 @@ h4,
   align-items: start;
 }
 
+/* 凭证面板占满左列两行，右列自上而下是「上游积分 → 远端模型」 */
+.console-provider-main {
+  grid-row: 1 / span 2;
+}
+
 .console-settings-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -3142,6 +3147,11 @@ h4,
 
   .console-inspector {
     order: 2;
+  }
+
+  /* 单列时左列占两行的设置会让第二行空着 */
+  .console-provider-main {
+    grid-row: auto;
   }
 }
 

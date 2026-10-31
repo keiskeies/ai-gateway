@@ -796,7 +796,7 @@ export default function ProviderDetail() {
       </div>
 
       <div className="console-provider-grid">
-        <section className="console-panel">
+        <section className="console-panel console-provider-main">
           <div className="console-panel-head">
             <div className="console-panel-title">{t(locale, 'providerCreds')}</div>
             <span className="console-panel-sub">{dirty ? t(locale, 'unsaved') : platform.status === 'Active' ? t(locale, 'modelStatusActive') : t(locale, 'modelStatusDisabled')}</span>
@@ -825,6 +825,9 @@ export default function ProviderDetail() {
                   onChange={event => setField('api_key', event.currentTarget.value)}
                   placeholder={platform.api_key || t(locale, 'keyNotSet')}
                   description={t(locale, 'keyKeepHint')}
+                  // Mantine 默认顺序是 label→description→input：提示会把这一格的输入框
+                  // 顶下去一行，和右边的 ORGANIZATION ID 错位。挪到 input 下面即可。
+                  inputWrapperOrder={['label', 'input', 'description', 'error']}
                 />
               </Field>
               <Field label={t(locale, 'organization').toUpperCase()}>
