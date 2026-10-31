@@ -205,7 +205,7 @@ export function CheckinTasksModal({ opened, onClose, tasks, accounts, options, o
                   {task.name && <div className="muted">{task.name}</div>}
                 </td>
                 <td>
-                  <Group gap={4} wrap="nowrap">
+                  <Group gap={4} wrap="wrap">
                     {task.platform_ids.map(id => {
                       const label = labelFor(id)
                       return label
