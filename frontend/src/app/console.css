@@ -2690,12 +2690,32 @@ h4,
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
 }
 
-/* 凭证面板占满左列两行，右列自上而下是「上游积分 → 远端模型」 */
-.console-provider-main {
-  grid-row: 1 / span 2;
+/* 右列：上游积分按内容、远端模型吃满剩余高度，与左列底部对齐 */
+.console-provider-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.console-provider-side > .console-panel:last-child {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.console-provider-side > .console-panel:last-child > .console-empty,
+.console-provider-side > .console-panel:last-child > .console-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.console-provider-side > .console-panel:last-child > .console-table-wrap {
+  max-height: none;
 }
 
 .console-settings-grid {
@@ -3196,10 +3216,6 @@ h4,
     max-height: none;
   }
 
-  /* 单列时左列占两行的设置会让第二行空着 */
-  .console-provider-main {
-    grid-row: auto;
-  }
 }
 
 @media (max-width: 960px) {

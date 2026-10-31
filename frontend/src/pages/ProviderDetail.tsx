@@ -913,6 +913,7 @@ export default function ProviderDetail() {
           </div>
         </section>
 
+        <div className="console-provider-side">
         <section className="console-panel">
           <div className="console-panel-head">
             <div className="console-panel-title">{t(locale, 'creditUsageTitle')}</div>
@@ -973,7 +974,7 @@ export default function ProviderDetail() {
             <div className="console-empty"><span>{t(locale, 'connectingPlatform')}</span></div>
           ) : remoteModels ? (
             remoteModels.length > 0 ? (
-              <div className="console-table-wrap" style={{ maxHeight: 340 }}>
+              <div className="console-table-wrap">
                 <Table className="console-table">
                   <Table.Thead><Table.Tr><Table.Th>{t(locale, 'modelId')}</Table.Th><Table.Th /></Table.Tr></Table.Thead>
                   <Table.Tbody>
@@ -1015,6 +1016,7 @@ export default function ProviderDetail() {
             </div>
           </div>
         </section>
+        </div>
       </div>
 
       <section className="console-panel">
