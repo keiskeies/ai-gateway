@@ -415,13 +415,13 @@ export default function ApiKeys() {
                     onChange={toggleAllSelected}
                   />
                 </Table.Th>
-                <Table.Th style={{ width: 200 }}>{t(locale, 'apiKeyName')}</Table.Th>
+                <Table.Th style={{ width: 180 }}>{t(locale, 'apiKeyName')}</Table.Th>
                 <Table.Th>
                   <Tooltip label={t(locale, 'apiKeyMaskTip')}>
                     <span>{t(locale, 'apiKeyKey')}</span>
                   </Tooltip>
                 </Table.Th>
-                <Table.Th style={{ width: 180 }}>{t(locale, 'apiKeyProxy')}</Table.Th>
+                <Table.Th style={{ width: 150 }}>{t(locale, 'apiKeyProxy')}</Table.Th>
                 <Table.Th style={{ width: 130 }}>{t(locale, 'status')}</Table.Th>
                 <Table.Th className="ds-num" style={{ width: 100 }}>{t(locale, 'requests')}</Table.Th>
                 <Table.Th className="ds-num" style={{ width: 110 }}>{t(locale, 'tokens')}</Table.Th>
@@ -431,9 +431,9 @@ export default function ApiKeys() {
                     <span>{t(locale, 'cost')}</span>
                   </Tooltip>
                 </Table.Th>
-                <Table.Th style={{ width: 190 }}>{t(locale, 'apiKeyCreatedAt')}</Table.Th>
-                <Table.Th style={{ width: 190 }}>{t(locale, 'lastUsed')}</Table.Th>
-                <Table.Th className="ds-num" style={{ width: 205 }}>{t(locale, 'action')}</Table.Th>
+                <Table.Th style={{ width: 160 }}>{t(locale, 'apiKeyCreatedAt')}</Table.Th>
+                <Table.Th style={{ width: 160 }}>{t(locale, 'lastUsed')}</Table.Th>
+                <Table.Th className="ds-num" style={{ width: 180 }}>{t(locale, 'action')}</Table.Th>
               </Table.Tr>
             </Table.Thead>
             <Table.Tbody>
@@ -806,13 +806,13 @@ export default function ApiKeys() {
         opened={detailId !== null}
         onClose={() => setDetailId(null)}
         title={`${keys.find(row => row.id === detailId)?.name || t(locale, 'keyUsage')} · ${t(locale, 'keyModelUsage')}`}
-        size="lg"
+        size="xl"
       >
         <div className="ds-table-wrap">
           <Table highlightOnHover>
             <Table.Thead>
               <Table.Tr>
-                <Table.Th>{t(locale, 'model')}</Table.Th>
+                <Table.Th style={{ minWidth: 200 }}>{t(locale, 'model')}</Table.Th>
                 <Table.Th className="ds-num" style={{ width: 90 }}>{t(locale, 'requests')}</Table.Th>
                 <Table.Th className="ds-num" style={{ width: 80 }}>{t(locale, 'failures')}</Table.Th>
                 <Table.Th className="ds-num" style={{ width: 110 }}>{t(locale, 'tokens')}</Table.Th>

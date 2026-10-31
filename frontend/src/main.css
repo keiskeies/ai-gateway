@@ -842,6 +842,12 @@ html.wall-fullscreen .wall-timeline-lane-chart {
   max-height: calc(100vh - 232px);
 }
 
+/* 宽了就横向滚，不要把单元格挤成两三行：模型名、时间戳一换行整张表就歪了 */
+.ds-table-wrap .mantine-Table-th,
+.ds-table-wrap .mantine-Table-td {
+  white-space: nowrap;
+}
+
 .page-sub {
   margin-top: 4px;
   font-size: 12px;
