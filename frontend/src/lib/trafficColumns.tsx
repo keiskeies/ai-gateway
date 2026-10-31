@@ -54,14 +54,10 @@ export const trafficColumns = (locale: Locale): TrafficColumn[] => [
     // 大于 1 说明这一笔被重试或换过后端——状态可能仍是 200，但链路不干净
     cellClass: item => (item.attempts != null && item.attempts > 1 ? 'warn' : undefined),
   },
-  { id: 'latency', labelKey: 'latency', num: true, head: t(locale, 'latency'), cell: item => formatDuration(item.latency_ms) },
-  { id: 'ttft', labelKey: 'ttft', num: true, head: t(locale, 'ttft'), cell: item => (item.ttft_ms == null ? dash : formatDuration(item.ttft_ms)) },
-  { id: 'tokens', labelKey: 'tokens', num: true, head: t(locale, 'tokens'), cell: item => formatCompact((item.token_input ?? 0) + (item.token_output ?? 0)) },
+  { id: 'tokenInput', labelKey: 'colTokenIn', num: true, head: t(locale, 'colTokenIn'), cell: item => tokenOrDash(item.token_input) },
   { id: 'freshInput', labelKey: 'freshInput', num: true, head: t(locale, 'freshInput'), cell: item => tokenOrDash(item.fresh_input_tokens) },
+  { id: 'tokenOutput', labelKey: 'colTokenOut', num: true, head: t(locale, 'colTokenOut'), cell: item => tokenOrDash(item.token_output) },
   { id: 'cacheRead', labelKey: 'cacheRead', num: true, head: t(locale, 'cacheRead'), cell: item => tokenOrDash(item.cache_read_tokens) },
-  { id: 'cacheWrite', labelKey: 'cacheWrite', num: true, head: t(locale, 'cacheWrite'), cell: item => tokenOrDash(item.cache_write_tokens) },
-  { id: 'speed', labelKey: 'outputSpeed', num: true, head: t(locale, 'outputSpeed'), cell: item => (item.output_speed_tps == null ? dash : `${item.output_speed_tps.toFixed(1)} t/s`) },
-  { id: 'stream', labelKey: 'stream', firstDir: 'asc', head: t(locale, 'stream'), cell: item => (item.is_stream ? 'stream' : 'non-stream') },
   {
     id: 'cost',
     labelKey: 'cost',
@@ -69,6 +65,12 @@ export const trafficColumns = (locale: Locale): TrafficColumn[] => [
     head: <Tooltip label={t(locale, 'costHint')}><span>{t(locale, 'cost')}</span></Tooltip>,
     cell: item => (item.cost == null ? dash : formatCost(item.cost)),
   },
+  { id: 'latency', labelKey: 'latency', num: true, head: t(locale, 'latency'), cell: item => formatDuration(item.latency_ms) },
+  { id: 'ttft', labelKey: 'ttft', num: true, head: t(locale, 'ttft'), cell: item => (item.ttft_ms == null ? dash : formatDuration(item.ttft_ms)) },
+  { id: 'tokens', labelKey: 'tokens', num: true, head: t(locale, 'tokens'), cell: item => formatCompact((item.token_input ?? 0) + (item.token_output ?? 0)) },
+  { id: 'cacheWrite', labelKey: 'cacheWrite', num: true, head: t(locale, 'cacheWrite'), cell: item => tokenOrDash(item.cache_write_tokens) },
+  { id: 'speed', labelKey: 'outputSpeed', num: true, head: t(locale, 'outputSpeed'), cell: item => (item.output_speed_tps == null ? dash : `${item.output_speed_tps.toFixed(1)} t/s`) },
+  { id: 'stream', labelKey: 'stream', firstDir: 'asc', head: t(locale, 'stream'), cell: item => (item.is_stream ? 'stream' : 'non-stream') },
   {
     id: 'credits',
     labelKey: 'credits',
@@ -86,8 +88,8 @@ export const trafficColumns = (locale: Locale): TrafficColumn[] => [
   },
 ]
 
-// 默认列就是 §7.2 那一组：成本默认关掉（覆盖率低时整列都是 —），面板头部仍然给总成本与覆盖率。
-export const DEFAULT_COLUMN_IDS = ['time', 'model', 'platform', 'status', 'latency', 'ttft', 'tokens', 'error']
+// 默认列对齐监控大屏的「请求明细」：行内就能看出输入/新增/输出/缓存/成本/首字/速度。
+export const DEFAULT_COLUMN_IDS = ['time', 'model', 'proxy', 'platform', 'status', 'tokenInput', 'freshInput', 'tokenOutput', 'cacheRead', 'cost', 'latency', 'ttft', 'speed', 'stream', 'error']
 
 const COLUMNS_KEY = 'traffic-columns'
 

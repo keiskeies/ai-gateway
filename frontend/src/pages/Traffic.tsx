@@ -793,7 +793,11 @@ export default function Traffic() {
           {rows.length > 0 ? (
             <>
               <div className="console-table-wrap console-table-scroll" ref={tableWrap}>
-                <Table className={`console-table${baselineReady ? ' console-table-fixed' : ''}`}>
+                <Table
+                  className={`console-table${baselineReady ? ' console-table-fixed' : ''}`}
+                  // 固定布局 + width:100% 会把列压到看不清；按列数给个下限，超出就让容器横向滚动
+                  style={{ minWidth: visibleColumns.length * 84 }}
+                >
                   <Table.Thead>
                     <Table.Tr>
                       {visibleColumns.map(column => {

@@ -1664,7 +1664,12 @@ h4,
 }
 
 .console-inspector {
-  overflow: hidden;
+  /* 详情再长也不把整页撑高：固定高度、独立滚动 */
+  position: sticky;
+  top: calc(var(--app-shell-header-height, 48px) + 14px);
+  max-height: calc(100vh - var(--app-shell-header-height, 48px) - 28px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .console-inspector-head {
@@ -3162,6 +3167,9 @@ h4,
 
   .console-inspector {
     order: 2;
+    /* 单列时详情跟在表格下面，跟着页面一起滚，不要再吸顶 */
+    position: static;
+    max-height: none;
   }
 
   /* 单列时左列占两行的设置会让第二行空着 */
