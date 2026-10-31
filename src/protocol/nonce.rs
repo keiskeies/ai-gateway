@@ -22,32 +22,34 @@ pub(crate) fn random_digits() -> String {
     (0..len).map(|_| char::from(b'0' + rng.gen_range(0..10u8))).collect()
 }
 
-/// 在整段 prompt 的最前面插入随机数字串。每次上游尝试调用一次。
-pub fn apply(unified: &mut UnifiedRequest, surface: Surface) {
+/// 在整段 prompt 的最前面插入随机数字串，并返回生成的串（供详情页展示）。
+/// 每次上游尝试调用一次。
+pub fn apply(unified: &mut UnifiedRequest, surface: Surface) -> String {
     let nonce = random_digits();
     match surface {
         Surface::SystemField => {
             if let Some(system) = unified.system.as_mut() {
                 *system = format!("{nonce}\n{system}");
-                return;
+                return nonce;
             }
-            insert_leading_user(unified, nonce);
+            insert_leading_user(unified, nonce.clone());
         }
         Surface::Messages => {
             if let Some(first) = unified.messages.first_mut() {
                 if first.role == Role::System && prefix_content(&mut first.content, &nonce) {
-                    return;
+                    return nonce;
                 }
             }
             // Anthropic 入口的 system 只在顶层字段，openai::to_request 会把它补成 messages[0]；
             // 加在这里才不会被 system 盖在后面。
             if let Some(system) = unified.system.as_mut() {
                 *system = format!("{nonce}\n{system}");
-                return;
+                return nonce;
             }
-            insert_leading_user(unified, nonce);
+            insert_leading_user(unified, nonce.clone());
         }
     }
+    nonce
 }
 
 fn insert_leading_user(unified: &mut UnifiedRequest, nonce: String) {

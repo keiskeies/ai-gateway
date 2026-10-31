@@ -488,6 +488,7 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
                 captured: false, protocol: None, status_code: None, content_type: None,
                 body: None, bytes: 0, truncated: false,
             },
+            nonce: None,
             request_capture_enabled: false,
             response_capture_enabled: false,
         });
@@ -524,7 +525,14 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
         None => (false, None, None, 0, false),
     };
 
+    let nonce: Option<String> = conn.query_row(
+        "SELECT nonce FROM request_attempts WHERE request_id = ?1 ORDER BY attempt_no DESC LIMIT 1",
+        [&request_id],
+        |r| r.get::<_, Option<String>>(0),
+    ).ok().flatten();
+
     Ok(RequestPayload {
+        nonce,
         request: RequestPayloadRequest {
             headers_captured,
             body_captured,
@@ -570,18 +578,18 @@ pub fn delete_all_bodies(pool: &DbPool) -> AppResult<i64> {
 pub fn record_attempt(pool: &DbPool, attempt: &RequestAttempt) -> AppResult<()> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at, forward_url)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at, forward_url, nonce)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         rusqlite::params![
             attempt.request_id, attempt.attempt_no, attempt.backend_id, attempt.platform_id,
             attempt.model_id, attempt.status_code, attempt.error_type, attempt.error_message,
-            attempt.latency_ms, attempt.started_at, attempt.forward_url
+            attempt.latency_ms, attempt.started_at, attempt.forward_url, attempt.nonce
         ],
     )?;
     Ok(())
 }
 
-const ATTEMPT_COLS: &str = "a.id, a.request_id, a.attempt_no, a.backend_id, a.platform_id, a.model_id, a.status_code, a.error_type, a.error_message, a.latency_ms, a.started_at, a.forward_url, p.name";
+const ATTEMPT_COLS: &str = "a.id, a.request_id, a.attempt_no, a.backend_id, a.platform_id, a.model_id, a.status_code, a.error_type, a.error_message, a.latency_ms, a.started_at, a.forward_url, p.name, a.nonce";
 const ATTEMPT_FROM: &str = "FROM request_attempts a LEFT JOIN platforms p ON p.id = a.platform_id";
 
 fn map_attempt(r: &rusqlite::Row) -> rusqlite::Result<RequestAttempt> {
@@ -600,6 +608,7 @@ fn map_attempt(r: &rusqlite::Row) -> rusqlite::Result<RequestAttempt> {
         forward_url: r.get(11)?,
         // 平台已删除时 JOIN 不到名字，前端退回显示 ID
         platform_name: r.get(12)?,
+        nonce: r.get(13)?,
     })
 }
 
@@ -2425,6 +2434,7 @@ mod tests {
             latency_ms: Some(no * 10),
             started_at: "2026-01-01T00:00:00.000Z".into(),
             forward_url: None,
+            nonce: None,
             platform_name: None,
         }
     }

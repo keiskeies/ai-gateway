@@ -512,6 +512,7 @@ fn make_attempt(
     latency_ms: i64,
     started_at: String,
     forward_url: Option<String>,
+    nonce: Option<String>,
 ) -> RequestAttempt {
     RequestAttempt {
         id: 0,
@@ -526,6 +527,7 @@ fn make_attempt(
         latency_ms: Some(latency_ms),
         started_at,
         forward_url,
+        nonce,
         platform_name: None,
     }
 }
@@ -790,9 +792,10 @@ async fn handle_request(
             crate::protocol::nonce::Surface::Messages
         };
         let mut nonced_unified;
+        let mut injected_nonce: Option<String> = None;
         let unified_ref: &UnifiedRequest = if resolved_route.request_nonce {
             nonced_unified = unified.clone();
-            crate::protocol::nonce::apply(&mut nonced_unified, nonce_surface);
+            injected_nonce = Some(crate::protocol::nonce::apply(&mut nonced_unified, nonce_surface));
             &nonced_unified
         } else {
             &unified
@@ -866,6 +869,7 @@ async fn handle_request(
                         latency_ms,
                         started_at.clone(),
                         Some(forward_url.clone()),
+                        injected_nonce.clone(),
                     ));
                     // 私有协议上游总是回 SSE：即便客户端要非流式，也要走流式路径再聚合，
                     // 否则会把 SSE 正文当 JSON 解析（得到空响应）。
@@ -1081,6 +1085,7 @@ async fn handle_request(
                         latency_ms,
                         started_at.clone(),
                         Some(forward_url.clone()),
+                        injected_nonce.clone(),
                     ));
                     // 是否换后端重试：ClientError / RiskControl 一律不重试
                     // （前者换号也没用，后者换号会放大封禁）。
@@ -1137,6 +1142,7 @@ async fn handle_request(
                     latency_ms,
                     started_at.clone(),
                     Some(forward_url.clone()),
+                    injected_nonce.clone(),
                 ));
                 if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
                     tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;

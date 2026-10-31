@@ -77,6 +77,8 @@ pub struct RequestAttempt {
     pub error_message: Option<String>,
     pub latency_ms: Option<i64>,
     pub started_at: String,
+    /// 本次尝试注入的前置随机串（路由开关关闭时为 None）
+    pub nonce: Option<String>,
     /// 本次尝试实际请求的上游完整地址（V23，已把 query 里的凭据打码）。
     /// 旧行为 None——旧数据没有这个字段，不是“没发请求”。
     pub forward_url: Option<String>,
@@ -141,6 +143,9 @@ pub struct RequestPayloadResponse {
 pub struct RequestPayload {
     pub request: RequestPayloadRequest,
     pub response: RequestPayloadResponse,
+    /// 这条请求最后一次上游尝试注入的前置随机串；开关没开时为 None。
+    /// Traffic 里展示的是入站正文，随机串只存在于转发出去的那一份，所以单独带出来。
+    pub nonce: Option<String>,
     /// 当前采集开关：用来区分“这次没记”和“开关没开”，前端才能给出正确提示
     pub request_capture_enabled: bool,
     pub response_capture_enabled: bool,

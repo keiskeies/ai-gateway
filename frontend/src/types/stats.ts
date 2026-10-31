@@ -161,6 +161,8 @@ export interface RequestPayloadResponse {
 export interface RequestPayload {
   request: RequestPayloadRequest
   response: RequestPayloadResponse
+  /** 最后一次上游尝试注入的前置随机串；路由开关没开时为 null */
+  nonce?: string | null
   /** 当前采集开关：区分“这条没记”与“开关没开” */
   request_capture_enabled: boolean
   response_capture_enabled: boolean

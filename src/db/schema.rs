@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 29;
+pub const CURRENT_SCHEMA_VERSION: i64 = 30;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -251,6 +251,14 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
             "ALTER TABLE routes ADD COLUMN request_nonce INTEGER NOT NULL DEFAULT 0")?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 29)", [])?;
         tracing::info!("Database migrated to V29 (routes.request_nonce)");
+    }
+
+    if current_version < 30 {
+        // 记录本次尝试实际注入的前置随机串，Traffic 详情里能看见「到底加了什么」。
+        add_column_if_missing(conn, "request_attempts", "nonce",
+            "ALTER TABLE request_attempts ADD COLUMN nonce TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 30)", [])?;
+        tracing::info!("Database migrated to V30 (request_attempts.nonce)");
     }
 
     Ok(())
