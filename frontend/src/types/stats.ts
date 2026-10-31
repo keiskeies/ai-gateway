@@ -180,6 +180,10 @@ export interface PlatformCreditUsage {
   period_start: string
   reset_at: string
   unpriced_models: number
+  /** 领取时同步到的站点余额（目前只有魔搭）；null = 没有实时读数 */
+  live_balance: number | null
+  /** 余额同步时间（UTC RFC3339） */
+  balance_at: string | null
   exhausted: boolean
 }
 

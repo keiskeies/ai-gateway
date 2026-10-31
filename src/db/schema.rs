@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 31;
+pub const CURRENT_SCHEMA_VERSION: i64 = 32;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -265,6 +265,15 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         conn.execute_batch(SCHEMA_V31_MIGRATION)?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 31)", [])?;
         tracing::info!("Database migrated to V31 (checkin_accounts for daily reward collection)");
+    }
+
+    if current_version < 32 {
+        // 平台页积分列用领取时同步的站点余额：余额与「什么时候读到的」必须成对，
+        // 否则一次失败的领取会让旧余额看起来是刚同步的。
+        add_column_if_missing(conn, "checkin_accounts", "balance_at",
+            "ALTER TABLE checkin_accounts ADD COLUMN balance_at TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 32)", [])?;
+        tracing::info!("Database migrated to V32 (checkin_accounts.balance_at)");
     }
 
     Ok(())

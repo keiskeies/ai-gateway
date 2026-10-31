@@ -251,6 +251,8 @@ export default function Platforms() {
         autoClose: 6000,
       })
       await checkinQuery.refetch()
+      // 积分列用的是领取时同步的余额，必须一起刷新
+      await queryClient.invalidateQueries({ queryKey: ['platforms'] })
     } catch (error) {
       notifications.show({ color: 'red', message: errorMessage(error, locale) })
     } finally {
@@ -280,6 +282,7 @@ export default function Platforms() {
         autoClose: 6000,
       })
       await checkinQuery.refetch()
+      await queryClient.invalidateQueries({ queryKey: ['platforms'] })
     } catch (error) {
       notifications.show({ color: 'red', message: errorMessage(error, locale) })
     } finally {
@@ -428,6 +431,22 @@ export default function Platforms() {
                   const checkinAccount = checkinByPlatform.get(platform.id)
                   const checkinStatus = checkinAccount?.status
                   const checkinBusy = loginBusyId === platform.id || claimBusyId === platform.id
+                  // 有领取同步过来的真实余额就优先显示它；否则退回本地台账的剩余
+                  const creditShown = item.credit
+                    ? (item.credit.live_balance ?? item.credit.remaining)
+                    : null
+                  const creditTooltip = item.credit
+                    ? (item.credit.live_balance != null
+                      ? t(
+                          locale,
+                          'creditLiveTooltip',
+                          formatNumber(item.credit.live_balance),
+                          formatNumber(item.credit.budget),
+                          formatNumber(item.credit.spent),
+                          item.credit.balance_at ? formatLogTime(item.credit.balance_at, locale) : '—',
+                        )
+                      : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)
+                    : ''
                   return (
                     <Table.Tr key={platform.id} onClick={() => navigate(`/providers/${platform.id}`)}>
                       <Table.Td><span className="console-strong">{displayName}</span></Table.Td>
@@ -495,10 +514,10 @@ export default function Platforms() {
                       </Table.Td>
                       <Table.Td className="num">{stats?.total_requests ? formatDuration(stats.avg_latency_ms) : '—'}</Table.Td>
                       <Table.Td className="num">
-                        {item.credit ? (
-                          <Tooltip label={t(locale, 'creditResetAt') + ' · ' + new Date(item.credit.reset_at).toLocaleString()}>
-                            <span className={item.credit.exhausted ? 'err' : item.credit.remaining <= item.credit.budget * 0.2 ? 'warn' : ''}>
-                              {`${formatNumber(item.credit.remaining)} / ${formatNumber(item.credit.budget)}`}
+                        {item.credit && creditShown != null ? (
+                          <Tooltip label={creditTooltip}>
+                            <span className={creditShown <= 0 ? 'err' : creditShown <= item.credit.budget * 0.2 ? 'warn' : ''}>
+                              {`${formatNumber(creditShown)} / ${formatNumber(item.credit.budget)}`}
                             </span>
                           </Tooltip>
                         ) : <span className="muted">—</span>}

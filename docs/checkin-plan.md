@@ -74,7 +74,8 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
 | status | `new` / `ok` / `waiting` / `expired` / `error` |
 | last_message | 最近一次运行的诊断 |
 | last_run_at / last_run_day / last_ok_day | 运行时间 / 本地日期 |
-| balance / daily_amount / daily_done | 最近余额 / 今日到账 / 是否到账 |
+| balance / balance_at | 领取时同步到的站点余额 / 同步时间（平台页积分列优先显示它） |
+| daily_amount / daily_done | 今日到账 / 是否到账 |
 
 ## 5. 领取逻辑（core，桌面端与服务器模式都跑）
 
@@ -82,7 +83,9 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
 2. `GET balance`：401 → `Expired`；`success=false` → `Failed`；
 3. `GET earn/rules`：`daily` 分类里 `short_term` 看 `today_remain == 0`、`long_term` 看总额领完；
    `daily_done = 任一完成`，`daily_amount = 完成规则的 amount 之和`；
-4. 状态：`Expired → expired`；成功且到账 `→ ok`；成功未到账 `→ waiting`。
+4. 余额与同步时间一并落库（`balance` / `balance_at`），平台页的「积分」列优先显示这个真实余额，
+   本地已用台账（`platform_credit_state.spent`）不被改写；失败的一次领取保留上次读数；
+5. 状态：`Expired → expired`；成功且到账 `→ ok`；成功未到账 `→ waiting`。
 
 后台线程：启动即跑，之后每 30 分钟检查；今天没到账的账号每 3 小时重试；`expired` 不再重试（重新登录重置成 `new`）。
 

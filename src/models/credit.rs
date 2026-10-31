@@ -18,6 +18,10 @@ pub struct PlatformCreditUsage {
     pub reset_at: String,
     /// 启用积分但未填单价的模型数：这些模型按 0 计，不会被拦截
     pub unpriced_models: i64,
+    /// 领取时同步到的站点余额（目前只有魔搭）；None = 没有实时读数
+    pub live_balance: Option<f64>,
+    /// 余额的同步时间（UTC RFC3339）；与 live_balance 成对出现
+    pub balance_at: Option<String>,
     pub exhausted: bool,
 }
 

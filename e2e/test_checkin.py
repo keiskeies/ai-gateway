@@ -12,11 +12,12 @@ import sqlite3
 
 INSERT_ACCOUNT = """INSERT INTO checkin_accounts
    (id, platform_id, platform, identity, label, cookies_enc, cookie_names, status,
-    last_message, last_run_at, last_run_day, last_ok_day, balance, daily_amount, daily_done,
-    created_at, updated_at)
+    last_message, last_run_at, last_run_day, last_ok_day, balance, balance_at, daily_amount,
+    daily_done, created_at, updated_at)
    VALUES ('e2e-acc', ?, 'modelscope', 'e2e-user', 'ModelScope 魔搭 · e2e-user',
            'fake-cipher', 'm_session_id,csn', 'ok', '今日已到账 100 魔粒（每日规则 1/1）',
-           '2026-10-31T08:18:00Z', '2026-10-31', '2026-10-31', 1828, 100, 1,
+           '2026-10-31T08:18:00Z', '2026-10-31', '2026-10-31', 1828,
+           '2026-10-31T08:18:00Z', 100, 1,
            '2026-10-31T07:00:00Z', '2026-10-31T08:18:00Z')"""
 
 
@@ -45,6 +46,9 @@ def test_checkin_is_platform_bound_and_cascades(instances):
             "type": "OpenAI",
             "base_url": "https://api-inference.modelscope.cn/v1",
             "api_key": "sk-e2e-modelscope-key",
+            "credit_budget": 250,
+            "credit_window": "day",
+            "credit_unit": "credits",
         },
     )
     assert status == 201, platform
@@ -67,11 +71,25 @@ def test_checkin_is_platform_bound_and_cascades(instances):
     # 接口只回元信息，密文不许出现在响应里
     assert "cookies_enc" not in account and "fake-cipher" not in str(body)
 
+    # 平台页积分列用领取同步的余额；本地台账（spent）不受影响
+    status, credits = api.call("GET", "/api/platforms/credits")
+    assert status == 200, credits
+    credit = next(item for item in credits if item["platform_id"] == platform_id)
+    assert credit["live_balance"] == 1828
+    assert credit["balance_at"].startswith("2026-10-31T08:18:00")
+    assert credit["spent"] == 0
+
     # 手动领取要解密 cookie：假密文落成 error（账号状态），不是接口 500
     status, body = api.call("POST", f"/api/checkin/platforms/{platform_id}/run")
     assert status == 200, body
     assert body["status"] == "error"
     assert "登录态" in body["message"]
+
+    # 失败的一次领取不能把上次同步到的余额/时间冲掉
+    status, credits = api.call("GET", "/api/platforms/credits")
+    credit = next(item for item in credits if item["platform_id"] == platform_id)
+    assert credit["live_balance"] == 1828
+    assert credit["balance_at"].startswith("2026-10-31T08:18:00")
 
     # 一键领取：单个账号失败只体现在账号状态里
     status, body = api.call("POST", "/api/checkin/run-all")

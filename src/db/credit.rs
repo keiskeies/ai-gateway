@@ -351,9 +351,11 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.credit_budget, p.credit_window,
                 COALESCE(s.period_start, ''), COALESCE(s.spent, 0),
-                (SELECT COUNT(*) FROM models m WHERE m.platform_id = p.id AND m.credit_price IS NULL)
+                (SELECT COUNT(*) FROM models m WHERE m.platform_id = p.id AND m.credit_price IS NULL),
+                c.balance, c.balance_at
          FROM platforms p
          LEFT JOIN platform_credit_state s ON s.platform_id = p.id
+         LEFT JOIN checkin_accounts c ON c.platform_id = p.id
          WHERE p.credit_budget IS NOT NULL
          ORDER BY p.name",
     )?;
@@ -366,12 +368,14 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
             row.get::<_, String>(4)?,
             row.get::<_, f64>(5)?,
             row.get::<_, i64>(6)?,
+            row.get::<_, Option<f64>>(7)?,
+            row.get::<_, Option<String>>(8)?,
         ))
     })?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (platform_id, name, budget, window, stored_period, stored_spent, unpriced) = row?;
+        let (platform_id, name, budget, window, stored_period, stored_spent, unpriced, live_balance, balance_at) = row?;
         let Some(window) = window else { continue };
         let Some(period) = current_period_start(&window) else { continue };
         let Some(reset_at) = next_reset_at(&window) else { continue };
@@ -387,6 +391,8 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
             period_start: period,
             reset_at,
             unpriced_models: unpriced,
+            live_balance,
+            balance_at,
             exhausted: remaining <= 0.0,
         });
     }
@@ -420,6 +426,53 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    /// 平台页积分列读的是领取同步的站点余额；本地已用台账不能被它改写
+    #[test]
+    fn usage_exposes_live_balance_without_touching_spent() {
+        let (pool, path) = test_db();
+        let platform = seed_platform(&pool, 250.0, "day");
+        crate::db::checkin::upsert_session(
+            &pool,
+            &platform,
+            "modelscope",
+            "demo",
+            "ModelScope 魔搭 · demo",
+            "enc",
+            "m_session_id",
+        )
+        .expect("seed session");
+        let row = crate::db::checkin::get_by_platform(&pool, &platform)
+            .expect("read session")
+            .expect("session exists");
+        crate::db::checkin::update_run(
+            &pool,
+            &row.id,
+            &crate::db::checkin::RunUpdate {
+                status: "ok",
+                message: "ok",
+                run_at: "2026-10-31T08:18:00Z",
+                run_day: "2026-10-31",
+                ok_day: Some("2026-10-31"),
+                balance: Some(1828.0),
+                balance_at: Some("2026-10-31T08:18:00Z"),
+                daily_amount: Some(100.0),
+                daily_done: Some(true),
+            },
+        )
+        .expect("update run");
+
+        let usage = usage_all(&pool)
+            .expect("usage")
+            .into_iter()
+            .find(|item| item.platform_id == platform)
+            .expect("platform in usage");
+        assert_eq!(usage.live_balance, Some(1828.0));
+        assert_eq!(usage.balance_at.as_deref(), Some("2026-10-31T08:18:00Z"));
+        assert_eq!(usage.spent, 0.0, "本地台账不能被余额覆盖");
+        assert_eq!(usage.remaining, 250.0);
+        cleanup_db(&path);
     }
 
     fn seed_platform(pool: &DbPool, budget: f64, window: &str) -> String {

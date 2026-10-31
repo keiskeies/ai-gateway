@@ -19,6 +19,8 @@ pub struct CheckinAccountRow {
     pub last_run_day: Option<String>,
     pub last_ok_day: Option<String>,
     pub balance: Option<f64>,
+    /// 余额是什么时候读到的；没有余额时为 None
+    pub balance_at: Option<String>,
     pub daily_amount: Option<f64>,
     pub daily_done: bool,
     pub created_at: String,
@@ -34,14 +36,15 @@ pub struct RunUpdate<'a> {
     pub run_day: &'a str,
     pub ok_day: Option<&'a str>,
     pub balance: Option<f64>,
+    pub balance_at: Option<&'a str>,
     pub daily_amount: Option<f64>,
     /// `None` = 这次没拿到有效数据（登录失效/网络错误），保留上次结果
     pub daily_done: Option<bool>,
 }
 
 const COLS: &str = "id, platform_id, platform, identity, label, cookies_enc, cookie_names, status, \
-                    last_message, last_run_at, last_run_day, last_ok_day, balance, daily_amount, \
-                    daily_done, created_at, updated_at";
+                    last_message, last_run_at, last_run_day, last_ok_day, balance, balance_at, \
+                    daily_amount, daily_done, created_at, updated_at";
 
 fn map_row(row: &rusqlite::Row) -> rusqlite::Result<CheckinAccountRow> {
     Ok(CheckinAccountRow {
@@ -58,10 +61,11 @@ fn map_row(row: &rusqlite::Row) -> rusqlite::Result<CheckinAccountRow> {
         last_run_day: row.get(10)?,
         last_ok_day: row.get(11)?,
         balance: row.get(12)?,
-        daily_amount: row.get(13)?,
-        daily_done: row.get::<_, i64>(14)? != 0,
-        created_at: row.get(15)?,
-        updated_at: row.get(16)?,
+        balance_at: row.get(13)?,
+        daily_amount: row.get(14)?,
+        daily_done: row.get::<_, i64>(15)? != 0,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
     })
 }
 
@@ -143,8 +147,9 @@ pub fn update_run(pool: &DbPool, id: &str, update: &RunUpdate<'_>) -> AppResult<
     conn.execute(
         "UPDATE checkin_accounts SET status = ?2, last_message = ?3, last_run_at = ?4, \
          last_run_day = ?5, last_ok_day = COALESCE(?6, last_ok_day), \
-         balance = COALESCE(?7, balance), daily_amount = COALESCE(?8, daily_amount), \
-         daily_done = COALESCE(?9, daily_done), updated_at = ?4 WHERE id = ?1",
+         balance = COALESCE(?7, balance), balance_at = COALESCE(?8, balance_at), \
+         daily_amount = COALESCE(?9, daily_amount), daily_done = COALESCE(?10, daily_done), \
+         updated_at = ?4 WHERE id = ?1",
         rusqlite::params![
             id,
             update.status,
@@ -153,6 +158,7 @@ pub fn update_run(pool: &DbPool, id: &str, update: &RunUpdate<'_>) -> AppResult<
             update.run_day,
             update.ok_day,
             update.balance,
+            update.balance_at,
             update.daily_amount,
             update.daily_done.map(|done| done as i64),
         ],
