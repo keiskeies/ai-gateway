@@ -173,12 +173,11 @@ export interface RequestPayload {
 export interface PlatformCreditUsage {
   platform_id: string
   platform_name: string
-  /** 配置的预算；总额请用 budget_effective */
+  /** 配置的预算（每日赠送上限），也是「剩余 / 总额」的分母 */
   budget: number
-  /** 本窗口真实可用总额：领取同步到上游余额时是余额，否则等于 budget */
-  budget_effective: number
   window: 'day' | 'week' | 'month' | string
   spent: number
+  /** 剩余：领取同步过就是站点余额减去同步后的消耗，可以高于 budget */
   remaining: number
   period_start: string
   reset_at: string

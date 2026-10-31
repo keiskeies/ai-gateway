@@ -82,8 +82,9 @@ def test_checkin_is_platform_bound_and_cascades(instances):
     assert credit["live_balance"] == 1828
     assert credit["balance_at"].startswith("2026-10-31T08:18:00")
     assert credit["spent"] == 0
-    # 还没领取过 → 总额仍是配置预算（余额只进 tooltip）
-    assert credit["budget_effective"] == 250
+    # 还没领取过 → 没有锚点，剩余就是配置预算（余额只进 tooltip）
+    assert credit["budget"] == 250
+    assert credit["remaining"] == 250
 
     # 手动领取要解密 cookie：假密文落成 error（账号状态），不是接口 500
     status, body = api.call("POST", f"/api/checkin/platforms/{platform_id}/run")
@@ -120,10 +121,11 @@ def test_checkin_is_platform_bound_and_cascades(instances):
 
 
 def test_credit_ledger_follows_the_claimed_balance_not_the_budget(instances):
-    """领取同步的余额是本窗口总额：低于预算要显示低，高于预算不能夹回预算。
+    """领取同步的余额是「剩余」的口径，「总额」分母始终是配置的那条预算。
 
     曾经按 `spent = 预算 - 余额` 换算，余额一旦超过预算就被夹成 0，
     列上于是永远显示配置的 250——用户看到的就是「每次签到都变成 250」。
+    余额可以高于预算（自己赚来的结转），但 250 是每日赠送上限，不能跟着余额变。
     """
     instance = instances("credit-anchor")
     api = instance.api
@@ -150,8 +152,8 @@ def test_credit_ledger_follows_the_claimed_balance_not_the_budget(instances):
     db.commit()
     db.close()
 
-    # 直接改账号余额模拟领取读到 366，再走一次真实校准入口需要上游接口，
-    # 所以这里只钉读数层的口径：锚点存在时总额取锚点。
+    # 直接改台账锚点模拟「领取读到 366」：真实校准入口要打上游接口，E2E 里到不了，
+# 所以这里只钉读数层的口径——剩余跟着锚点走，分母仍是配置的那条预算。
     db = sqlite3.connect(instance.dir / "data" / "ai-gateway.db")
     db.execute(
         "INSERT OR REPLACE INTO platform_credit_state (platform_id, period_start, spent, anchor, updated_at) "
@@ -164,9 +166,8 @@ def test_credit_ledger_follows_the_claimed_balance_not_the_budget(instances):
     status, credits = api.call("GET", "/api/platforms/credits")
     assert status == 200, credits
     credit = next(item for item in credits if item["platform_id"] == platform_id)
-    assert credit["budget_effective"] == 366, "总额要跟着站点余额走"
-    assert credit["remaining"] == 366
-    assert credit["budget"] == 250, "配置的那条预算原样保留"
+    assert credit["budget"] == 250, "分母是配置的每日赠送上限，不跟余额变"
+    assert credit["remaining"] == 366, "剩余要跟着站点余额走，不能夹回 250"
 
 
 def _period_start(window: str) -> str:

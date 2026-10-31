@@ -453,8 +453,8 @@ export default function Platforms() {
                   const checkinAccount = checkinByPlatform.get(platform.id)
                   const checkinStatus = checkinAccount?.status
                   const checkinBusy = loginBusyId === platform.id || claimBusyId === platform.id
-                  // 积分列显示台账剩余（随每笔请求扣减）；领取时用上游余额校准台账，
-                  // 真实余额只进 tooltip，避免显示成一份不会动的快照
+                  // 积分列的分子是「领取同步到的站点余额 − 之后的消耗」（所以可能高于预算：
+// 余额里含自己赚来的结转）；分母固定是配置的每日赠送上限。
                   const creditShown = item.credit ? item.credit.remaining : null
                   const creditTooltip = item.credit
                     ? (item.credit.live_balance != null
@@ -463,10 +463,10 @@ export default function Platforms() {
                           'creditLiveTooltip',
                           formatNumber(item.credit.live_balance),
                           formatNumber(item.credit.spent),
-                          formatNumber(item.credit.budget_effective),
+                          formatNumber(item.credit.budget),
                           item.credit.balance_at ? formatLogTime(item.credit.balance_at, locale) : '—',
                         )
-                      : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget_effective))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)
+                      : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)
                     : ''
                   return (
                     <Table.Tr key={platform.id} onClick={() => navigate(`/providers/${platform.id}`)}>
@@ -537,8 +537,8 @@ export default function Platforms() {
                       <Table.Td className="num">
                         {item.credit && creditShown != null ? (
                           <Tooltip label={creditTooltip}>
-                            <span className={creditShown <= 0 ? 'err' : creditShown <= item.credit.budget_effective * 0.2 ? 'warn' : ''}>
-                              {`${formatNumber(creditShown)} / ${formatNumber(item.credit.budget_effective)}`}
+                            <span className={creditShown <= 0 ? 'err' : creditShown <= item.credit.budget * 0.2 ? 'warn' : ''}>
+                              {`${formatNumber(creditShown)} / ${formatNumber(item.credit.budget)}`}
                             </span>
                           </Tooltip>
                         ) : <span className="muted">—</span>}

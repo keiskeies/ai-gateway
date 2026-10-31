@@ -5,15 +5,13 @@ use serde::{Deserialize, Serialize};
 pub struct PlatformCreditUsage {
     pub platform_id: String,
     pub platform_name: String,
-    /// 配置的预算（平台编辑页里那条数字），仅作参考与告警阈值
+    /// 配置的预算（平台编辑页里那条数字），界面上「剩余 / 总额」的分母
     pub budget: f64,
-    /// 当前窗口实际可用的总额：领取同步到上游余额时是余额，否则等于 budget
-    pub budget_effective: f64,
     /// day / week / month
     pub window: String,
     /// 当前自然窗口内已用
     pub spent: f64,
-    /// 剩余（不小于 0）
+    /// 剩余：领取同步过就是「站点余额 − 同步后的消耗」，可以高于 budget（赚来的结转余额）
     pub remaining: f64,
     /// 当前窗口起点（UTC RFC3339）
     pub period_start: String,

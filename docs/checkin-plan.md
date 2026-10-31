@@ -74,7 +74,7 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
 | status | `new` / `ok` / `waiting` / `expired` / `error` |
 | last_message | 最近一次运行的诊断 |
 | last_run_at / last_run_day / last_ok_day | 运行时间 / 本地日期 |
-| balance / balance_at | 领取时同步到的站点余额 / 同步时间（作为本窗口总额的锚点，见 §5） |
+| balance / balance_at | 领取时同步到的站点余额 / 同步时间（积分列「剩余」的锚点，见 §5） |
 | daily_amount / daily_done | 今日到账 / 是否到账 |
 
 ## 5. 领取逻辑（core，桌面端与服务器模式都跑）
@@ -84,14 +84,18 @@ cookie 与 API Key 同级对待：`security.encrypt_key` 做 AES-GCM 落库，�
 3. `GET earn/rules`：`daily` 分类里 `short_term` 看 `today_remain == 0`、`long_term` 看总额领完；
    `daily_done = 任一完成`，`daily_amount = 完成规则的 amount 之和`；
 4. 余额与同步时间一并落库（`balance` / `balance_at`）；平台配了积分预算时，用上游可用余额
-   **校准本地台账**：把余额记成 `platform_credit_state.anchor`（本窗口真实总额）并把已用量清零
-   （V34）。此后每笔请求从这份余额往下扣，积分列显示 `anchor − spent`；
+   **校准本地台账**：把余额记成 `platform_credit_state.anchor`（余额锚点）并把已用量清零
+   （V34）。此后每笔请求从这份余额往下扣，积分列的分子显示 `anchor − spent`；
    失败的一次领取既不校准也不刷新余额；
 5. 状态：`Expired → expired`；成功且到账 `→ ok`；成功未到账 `→ waiting`。
 
 > 为什么不是 `spent = 预算 − 余额`：站点余额和配置预算本来就不是一回事（赠送魔粒、跨日结转）。
 > 余额一旦高于预算，这个式子会给负数、被夹成 0，积分列于是恒等于预算数字，
-> 看起来像「每次领取都变回 250」。锚点口径下总额随真实余额走，配置预算只在没领取过时兜底。
+> 看起来像「每次领取都变回 250」。
+>
+> 但**分母不变**：界面上的「总额」始终是配置的那条预算（用户配的每日赠送上限），
+> 锚点只决定分子与路由闸门——余额 366 / 预算 250 就显示 `358 / 250`，
+> 请求也允许跑到真实余额见底，而不是在 250 处提前拦截。
 
 后台线程：每 60 秒 tick 一次，是否真的发请求由任务判定（见 §9）；`expired` 不再重试（重新登录重置成 `new`）。
 

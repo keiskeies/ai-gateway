@@ -13,12 +13,14 @@ pub struct CreditState {
     pub platform_id: String,
     pub period_start: String,
     pub spent: f64,
-    /// 领取时读到的上游真实余额，作为本窗口的总额；None = 还没校准过，用 credit_budget
+    /// 领取时读到的上游真实余额，作为本窗口的余额锚点（剩余从它往下扣）；
+/// None = 还没校准过，退回 credit_budget
     pub anchor: Option<f64>,
 }
 
-/// 本窗口的可用总额：领取同步到的真实余额优先，否则退回配置的预算。
-/// 站点余额与预算本来就不等价（赠送魔粒、跨日结转），不能拿预算去截断它。
+/// 剩余要跟着走的那份余额：领取同步到的真实余额优先，否则退回配置的预算。
+/// 站点余额与预算本来就不等价（赠送魔粒、跨日结转），不能拿预算去截断它；
+/// 但界面上的「总额」分母仍是 credit_budget——那是用户配的每日赠送上限。
 pub fn total_budget(anchor: Option<f64>, budget: f64) -> f64 {
     match anchor {
         Some(value) if value.is_finite() && value >= 0.0 => value,
@@ -449,7 +451,6 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
             platform_id,
             platform_name: name,
             budget,
-            budget_effective: total,
             window,
             spent,
             remaining,
@@ -536,8 +537,7 @@ mod tests {
         assert_eq!(usage.live_balance, Some(1828.0));
         assert_eq!(usage.balance_at.as_deref(), Some("2026-10-31T08:18:00Z"));
         assert_eq!(usage.spent, 0.0, "本地台账不能被余额覆盖");
-        // 没有领取锚点时总额就是配置预算；余额只进 tooltip
-        assert_eq!(usage.budget_effective, 250.0);
+        // 没有领取锚点时剩余就是配置预算；余额只进 tooltip
         assert_eq!(usage.remaining, 250.0);
         cleanup_db(&path);
     }
@@ -647,9 +647,8 @@ mod tests {
         );
         let usage = usage_all(&pool).unwrap();
         assert_eq!(usage[0].spent, 2.0);
-        // 上个窗口的余额锚点必须一起作废，否则新周期会沿用旧总额
-        assert_eq!(usage[0].budget_effective, 5.0);
-        assert_eq!(usage[0].remaining, 3.0);
+        // 上个窗口的余额锚点必须一起作废，否则新周期会沿用旧余额
+        assert_eq!(usage[0].remaining, 3.0, "按预算 5 扣 2，不是按旧锚点 900");
         cleanup_db(&path);
     }
 
@@ -684,8 +683,8 @@ mod tests {
         assert_eq!(delta, -10.0);
         let usage = &usage_all(&pool).unwrap()[0];
         assert_eq!(usage.spent, 0.0);
-        assert_eq!(usage.budget_effective, 70.0);
-        assert_eq!(usage.remaining, 70.0, "剩余要等于上游余额，不是配置预算");
+        assert_eq!(usage.budget, 100.0, "配置预算原样保留，作为界面上的总额");
+        assert_eq!(usage.remaining, 70.0, "剩余要等于上游余额，不是预算减余额");
 
         // 之后每笔请求从真实余额里扣
         try_reserve(&pool, &id, Some(100.0), Some("day"), Some(5.0), "r2", "m1").unwrap();
@@ -720,6 +719,7 @@ mod tests {
         let usage = &usage_all(&pool).unwrap()[0];
         assert_eq!(usage.spent, 0.0);
         assert_eq!(usage.remaining, 366.0, "列上要显示真实余额");
+        assert_eq!(usage.budget, 250.0, "分母是配的每日赠送上限，不跟余额变");
 
         // 闸门也按真实余额判断：扣到 300 仍可用，跌破 0 才耗尽
         try_reserve(&pool, &id, Some(250.0), Some("day"), Some(200.0), "r1", "m1").unwrap();

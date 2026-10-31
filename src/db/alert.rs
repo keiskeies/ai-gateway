@@ -350,7 +350,7 @@ pub fn collect_candidates(
     for usage in crate::db::credit::usage_all(pool)? {
         let (kind, code, severity, remaining_label) = if usage.exhausted {
             ("platform_credit_exhausted", "alertPlatformCreditExhausted", "error", "0".to_string())
-        } else if usage.remaining <= usage.budget_effective * CREDIT_WARN_RATIO {
+        } else if usage.remaining <= usage.budget * CREDIT_WARN_RATIO {
             ("platform_credit_low", "alertPlatformCreditLow", "warn", trim_money(usage.remaining))
         } else {
             continue;
@@ -365,7 +365,7 @@ pub fn collect_candidates(
             args: vec![
                 usage.platform_name.clone(),
                 remaining_label.to_string(),
-                trim_money(usage.budget_effective),
+                trim_money(usage.budget),
                 usage.reset_at.clone(),
             ],
         });

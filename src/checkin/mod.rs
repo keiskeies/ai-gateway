@@ -980,7 +980,7 @@ mod tests {
             .expect("platform in usage");
         assert_eq!(usage.spent, 0.0, "领取后已用量归零，从上游余额重新开始扣");
         assert_eq!(usage.remaining, 241.0, "剩余就是领取时读到的余额");
-        assert_eq!(usage.budget_effective, 241.0);
+        assert_eq!(usage.budget, 250.0, "总额仍是配置的每日赠送上限");
         cleanup_db(&path);
     }
 
