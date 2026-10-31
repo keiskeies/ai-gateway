@@ -1153,9 +1153,11 @@ h4,
 }
 
 .console-attention-list {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
+  /* 一行多列：宽屏平铺、窄屏自动堆叠，别把三张卡竖着排掉半屏 */
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
 }
 
 .console-attention-item {
@@ -1163,17 +1165,18 @@ h4,
   align-items: flex-start;
   gap: 10px;
   width: 100%;
-  padding: 11px 15px;
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  background: transparent;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-bg-2);
   color: var(--text-2);
   text-align: left;
   cursor: pointer;
 }
 
 .console-attention-item:hover {
-  background: var(--panel-bg-2);
+  border-color: var(--line-strong);
+  background: var(--panel-bg);
 }
 
 .console-attention-bar {
@@ -1194,17 +1197,23 @@ h4,
 
 .console-attention-title {
   display: block;
+  overflow: hidden;
   color: var(--text-1);
   font-size: 12px;
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .console-attention-meta {
   display: block;
   margin-top: 2px;
+  overflow: hidden;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .console-attention-chev {
