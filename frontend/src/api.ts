@@ -1,6 +1,6 @@
 import axios from 'axios'
 import type { ClientApplyBody, ClientApplyResult, ClientConfigFile, ClientConfigWrite, ClientPreview, ClientRestoreResult, ClientStatus, ExtraSpec } from './types/clients'
-import type { CheckinAccount, CheckinAttempt, CheckinData } from './types/checkin'
+import type { CheckinAccount, CheckinAttempt, CheckinData, CheckinTask, CheckinTaskInput } from './types/checkin'
 
 // Detect Tauri desktop mode
 const isTauri = !!(window as any).__TAURI_INTERNALS__
@@ -436,3 +436,13 @@ export const runCheckin = (platformId: string): Promise<CheckinAccount> =>
   api.post(`/checkin/platforms/${platformId}/run`).then(r => r.data)
 export const runAllCheckin = (): Promise<CheckinAccount[]> =>
   api.post('/checkin/run-all').then(r => r.data.accounts)
+/** 定时领取任务：时间与账号清单整体提交 */
+export const createCheckinTask = (input: CheckinTaskInput): Promise<CheckinTask> =>
+  api.post('/checkin/tasks', input).then(r => r.data)
+export const updateCheckinTask = (id: string, input: CheckinTaskInput): Promise<CheckinTask> =>
+  api.put(`/checkin/tasks/${id}`, input).then(r => r.data)
+export const deleteCheckinTask = (id: string): Promise<void> =>
+  api.delete(`/checkin/tasks/${id}`).then(() => undefined)
+/** 立即跑一次（绕过「今天已领 / 不足 3 小时」），返回汇总文字 */
+export const runCheckinTask = (id: string): Promise<{ task: CheckinTask; message: string }> =>
+  api.post(`/checkin/tasks/${id}/run`).then(r => r.data)

@@ -2919,6 +2919,53 @@ h4,
   color: var(--ok);
 }
 
+/* 定时领取任务弹窗：说明、任务表、底部编辑器 */
+.checkin-task-note {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.5;
+  margin-bottom: 10px;
+}
+.checkin-task-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.checkin-task-time {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.checkin-task-tag {
+  display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.checkin-task-tag.missing {
+  border-color: var(--err);
+  color: var(--err);
+}
+.checkin-task-last {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.checkin-task-editor {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-strong);
+}
+
 /* Key 申请快捷入口：放在 Base URL 标签右侧，与标签同基线。
    用 inline-flex 而不是绝对定位，避免长品牌名在窄屏被裁切。 */
 .console-inline-row {

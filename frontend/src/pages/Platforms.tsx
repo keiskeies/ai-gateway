@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ActionIcon, Button, Group, Modal, Table, TextInput, Tooltip } from '@mantine/core'
-import { notifications } from '@mantine/notifications'
+import { notify } from '../lib/notify'
 import {
   IconArrowRight,
+  IconAlarm,
   IconGift,
   IconPlugConnected,
   IconPlus,
@@ -37,6 +38,7 @@ import { StatusPill } from '../components/ui/StatusPill'
 import { formatDuration, formatLogTime, formatNumber, successRateTone } from '../lib/format'
 import { platformTypeLabel, probePlatformConfig, type PlatformTestResult } from '../lib/platform'
 import { ProviderCreateModal } from '../components/ProviderCreateModal'
+import { CheckinTasksModal, type CheckinAccountOption } from '../components/CheckinTasksModal'
 import { getPresetName, platformPresets } from '../presets'
 import type { PlatformCreditUsage, PlatformDetail, PlatformHealthSummary, PlatformStats, RouteRow } from '../types/stats'
 import type { CheckinStatus } from '../types/checkin'
@@ -91,6 +93,7 @@ export default function Platforms() {
   const [claimBusyId, setClaimBusyId] = useState<string | null>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkNote, setBulkNote] = useState<string | null>(null)
+  const [tasksOpen, setTasksOpen] = useState(false)
 
   useEffect(() => {
     getAuthStatus()
@@ -199,7 +202,7 @@ export default function Platforms() {
       platform_id: row.platform.id,
     })
     setTests(prev => ({ ...prev, [row.platform.id]: result }))
-    notifications.show({ title: row.platform.name, message: result.message, color: result.ok ? 'green' : 'red' })
+    notify(locale, { title: row.platform.name, message: result.message, color: result.ok ? 'green' : 'red' })
     setTestingId(null)
     // 检测已落库，重取列表让 CHECK 列回到持久数据（本次会话结果继续覆盖，避免闪烁）
     void queryClient.invalidateQueries({ queryKey: ['platforms'] })
@@ -210,14 +213,14 @@ export default function Platforms() {
     setSaving(true)
     try {
       await deletePlatform(deleteTarget.platform.id)
-      notifications.show({ message: t(locale, 'deleteSuccess'), color: 'green' })
+      notify(locale, { message: t(locale, 'deleteSuccess'), color: 'green' })
       setDeleteTarget(null)
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
       await queryClient.invalidateQueries({ queryKey: ['models'] })
       await queryClient.invalidateQueries({ queryKey: ['overview'] })
       await queryClient.invalidateQueries({ queryKey: ['checkin'] })
     } catch (error: any) {
-      notifications.show({
+      notify(locale, {
         message: error?.response?.data?.error?.message || t(locale, 'loadFailed'),
         color: 'red',
       })
@@ -240,12 +243,21 @@ export default function Platforms() {
   const supportedRows = (providersQuery.data ?? []).filter(item =>
     capabilityFor(item.platform.base_url),
   )
+  // 定时任务的候选账号：受支持的平台行全列出来，没登录的禁用——否则用户会找不到自己的账号
+  const taskOptions: CheckinAccountOption[] = supportedRows.map(row => {
+    const account = checkinByPlatform.get(row.platform.id)
+    return {
+      value: row.platform.id,
+      label: account ? `${row.platform.name} · ${account.identity || account.label}` : row.platform.name,
+      disabled: !account,
+    }
+  })
 
   const claimPlatform = async (row: ProviderRow) => {
     setClaimBusyId(row.platform.id)
     try {
       const view = await runCheckin(row.platform.id)
-      notifications.show({
+      notify(locale, {
         color: view.status === 'ok' ? 'teal' : view.status === 'waiting' ? 'yellow' : 'red',
         message: view.message || t(locale, 'checkinRunDone'),
         autoClose: 6000,
@@ -254,7 +266,7 @@ export default function Platforms() {
       // 积分列用的是领取时同步的余额，必须一起刷新
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
     } catch (error) {
-      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+      notify(locale, { color: 'red', message: errorMessage(error, locale) })
     } finally {
       setClaimBusyId(null)
     }
@@ -264,19 +276,19 @@ export default function Platforms() {
     setLoginBusyId(row.platform.id)
     try {
       const { attempt_id } = await startPlatformCheckinLogin(row.platform.id)
-      notifications.show({ message: t(locale, 'checkinLoginWaiting'), autoClose: 5000 })
+      notify(locale, { message: t(locale, 'checkinLoginWaiting'), autoClose: 5000 })
       const attempt = await waitForCheckinAttempt(attempt_id)
       if (!attempt) {
-        notifications.show({ color: 'yellow', message: t(locale, 'checkinLoginTimeout'), autoClose: 8000 })
+        notify(locale, { color: 'yellow', message: t(locale, 'checkinLoginTimeout'), autoClose: 8000 })
         return
       }
       if (attempt.status !== 'ok') {
-        notifications.show({ color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
+        notify(locale, { color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
         return
       }
       await checkinQuery.refetch()
       const view = await runCheckin(row.platform.id)
-      notifications.show({
+      notify(locale, {
         color: view.status === 'ok' ? 'teal' : view.status === 'waiting' ? 'yellow' : 'red',
         message: view.message,
         autoClose: 6000,
@@ -284,7 +296,7 @@ export default function Platforms() {
       await checkinQuery.refetch()
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
     } catch (error) {
-      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+      notify(locale, { color: 'red', message: errorMessage(error, locale) })
     } finally {
       setLoginBusyId(null)
     }
@@ -306,20 +318,20 @@ export default function Platforms() {
           logged += 1
           await runCheckin(row.platform.id)
         } else if (attempt?.status === 'error') {
-          notifications.show({ color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
+          notify(locale, { color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
         }
       }
       await Promise.all([
         checkinQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ['platforms'] }),
       ])
-      notifications.show({
+      notify(locale, {
         color: 'teal',
         message: t(locale, 'checkinBulkDone', String(logged)),
         autoClose: 6000,
       })
     } catch (error) {
-      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+      notify(locale, { color: 'red', message: errorMessage(error, locale) })
     } finally {
       setBulkBusy(false)
       setBulkNote(null)
@@ -353,6 +365,16 @@ export default function Platforms() {
                 onClick={() => void oneClick()}
               >
                 {t(locale, 'checkinOneClick')}
+              </Button>
+            )}
+            {showCheckin && (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<IconAlarm size={14} />}
+                onClick={() => setTasksOpen(true)}
+              >
+                {t(locale, 'checkinTasks')}
               </Button>
             )}
             <Button size="xs" variant="default" leftSection={<IconRefresh size={14} />} onClick={() => void providersQuery.refetch()}>
@@ -571,6 +593,19 @@ export default function Platforms() {
       </section>
 
       <ProviderCreateModal opened={createOpen} onClose={() => setCreateOpen(false)} />
+
+      <CheckinTasksModal
+        opened={tasksOpen}
+        onClose={() => setTasksOpen(false)}
+        tasks={checkinQuery.data?.tasks ?? []}
+        accounts={checkinQuery.data?.accounts ?? []}
+        options={taskOptions}
+        onChanged={() => {
+          void checkinQuery.refetch()
+          // 领取结果会校准积分列
+          void queryClient.invalidateQueries({ queryKey: ['platforms'] })
+        }}
+      />
 
       <Modal
         opened={Boolean(deleteTarget)}

@@ -27,8 +27,30 @@ export interface CheckinCapability {
   login_supported: boolean
 }
 
+/** 一条定时领取任务：本地时间点位 + 选中的平台账号（平台即账号） */
+export interface CheckinTask {
+  id: string
+  name: string
+  /** 'HH:MM'，本地时间 */
+  time: string
+  platform_ids: string[]
+  enabled: boolean
+  last_run_at: string | null
+  /** 本地日期 'YYYY-MM-DD'：今天是否已经跑过 */
+  last_run_day: string | null
+  last_message: string
+}
+
+export interface CheckinTaskInput {
+  name: string
+  time: string
+  platform_ids: string[]
+  enabled: boolean
+}
+
 export interface CheckinData {
   accounts: CheckinAccount[]
+  tasks: CheckinTask[]
   platforms: CheckinCapability[]
 }
 
