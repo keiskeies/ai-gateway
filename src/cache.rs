@@ -34,7 +34,7 @@ pub struct ResolvedRoute {
     pub fallback: Option<String>,
     /// 客户端未传 max_tokens 时填充的默认值（None = 不干预）
     pub default_max_tokens: Option<u32>,
-    /// 每次上游尝试前置 32~128 位随机数字串
+    /// 每次上游尝试前置 32~128 位随机字母数字串
     pub request_nonce: bool,
 }
 

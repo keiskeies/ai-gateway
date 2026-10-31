@@ -1,4 +1,4 @@
-//! 请求前置随机串：让上游看到的前缀每次都不同。
+//! 请求前置随机串：让上游看到的前缀每次都不同（字母数字混合）。
 //!
 //! 「最前面」在两种目标协议上不是同一个字段——Anthropic 把 system 放在顶层，
 //! OpenAI 兼容上游只渲染 messages。所以注入位置由调用方按目标协议选 `Surface`。
@@ -14,18 +14,23 @@ pub enum Surface {
     Messages,
 }
 
-/// 32..=128 位十进制数字串，长度本身也随机。
-pub(crate) fn random_digits() -> String {
+/// 随机串的字符集：数字 + 大小写英文字母。
+const NONCE_CHARSET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// 32..=128 位字母数字串，长度与内容都随机。
+pub(crate) fn random_nonce() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let len = rng.gen_range(32..=128);
-    (0..len).map(|_| char::from(b'0' + rng.gen_range(0..10u8))).collect()
+    (0..len)
+        .map(|_| NONCE_CHARSET[rng.gen_range(0..NONCE_CHARSET.len())] as char)
+        .collect()
 }
 
 /// 在整段 prompt 的最前面插入随机数字串，并返回生成的串（供详情页展示）。
 /// 每次上游尝试调用一次。
 pub fn apply(unified: &mut UnifiedRequest, surface: Surface) -> String {
-    let nonce = random_digits();
+    let nonce = random_nonce();
     match surface {
         Surface::SystemField => {
             if let Some(system) = unified.system.as_mut() {
@@ -117,18 +122,19 @@ mod tests {
     }
 
     #[test]
-    fn nonce_is_32_to_128_digits() {
+    fn nonce_is_32_to_128_alphanumeric() {
         for _ in 0..1000 {
-            let n = random_digits();
+            let n = random_nonce();
             assert!((32..=128).contains(&n.len()), "长度越界: {}", n.len());
-            assert!(n.chars().all(|c| c.is_ascii_digit()), "含非数字: {n}");
+            assert!(n.chars().all(|c| c.is_ascii_alphanumeric()), "含非法字符: {n}");
+            assert!(n.chars().all(|c| c.is_ascii()), "非 ASCII: {n}");
         }
     }
 
     #[test]
     fn nonce_varies_between_calls() {
-        let a = random_digits();
-        let b = random_digits();
+        let a = random_nonce();
+        let b = random_nonce();
         assert_ne!(a, b, "连续两次生成相同，随机性可疑");
     }
 
@@ -138,7 +144,7 @@ mod tests {
         apply(&mut u, Surface::SystemField);
         let system = u.system.clone().unwrap();
         let (nonce, rest) = system.split_once('\n').expect("应有换行分隔");
-        assert!((32..=128).contains(&nonce.len()) && nonce.chars().all(|c| c.is_ascii_digit()));
+        assert!((32..=128).contains(&nonce.len()) && nonce.chars().all(|c| c.is_ascii_alphanumeric()));
         assert_eq!(rest, "你是严谨的助手");
         assert_eq!(u.messages.len(), 1, "有 system 时不应插消息");
     }
@@ -178,7 +184,7 @@ mod tests {
         let blocks = u.messages[0].content.as_ref().unwrap().as_array().unwrap();
         let text = blocks[0]["text"].as_str().unwrap();
         assert!(text.ends_with("\n块文本"));
-        assert!(blocks[0]["text"].as_str().unwrap().split_once('\n').unwrap().0.chars().all(|c| c.is_ascii_digit()));
+        assert!(blocks[0]["text"].as_str().unwrap().split_once('\n').unwrap().0.chars().all(|c| c.is_ascii_alphanumeric()));
         assert_eq!(blocks[1]["type"], "image_url", "非文本块不应被动");
     }
 
