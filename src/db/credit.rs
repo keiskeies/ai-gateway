@@ -13,6 +13,17 @@ pub struct CreditState {
     pub platform_id: String,
     pub period_start: String,
     pub spent: f64,
+    /// 领取时读到的上游真实余额，作为本窗口的总额；None = 还没校准过，用 credit_budget
+    pub anchor: Option<f64>,
+}
+
+/// 本窗口的可用总额：领取同步到的真实余额优先，否则退回配置的预算。
+/// 站点余额与预算本来就不等价（赠送魔粒、跨日结转），不能拿预算去截断它。
+pub fn total_budget(anchor: Option<f64>, budget: f64) -> f64 {
+    match anchor {
+        Some(value) if value.is_finite() && value >= 0.0 => value,
+        _ => budget,
+    }
 }
 
 /// 预留结果。Exhausted 带上已用与预算，调用方可以给出“250/250，何时重置”的明确错误。
@@ -79,13 +90,14 @@ pub fn next_reset_at(window: &str) -> Option<String> {
 pub fn state_map(pool: &DbPool) -> AppResult<HashMap<String, CreditState>> {
     let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let mut stmt = conn.prepare(
-        "SELECT platform_id, period_start, spent FROM platform_credit_state",
+        "SELECT platform_id, period_start, spent, anchor FROM platform_credit_state",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(CreditState {
             platform_id: row.get(0)?,
             period_start: row.get(1)?,
             spent: row.get(2)?,
+            anchor: row.get(3)?,
         })
     })?;
     let mut out = HashMap::new();
@@ -109,18 +121,39 @@ pub fn effective_spent(
     }
 }
 
-fn ensure_state(tx: &rusqlite::Transaction<'_>, platform_id: &str, period_start: &str, now: &str) -> AppResult<(String, f64)> {
+/// 快照里的可用总额：跟着 `effective_spent` 一起判断窗口是否过期。
+pub fn effective_total(
+    map: &HashMap<String, CreditState>,
+    platform_id: &str,
+    window: &str,
+    budget: f64,
+) -> f64 {
+    let anchor = map
+        .get(platform_id)
+        .and_then(|state| match current_period_start(window) {
+            Some(current) if state.period_start == current => state.anchor,
+            _ => None,
+        });
+    total_budget(anchor, budget)
+}
+
+fn ensure_state(
+    tx: &rusqlite::Transaction<'_>,
+    platform_id: &str,
+    period_start: &str,
+    now: &str,
+) -> AppResult<(String, f64, Option<f64>)> {
     tx.execute(
         "INSERT OR IGNORE INTO platform_credit_state (platform_id, period_start, spent, updated_at)
          VALUES (?1, ?2, 0, ?3)",
         rusqlite::params![platform_id, period_start, now],
     )?;
-    let (stored_period, spent): (String, f64) = tx.query_row(
-        "SELECT period_start, spent FROM platform_credit_state WHERE platform_id = ?1",
+    let (stored_period, spent, anchor): (String, f64, Option<f64>) = tx.query_row(
+        "SELECT period_start, spent, anchor FROM platform_credit_state WHERE platform_id = ?1",
         [platform_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
-    Ok((stored_period, spent))
+    Ok((stored_period, spent, anchor))
 }
 
 fn insert_ledger(
@@ -173,17 +206,20 @@ pub fn try_reserve(
 
     let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (stored_period, mut spent) = ensure_state(&tx, platform_id, &period, &now)?;
+    let (stored_period, mut spent, mut anchor) = ensure_state(&tx, platform_id, &period, &now)?;
     if stored_period != period {
+        // 跨自然窗口：上一窗口的余额快照已经作废，退回配置的预算
         spent = 0.0;
+        anchor = None;
         tx.execute(
-            "UPDATE platform_credit_state SET period_start = ?2, spent = 0, updated_at = ?3 WHERE platform_id = ?1",
+            "UPDATE platform_credit_state SET period_start = ?2, spent = 0, anchor = NULL, updated_at = ?3 WHERE platform_id = ?1",
             rusqlite::params![platform_id, period, now],
         )?;
     }
-    if spent + price > budget + f64::EPSILON {
+    let total = total_budget(anchor, budget);
+    if spent + price > total + f64::EPSILON {
         // 事务在这里直接由 drop 回滚；上一句的归零也不落库，下一次仍会重试。
-        return Ok(CreditReserve::Exhausted { spent, budget });
+        return Ok(CreditReserve::Exhausted { spent, budget: total });
     }
     tx.execute(
         "UPDATE platform_credit_state SET spent = ?2, updated_at = ?3 WHERE platform_id = ?1",
@@ -257,13 +293,21 @@ pub fn adjust(pool: &DbPool, platform_id: &str, delta: f64, note: Option<&str>) 
 
     let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (stored_period, spent) = ensure_state(&tx, platform_id, &period, &now)?;
-    let spent = if stored_period != period { 0.0 } else { spent };
+    let (stored_period, spent, _) = ensure_state(&tx, platform_id, &period, &now)?;
+    let same_period = stored_period == period;
+    let spent = if same_period { spent } else { 0.0 };
     let next = (spent + delta).max(0.0);
-    tx.execute(
-        "UPDATE platform_credit_state SET period_start = ?2, spent = ?3, updated_at = ?4 WHERE platform_id = ?1",
-        rusqlite::params![platform_id, period, next, now],
-    )?;
+    if same_period {
+        tx.execute(
+            "UPDATE platform_credit_state SET period_start = ?2, spent = ?3, updated_at = ?4 WHERE platform_id = ?1",
+            rusqlite::params![platform_id, period, next, now],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE platform_credit_state SET period_start = ?2, spent = ?3, anchor = NULL, updated_at = ?4 WHERE platform_id = ?1",
+            rusqlite::params![platform_id, period, next, now],
+        )?;
+    }
     insert_ledger(&tx, platform_id, None, None, next - spent, "adjust", note, &now)?;
     tx.commit()?;
     Ok((spent, next))
@@ -275,10 +319,12 @@ pub fn adjust(pool: &DbPool, platform_id: &str, delta: f64, note: Option<&str>) 
 /// （并发预留、失败释放、上游计费口径差异）。热路径不能用上游接口（每个请求
 /// 多一次往返），所以由后台任务/手动按钮定期校准。
 ///
-/// `upstream_remaining` 是上游报告的**剩余**额度。换算成本地口径：
-/// `target_spent = budget - upstream_remaining`，再与当前 `spent` 比对。
+/// 校准把 `upstream_remaining` 记成本窗口的总额（`anchor`）并把已用量清零：
+/// 此后每笔请求从这份真实余额里扣。站点余额常常不等于配置的预算（赠送魔粒、
+/// 跨日结转），若按 `budget - 余额` 换算，余额一超过预算就被夹到 0，
+/// 积分列会永远停在预算数字上，看起来像「每次领取都变回 250」。
 ///
-/// 返回 `(old_spent, new_spent, delta)`；偏差在 ±1 以内不动（避免抖动）。
+/// 返回 `(old_spent, new_spent, delta)`；`delta` 是本次对已用量的实际调整。
 pub fn calibrate(
     pool: &DbPool,
     platform_id: &str,
@@ -297,28 +343,32 @@ pub fn calibrate(
 
     let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (stored_period, spent) = ensure_state(&tx, platform_id, &period, &now)?;
-    // 跨周期时本地已归零，直接以本次校准为准
+    let (stored_period, spent, anchor) = ensure_state(&tx, platform_id, &period, &now)?;
     let spent = if stored_period != period { 0.0 } else { spent };
 
-    let target = (budget - upstream_remaining).max(0.0);
-    let delta = target - spent;
-    if delta.abs() <= 1.0 {
+    let spent_changed = spent.abs() > 0.01;
+    let anchor_changed = match anchor {
+        Some(value) => (value - upstream_remaining).abs() > 0.01,
+        None => true,
+    };
+    if !spent_changed && !anchor_changed {
         tx.commit()?;
         return Ok((spent, spent, 0.0));
     }
 
     tx.execute(
-        "UPDATE platform_credit_state SET period_start = ?2, spent = ?3, updated_at = ?4 WHERE platform_id = ?1",
-        rusqlite::params![platform_id, period, target, now],
+        "UPDATE platform_credit_state SET period_start = ?2, spent = 0, anchor = ?3, updated_at = ?4 WHERE platform_id = ?1",
+        rusqlite::params![platform_id, period, upstream_remaining, now],
     )?;
     let note = format!(
-        "上游剩余 {:.2} / 预算 {:.2}；本地原已用 {:.2} → 校准为 {:.2}",
-        upstream_remaining, budget, spent, target
+        "上游余额 {:.2}（配置预算 {:.2}）；已用 {:.2} → 0",
+        upstream_remaining, budget, spent
     );
-    insert_ledger(&tx, platform_id, None, None, delta, "calibrate", Some(&note), &now)?;
+    // delta 记的是已用量变化，余额变化体现在 note 里：流水是「已用」的账，
+    // 把余额差塞进同一条会让 SUM(delta) 的语义混乱。
+    insert_ledger(&tx, platform_id, None, None, -spent, "calibrate", Some(&note), &now)?;
     tx.commit()?;
-    Ok((spent, target, delta))
+    Ok((spent, 0.0, -spent))
 }
 
 /// 手动重置当前窗口：把已用清零并写一条 reset 流水。
@@ -334,12 +384,22 @@ pub fn reset(pool: &DbPool, platform_id: &str) -> AppResult<f64> {
 
     let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (stored_period, spent) = ensure_state(&tx, platform_id, &period, &now)?;
-    let spent = if stored_period != period { 0.0 } else { spent };
-    tx.execute(
-        "UPDATE platform_credit_state SET period_start = ?2, spent = 0, updated_at = ?3 WHERE platform_id = ?1",
-        rusqlite::params![platform_id, period, now],
-    )?;
+    let (stored_period, spent, _) = ensure_state(&tx, platform_id, &period, &now)?;
+    let same_period = stored_period == period;
+    let spent = if same_period { spent } else { 0.0 };
+    // 只清「已用」，不动余额锚点：总额是上游的事实，清零的是我们记的账。
+    // 跨窗口时锚点一并作废，让新周期退回配置预算。
+    if same_period {
+        tx.execute(
+            "UPDATE platform_credit_state SET period_start = ?2, spent = 0, updated_at = ?3 WHERE platform_id = ?1",
+            rusqlite::params![platform_id, period, now],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE platform_credit_state SET period_start = ?2, spent = 0, anchor = NULL, updated_at = ?3 WHERE platform_id = ?1",
+            rusqlite::params![platform_id, period, now],
+        )?;
+    }
     insert_ledger(&tx, platform_id, None, None, -spent, "reset", Some("manual reset"), &now)?;
     tx.commit()?;
     Ok(spent)
@@ -350,7 +410,7 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
     let conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
     let mut stmt = conn.prepare(
         "SELECT p.id, p.name, p.credit_budget, p.credit_window,
-                COALESCE(s.period_start, ''), COALESCE(s.spent, 0),
+                COALESCE(s.period_start, ''), COALESCE(s.spent, 0), s.anchor,
                 (SELECT COUNT(*) FROM models m WHERE m.platform_id = p.id AND m.credit_price IS NULL),
                 c.balance, c.balance_at
          FROM platforms p
@@ -367,24 +427,29 @@ pub fn usage_all(pool: &DbPool) -> AppResult<Vec<PlatformCreditUsage>> {
             row.get::<_, Option<String>>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, f64>(5)?,
-            row.get::<_, i64>(6)?,
-            row.get::<_, Option<f64>>(7)?,
-            row.get::<_, Option<String>>(8)?,
+            row.get::<_, Option<f64>>(6)?,
+            row.get::<_, i64>(7)?,
+            row.get::<_, Option<f64>>(8)?,
+            row.get::<_, Option<String>>(9)?,
         ))
     })?;
 
     let mut out = Vec::new();
     for row in rows {
-        let (platform_id, name, budget, window, stored_period, stored_spent, unpriced, live_balance, balance_at) = row?;
+        let (platform_id, name, budget, window, stored_period, stored_spent, stored_anchor, unpriced, live_balance, balance_at) = row?;
         let Some(window) = window else { continue };
         let Some(period) = current_period_start(&window) else { continue };
         let Some(reset_at) = next_reset_at(&window) else { continue };
-        let spent = if stored_period == period { stored_spent } else { 0.0 };
-        let remaining = (budget - spent).max(0.0);
+        let in_window = stored_period == period;
+        let spent = if in_window { stored_spent } else { 0.0 };
+        let anchor = if in_window { stored_anchor } else { None };
+        let total = total_budget(anchor, budget);
+        let remaining = (total - spent).max(0.0);
         out.push(PlatformCreditUsage {
             platform_id,
             platform_name: name,
             budget,
+            budget_effective: total,
             window,
             spent,
             remaining,
@@ -471,6 +536,8 @@ mod tests {
         assert_eq!(usage.live_balance, Some(1828.0));
         assert_eq!(usage.balance_at.as_deref(), Some("2026-10-31T08:18:00Z"));
         assert_eq!(usage.spent, 0.0, "本地台账不能被余额覆盖");
+        // 没有领取锚点时总额就是配置预算；余额只进 tooltip
+        assert_eq!(usage.budget_effective, 250.0);
         assert_eq!(usage.remaining, 250.0);
         cleanup_db(&path);
     }
@@ -568,7 +635,7 @@ mod tests {
         let id = seed_platform(&pool, 5.0, "day");
         let conn = pool.get().unwrap();
         conn.execute(
-            "INSERT INTO platform_credit_state (platform_id, period_start, spent, updated_at) VALUES (?1, '2000-01-01T00:00:00+00:00', 99, '2000-01-01T00:00:00+00:00')",
+            "INSERT INTO platform_credit_state (platform_id, period_start, spent, anchor, updated_at) VALUES (?1, '2000-01-01T00:00:00+00:00', 99, 900, '2000-01-01T00:00:00+00:00')",
             [&id],
         )
         .unwrap();
@@ -580,11 +647,29 @@ mod tests {
         );
         let usage = usage_all(&pool).unwrap();
         assert_eq!(usage[0].spent, 2.0);
+        // 上个窗口的余额锚点必须一起作废，否则新周期会沿用旧总额
+        assert_eq!(usage[0].budget_effective, 5.0);
+        assert_eq!(usage[0].remaining, 3.0);
         cleanup_db(&path);
     }
 
     #[test]
-    fn calibrate_aligns_local_spent_with_upstream_balance() {
+    fn manual_reset_keeps_the_balance_anchor() {
+        let (pool, path) = test_db();
+        let id = seed_platform(&pool, 250.0, "day");
+        calibrate(&pool, &id, 250.0, "day", 366.0).unwrap();
+        try_reserve(&pool, &id, Some(250.0), Some("day"), Some(10.0), "r1", "m1").unwrap();
+        assert_eq!(usage_all(&pool).unwrap()[0].remaining, 356.0);
+
+        reset(&pool, &id).unwrap();
+        let usage = &usage_all(&pool).unwrap()[0];
+        assert_eq!(usage.spent, 0.0);
+        assert_eq!(usage.remaining, 366.0, "清零的是本地已用，不是上游余额");
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn calibrate_anchors_on_upstream_balance_and_zeroes_spend() {
         let (pool, path) = test_db();
         let id = seed_platform(&pool, 100.0, "day");
 
@@ -592,12 +677,21 @@ mod tests {
         try_reserve(&pool, &id, Some(100.0), Some("day"), Some(10.0), "r1", "m1").unwrap();
         assert_eq!(usage_all(&pool).unwrap()[0].spent, 10.0);
 
-        // 上游说只剩 70 → 实际已用 30，本地应该被校准到 30
+        // 上游说还剩 70 → 这份余额成为本窗口总额，已用量清零
         let (old, new, delta) = calibrate(&pool, &id, 100.0, "day", 70.0).unwrap();
         assert_eq!(old, 10.0);
-        assert_eq!(new, 30.0);
-        assert_eq!(delta, 20.0);
-        assert_eq!(usage_all(&pool).unwrap()[0].spent, 30.0);
+        assert_eq!(new, 0.0);
+        assert_eq!(delta, -10.0);
+        let usage = &usage_all(&pool).unwrap()[0];
+        assert_eq!(usage.spent, 0.0);
+        assert_eq!(usage.budget_effective, 70.0);
+        assert_eq!(usage.remaining, 70.0, "剩余要等于上游余额，不是配置预算");
+
+        // 之后每笔请求从真实余额里扣
+        try_reserve(&pool, &id, Some(100.0), Some("day"), Some(5.0), "r2", "m1").unwrap();
+        let usage = &usage_all(&pool).unwrap()[0];
+        assert_eq!(usage.spent, 5.0);
+        assert_eq!(usage.remaining, 65.0);
 
         // 台账里必须留下 calibrate 流水
         let conn = pool.get().unwrap();
@@ -608,23 +702,42 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(kinds, vec!["charge", "calibrate"]);
+        assert_eq!(kinds, vec!["charge", "calibrate", "charge"]);
         drop(conn);
+
+        cleanup_db(&path);
+    }
+
+    /// 站点余额高于配置预算（赠送魔粒/跨日结转）时，不能把剩余夹回预算，
+    /// 否则积分列永远停在配置数字上——这就是「每次领取都变回 250」的根因。
+    #[test]
+    fn calibrate_keeps_balance_above_configured_budget() {
+        let (pool, path) = test_db();
+        let id = seed_platform(&pool, 250.0, "day");
+
+        let (_, new, _) = calibrate(&pool, &id, 250.0, "day", 366.0).unwrap();
+        assert_eq!(new, 0.0);
+        let usage = &usage_all(&pool).unwrap()[0];
+        assert_eq!(usage.spent, 0.0);
+        assert_eq!(usage.remaining, 366.0, "列上要显示真实余额");
+
+        // 闸门也按真实余额判断：扣到 300 仍可用，跌破 0 才耗尽
+        try_reserve(&pool, &id, Some(250.0), Some("day"), Some(200.0), "r1", "m1").unwrap();
+        assert_eq!(usage_all(&pool).unwrap()[0].remaining, 166.0);
 
         cleanup_db(&path);
     }
 
     #[test]
     fn calibrate_ignores_tiny_drift() {
-        // 偏差 ≤ 1 不动，避免上游舍入导致台账抖动
+        // 余额与已用量都没变就不写流水，避免上游舍入导致台账抖动
         let (pool, path) = test_db();
         let id = seed_platform(&pool, 100.0, "day");
-        try_reserve(&pool, &id, Some(100.0), Some("day"), Some(10.0), "r1", "m1").unwrap();
+        calibrate(&pool, &id, 100.0, "day", 89.5).unwrap();
 
-        let (old, new, delta) = calibrate(&pool, &id, 100.0, "day", 89.5).unwrap();
-        assert_eq!(delta, 0.0, "0.5 的偏差不该触发校准");
+        let (old, new, delta) = calibrate(&pool, &id, 100.0, "day", 89.52).unwrap();
+        assert_eq!(delta, 0.0, "0.02 的偏差不该触发校准");
         assert_eq!(old, new);
-        assert_eq!(usage_all(&pool).unwrap()[0].spent, 10.0);
 
         cleanup_db(&path);
     }
@@ -640,11 +753,12 @@ mod tests {
 
     #[test]
     fn calibrate_never_goes_negative_on_spent() {
-        // 上游报的剩余比预算还多（额度被补发）→ spent 应该夹到 0，不能为负
+        // 上游余额与配置预算无关：余额多少就允许多少，已用量不能为负
         let (pool, path) = test_db();
         let id = seed_platform(&pool, 100.0, "day");
         let (_, new, _) = calibrate(&pool, &id, 100.0, "day", 150.0).unwrap();
         assert_eq!(new, 0.0);
+        assert_eq!(usage_all(&pool).unwrap()[0].remaining, 150.0);
         cleanup_db(&path);
     }
 

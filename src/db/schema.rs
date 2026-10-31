@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 33;
+pub const CURRENT_SCHEMA_VERSION: i64 = 34;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -280,6 +280,42 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         conn.execute_batch(SCHEMA_V33_MIGRATION)?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 33)", [])?;
         tracing::info!("Database migrated to V33 (checkin_tasks for scheduled claiming)");
+    }
+
+    if current_version < 34 {
+        // 领取时记下上游真实余额，作为本窗口的可用总额。站点余额经常不等于平台预算
+        // （赠送的魔粒、跨日结转），只按 budget - 余额 记账会把余额超过预算的情况夹成 0，
+        // 积分列就永远停在配置的那条预算上。NULL = 还没校准过，仍按 credit_budget 算。
+        add_column_if_missing(conn, "platform_credit_state", "anchor",
+            "ALTER TABLE platform_credit_state ADD COLUMN anchor REAL")?;
+        // 已有账号按最近一次领取同步到的余额补锚点，并把快照之后的本地扣减重算为已用。
+        // 只认 charge/release：calibrate 流水就写在同一秒，算进来会把刚同步的余额又抵消掉。
+        conn.execute(
+            "UPDATE platform_credit_state
+             SET anchor = (
+                     SELECT c.balance FROM checkin_accounts c
+                     WHERE c.platform_id = platform_credit_state.platform_id
+                 ),
+                 spent = MAX(0, COALESCE((
+                     SELECT SUM(l.delta) FROM platform_credit_ledger l
+                     WHERE l.platform_id = platform_credit_state.platform_id
+                       AND l.kind IN ('charge', 'release')
+                       AND l.created_at > (
+                           SELECT c.balance_at FROM checkin_accounts c
+                           WHERE c.platform_id = platform_credit_state.platform_id
+                       )
+                 ), 0))
+             WHERE EXISTS (
+                 SELECT 1 FROM checkin_accounts c
+                 WHERE c.platform_id = platform_credit_state.platform_id
+                   AND c.balance IS NOT NULL
+                   AND c.balance_at IS NOT NULL
+                   AND c.balance_at >= platform_credit_state.period_start
+             )",
+            [],
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 34)", [])?;
+        tracing::info!("Database migrated to V34 (platform_credit_state.anchor)");
     }
 
     Ok(())
@@ -1161,5 +1197,59 @@ mod tests {
     /// 把库文件字节压成"可打印字符 + NUL"的字符串，用来粗判残留明文（跨页会被打断，够用）
     fn printable(bytes: &[u8]) -> String {
         bytes.iter().map(|b| if b.is_ascii_graphic() { *b as char } else { '\0' }).collect()
+    }
+
+    /// V34 给老账号补领取锚点：余额快照之后的本地扣减要重算成已用，
+    /// 并把「余额超过预算」的原样保留下来（这正是积分列永远显示 250 的根因）。
+    #[test]
+    fn v34_backfills_anchor_from_the_last_balance_snapshot() {
+        let (pool, path) = test_db("v34");
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id, name, type, base_url, api_key, status, created_at, updated_at) \
+                 VALUES ('p1', '魔搭', '\"OpenAI\"', 'https://api-inference.modelscope.cn/v1', 'k', '\"Active\"', \
+                         '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platform");
+            conn.execute(
+                "INSERT INTO checkin_accounts (id, platform_id, platform, identity, label, cookies_enc, \
+                 cookie_names, status, balance, balance_at, created_at, updated_at) \
+                 VALUES ('a1', 'p1', 'modelscope', 'demo', 'demo', 'enc', 'm_session_id', 'ok', 366, \
+                         '2026-11-01T00:10:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            ).expect("account");
+            conn.execute(
+                "INSERT INTO platform_credit_state (platform_id, period_start, spent, updated_at) \
+                 VALUES ('p1', '2026-10-31T16:00:00Z', 0, '2026-11-01T00:10:00Z')",
+                [],
+            ).expect("legacy state");
+            // 快照前的一笔（不该算）与快照后的两笔（该算进已用）
+            for (delta, kind, at) in [
+                (9.0, "charge", "2026-11-01T00:05:00Z"),
+                (3.0, "charge", "2026-11-01T00:20:00Z"),
+                (-1.0, "release", "2026-11-01T00:30:00Z"),
+            ] {
+                conn.execute(
+                    "INSERT INTO platform_credit_ledger (platform_id, delta, kind, created_at) \
+                     VALUES ('p1', ?1, ?2, ?3)",
+                    rusqlite::params![delta, kind, at],
+                ).expect("ledger");
+            }
+            conn.execute("UPDATE _schema_version SET value = 33 WHERE id = 1", [])
+                .expect("rewind to 33");
+            run_migrations(&conn).expect("V34 runs alone");
+
+            assert_eq!(version(&conn), CURRENT_SCHEMA_VERSION);
+            assert_eq!(conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('platform_credit_state') WHERE name='anchor'",
+                [], |r| r.get::<_, i64>(0)).unwrap(), 1, "列必须已经加上");
+            let (anchor, spent): (Option<f64>, f64) = conn.query_row(
+                "SELECT anchor, spent FROM platform_credit_state WHERE platform_id = 'p1'",
+                [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            assert_eq!(anchor, Some(366.0), "锚点取最近一次同步到的余额");
+            assert_eq!(spent, 2.0, "只算快照之后的 3 - 1，快照前那笔不算");
+        }
+        cleanup_db(&path);
     }
 }

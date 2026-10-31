@@ -978,13 +978,14 @@ mod tests {
             .into_iter()
             .find(|item| item.platform_id == platform.id)
             .expect("platform in usage");
-        assert_eq!(usage.spent, 9.0, "spent = 预算 250 - 上游可用余额 241");
-        assert_eq!(usage.remaining, 241.0);
+        assert_eq!(usage.spent, 0.0, "领取后已用量归零，从上游余额重新开始扣");
+        assert_eq!(usage.remaining, 241.0, "剩余就是领取时读到的余额");
+        assert_eq!(usage.budget_effective, 241.0);
         cleanup_db(&path);
     }
 
     #[test]
-    fn pulse_balance_above_budget_clamps_spent_to_zero() {
+    fn pulse_balance_above_budget_keeps_the_real_balance() {
         let (pool, path) = test_db();
         let platform = crate::db::platform::create(
             &pool,
@@ -1026,8 +1027,8 @@ mod tests {
             .into_iter()
             .find(|item| item.platform_id == platform.id)
             .expect("platform in usage");
-        assert_eq!(usage.spent, 0.0, "余额超过预算时不能出现负已用");
-        assert_eq!(usage.remaining, 250.0);
+        assert_eq!(usage.spent, 0.0, "领取后从真实余额重新开始扣");
+        assert_eq!(usage.remaining, 1000.0, "余额高于预算时列上要显示余额，不是 250");
         cleanup_db(&path);
     }
 

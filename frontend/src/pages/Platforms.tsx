@@ -463,10 +463,10 @@ export default function Platforms() {
                           'creditLiveTooltip',
                           formatNumber(item.credit.live_balance),
                           formatNumber(item.credit.spent),
-                          formatNumber(item.credit.budget),
+                          formatNumber(item.credit.budget_effective),
                           item.credit.balance_at ? formatLogTime(item.credit.balance_at, locale) : '—',
                         )
-                      : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)
+                      : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget_effective))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)
                     : ''
                   return (
                     <Table.Tr key={platform.id} onClick={() => navigate(`/providers/${platform.id}`)}>
@@ -537,8 +537,8 @@ export default function Platforms() {
                       <Table.Td className="num">
                         {item.credit && creditShown != null ? (
                           <Tooltip label={creditTooltip}>
-                            <span className={creditShown <= 0 ? 'err' : creditShown <= item.credit.budget * 0.2 ? 'warn' : ''}>
-                              {`${formatNumber(creditShown)} / ${formatNumber(item.credit.budget)}`}
+                            <span className={creditShown <= 0 ? 'err' : creditShown <= item.credit.budget_effective * 0.2 ? 'warn' : ''}>
+                              {`${formatNumber(creditShown)} / ${formatNumber(item.credit.budget_effective)}`}
                             </span>
                           </Tooltip>
                         ) : <span className="muted">—</span>}

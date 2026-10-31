@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 pub struct PlatformCreditUsage {
     pub platform_id: String,
     pub platform_name: String,
+    /// 配置的预算（平台编辑页里那条数字），仅作参考与告警阈值
     pub budget: f64,
+    /// 当前窗口实际可用的总额：领取同步到上游余额时是余额，否则等于 budget
+    pub budget_effective: f64,
     /// day / week / month
     pub window: String,
     /// 当前自然窗口内已用

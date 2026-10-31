@@ -930,7 +930,7 @@ export default function ProviderDetail() {
                   <div>
                     <div className="console-meta-label">{t(locale, 'creditRemaining')}</div>
                     <div className="console-meta-value mono">
-                      {creditUsage ? `${formatNumber(creditUsage.remaining)} / ${formatNumber(creditUsage.budget)}` : '—'}
+                      {creditUsage ? `${formatNumber(creditUsage.remaining)} / ${formatNumber(creditUsage.budget_effective)}` : '—'}
                     </div>
                   </div>
                   <div>

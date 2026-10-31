@@ -82,6 +82,8 @@ def test_checkin_is_platform_bound_and_cascades(instances):
     assert credit["live_balance"] == 1828
     assert credit["balance_at"].startswith("2026-10-31T08:18:00")
     assert credit["spent"] == 0
+    # 还没领取过 → 总额仍是配置预算（余额只进 tooltip）
+    assert credit["budget_effective"] == 250
 
     # 手动领取要解密 cookie：假密文落成 error（账号状态），不是接口 500
     status, body = api.call("POST", f"/api/checkin/platforms/{platform_id}/run")
@@ -115,6 +117,70 @@ def test_checkin_is_platform_bound_and_cascades(instances):
     assert status == 204
     status, body = api.call("GET", "/api/checkin/accounts")
     assert body["accounts"] == []
+
+
+def test_credit_ledger_follows_the_claimed_balance_not_the_budget(instances):
+    """领取同步的余额是本窗口总额：低于预算要显示低，高于预算不能夹回预算。
+
+    曾经按 `spent = 预算 - 余额` 换算，余额一旦超过预算就被夹成 0，
+    列上于是永远显示配置的 250——用户看到的就是「每次签到都变成 250」。
+    """
+    instance = instances("credit-anchor")
+    api = instance.api
+    api.setup_admin()
+
+    status, platform = api.call(
+        "POST",
+        "/api/platforms",
+        {
+            "name": "ModelScope 魔搭",
+            "type": "OpenAI",
+            "base_url": "https://api-inference.modelscope.cn/v1",
+            "api_key": "sk-e2e-modelscope-key",
+            "credit_budget": 250,
+            "credit_window": "day",
+            "credit_unit": "credits",
+        },
+    )
+    assert status == 201, platform
+    platform_id = platform["id"]
+
+    db = sqlite3.connect(instance.dir / "data" / "ai-gateway.db")
+    db.execute(INSERT_ACCOUNT, (platform_id,))
+    db.commit()
+    db.close()
+
+    # 直接改账号余额模拟领取读到 366，再走一次真实校准入口需要上游接口，
+    # 所以这里只钉读数层的口径：锚点存在时总额取锚点。
+    db = sqlite3.connect(instance.dir / "data" / "ai-gateway.db")
+    db.execute(
+        "INSERT OR REPLACE INTO platform_credit_state (platform_id, period_start, spent, anchor, updated_at) "
+        "VALUES (?, ?, 0, 366, ?)",
+        (platform_id, _period_start("day"), "2026-10-31T08:18:00Z"),
+    )
+    db.commit()
+    db.close()
+
+    status, credits = api.call("GET", "/api/platforms/credits")
+    assert status == 200, credits
+    credit = next(item for item in credits if item["platform_id"] == platform_id)
+    assert credit["budget_effective"] == 366, "总额要跟着站点余额走"
+    assert credit["remaining"] == 366
+    assert credit["budget"] == 250, "配置的那条预算原样保留"
+
+
+def _period_start(window: str) -> str:
+    """与后端一致的自然窗口起点（本地零点换算成 UTC）。"""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now().astimezone()
+    today = now.date()
+    if window == "week":
+        today = today - timedelta(days=today.weekday())
+    elif window == "month":
+        today = today.replace(day=1)
+    local_midnight = datetime.combine(today, datetime.min.time()).astimezone()
+    return local_midnight.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
 
 
 def test_checkin_tasks_are_validated_runnable_and_pruned(instances):

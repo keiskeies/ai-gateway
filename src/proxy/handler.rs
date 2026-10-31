@@ -558,7 +558,8 @@ fn credit_ok(
     let Some(window) = rb.platform.credit_window.as_deref() else { return true };
     let Some(map) = map else { return true };
     let spent = crate::db::credit::effective_spent(map, &rb.platform.id, window);
-    budget - spent + f64::EPSILON >= price
+    let total = crate::db::credit::effective_total(map, &rb.platform.id, window, budget);
+    total - spent + f64::EPSILON >= price
 }
 
 fn credit_exhausted_message(route: &crate::cache::ResolvedRoute) -> String {
