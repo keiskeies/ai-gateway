@@ -431,18 +431,17 @@ export default function Platforms() {
                   const checkinAccount = checkinByPlatform.get(platform.id)
                   const checkinStatus = checkinAccount?.status
                   const checkinBusy = loginBusyId === platform.id || claimBusyId === platform.id
-                  // 有领取同步过来的真实余额就优先显示它；否则退回本地台账的剩余
-                  const creditShown = item.credit
-                    ? (item.credit.live_balance ?? item.credit.remaining)
-                    : null
+                  // 积分列显示台账剩余（随每笔请求扣减）；领取时用上游余额校准台账，
+                  // 真实余额只进 tooltip，避免显示成一份不会动的快照
+                  const creditShown = item.credit ? item.credit.remaining : null
                   const creditTooltip = item.credit
                     ? (item.credit.live_balance != null
                       ? t(
                           locale,
                           'creditLiveTooltip',
                           formatNumber(item.credit.live_balance),
-                          formatNumber(item.credit.budget),
                           formatNumber(item.credit.spent),
+                          formatNumber(item.credit.budget),
                           item.credit.balance_at ? formatLogTime(item.credit.balance_at, locale) : '—',
                         )
                       : `${t(locale, 'creditLocalTooltip', formatNumber(item.credit.spent), formatNumber(item.credit.budget))} · ${t(locale, 'creditResetAt')} ${new Date(item.credit.reset_at).toLocaleString()}`)

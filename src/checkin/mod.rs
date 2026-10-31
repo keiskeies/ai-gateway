@@ -420,6 +420,37 @@ pub async fn run_all(pool: &DbPool, encrypt_key: &str) -> AppResult<Vec<AccountV
     Ok(views)
 }
 
+/// 成功读到余额后，用它校准平台的积分台账（`spent = budget - 上游可用余额`）。
+///
+/// 为什么不是直接把余额当「剩余」显示：余额只在领取时读一次，请求期间不会变，
+/// 界面会看起来「扣了分却不减」。校准之后积分列继续随每笔请求扣减，领取时再纠偏。
+fn apply_pulse(
+    pool: &DbPool,
+    row: &db::CheckinAccountRow,
+    pulse: &modelscope::Pulse,
+) -> AppResult<()> {
+    let Ok(platform) = crate::db::platform::get(pool, &row.platform_id) else {
+        return Ok(());
+    };
+    let (Some(budget), Some(window)) = (platform.credit_budget, platform.credit_window.as_deref())
+    else {
+        return Ok(());
+    };
+    match crate::db::credit::calibrate(pool, &row.platform_id, budget, window, pulse.available) {
+        Ok((old, new, delta)) if delta != 0.0 => tracing::info!(
+            "积分校准（{}）：已用 {} → {}（上游余额 {}，预算 {}）",
+            row.platform_id,
+            old,
+            new,
+            pulse.available,
+            budget
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!("积分校准失败（{}）: {}", row.platform_id, error),
+    }
+    Ok(())
+}
+
 async fn execute(pool: &DbPool, encrypt_key: &str, row: &db::CheckinAccountRow) -> AppResult<()> {
     let platform = platform_static(&row.platform)?;
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -456,6 +487,7 @@ async fn execute(pool: &DbPool, encrypt_key: &str, row: &db::CheckinAccountRow) 
 
     let (status, message, ok_day, balance, daily_amount, daily_done) = match outcome {
         Ok(pulse) => {
+            apply_pulse(pool, row, &pulse)?;
             let done = pulse.daily_done;
             let status = if done { "ok" } else { "waiting" };
             let message = if done {
@@ -475,7 +507,7 @@ async fn execute(pool: &DbPool, encrypt_key: &str, row: &db::CheckinAccountRow) 
                 status,
                 message,
                 done.then(|| today.clone()),
-                Some(pulse.balance),
+                Some(pulse.available),
                 pulse.daily_amount,
                 Some(done),
             )
@@ -626,6 +658,127 @@ mod tests {
 
     fn at(raw: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(raw).unwrap().with_timezone(&chrono::Utc)
+    }
+
+    fn test_db() -> (DbPool, std::path::PathBuf) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-db");
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        let path = dir.join(format!("checkin-test-{}.db", uuid::Uuid::new_v4()));
+        (crate::db::init_pool(&path).expect("init test db"), path)
+    }
+
+    fn cleanup_db(path: &std::path::Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    #[test]
+    fn successful_pulse_calibrates_the_credit_ledger() {
+        let (pool, path) = test_db();
+        let platform = crate::db::platform::create(
+            &pool,
+            &crate::models::platform::CreatePlatformRequest {
+                name: "ModelScope 魔搭".into(),
+                platform_type: crate::models::platform::PlatformType::OpenAI,
+                base_url: "https://api-inference.modelscope.cn/v1".into(),
+                api_key: "sk-test".into(),
+                organization: None,
+                custom_headers: serde_json::Value::Null,
+                credit_budget: Some(250.0),
+                credit_window: Some("day".into()),
+                credit_unit: Some("credits".into()),
+                adapter: None,
+                login_attempt: None,
+            },
+        )
+        .expect("create platform");
+        crate::db::checkin::upsert_session(
+            &pool,
+            &platform.id,
+            MODELSCOPE,
+            "demo",
+            "ModelScope 魔搭 · demo",
+            "enc",
+            "m_session_id",
+        )
+        .expect("seed session");
+        let row = crate::db::checkin::get_by_platform(&pool, &platform.id)
+            .expect("read session")
+            .expect("session exists");
+
+        apply_pulse(
+            &pool,
+            &row,
+            &modelscope::Pulse {
+                balance: 400.0,
+                available: 241.0,
+                daily_done: true,
+                daily_amount: Some(100.0),
+                daily_total: 1,
+                daily_completed: 1,
+            },
+        )
+        .expect("apply pulse");
+
+        let usage = crate::db::credit::usage_all(&pool)
+            .expect("usage")
+            .into_iter()
+            .find(|item| item.platform_id == platform.id)
+            .expect("platform in usage");
+        assert_eq!(usage.spent, 9.0, "spent = 预算 250 - 上游可用余额 241");
+        assert_eq!(usage.remaining, 241.0);
+        cleanup_db(&path);
+    }
+
+    #[test]
+    fn pulse_balance_above_budget_clamps_spent_to_zero() {
+        let (pool, path) = test_db();
+        let platform = crate::db::platform::create(
+            &pool,
+            &crate::models::platform::CreatePlatformRequest {
+                name: "ModelScope 魔搭".into(),
+                platform_type: crate::models::platform::PlatformType::OpenAI,
+                base_url: "https://api-inference.modelscope.cn/v1".into(),
+                api_key: "sk-test".into(),
+                organization: None,
+                custom_headers: serde_json::Value::Null,
+                credit_budget: Some(250.0),
+                credit_window: Some("day".into()),
+                credit_unit: Some("credits".into()),
+                adapter: None,
+                login_attempt: None,
+            },
+        )
+        .expect("create platform");
+        crate::db::checkin::upsert_session(&pool, &platform.id, MODELSCOPE, "demo", "demo", "enc", "m_session_id")
+            .expect("seed session");
+        let row = crate::db::checkin::get_by_platform(&pool, &platform.id)
+            .expect("read session")
+            .expect("session exists");
+        apply_pulse(
+            &pool,
+            &row,
+            &modelscope::Pulse {
+                balance: 1200.0,
+                available: 1000.0,
+                daily_done: true,
+                daily_amount: Some(250.0),
+                daily_total: 1,
+                daily_completed: 1,
+            },
+        )
+        .expect("apply pulse");
+        let usage = crate::db::credit::usage_all(&pool)
+            .expect("usage")
+            .into_iter()
+            .find(|item| item.platform_id == platform.id)
+            .expect("platform in usage");
+        assert_eq!(usage.spent, 0.0, "余额超过预算时不能出现负已用");
+        assert_eq!(usage.remaining, 250.0);
+        cleanup_db(&path);
     }
 
     #[test]
