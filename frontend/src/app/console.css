@@ -1617,14 +1617,26 @@ h4,
 }
 
 .console-traffic-layout {
+  /* 两栏等高：高度由视口决定，不让表格行数和详情长短互相拉扯 */
+  --traffic-panel-h: clamp(460px, calc(100vh - var(--app-shell-header-height, 48px) - 210px), 1000px);
   display: grid;
   grid-template-columns: minmax(0, 8.4fr) minmax(310px, 3.6fr);
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .console-traffic-table {
+  display: flex;
+  flex-direction: column;
+  height: var(--traffic-panel-h);
   overflow: hidden;
+}
+
+/* 面板已经有固定高度：表格区吃满剩余空间、自己滚，分页始终贴底 */
+.console-traffic-table .console-table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 .console-table-scroll {
@@ -1673,10 +1685,8 @@ h4,
 }
 
 .console-inspector {
-  /* 详情再长也不把整页撑高：固定高度、独立滚动 */
-  position: sticky;
-  top: calc(var(--app-shell-header-height, 48px) + 14px);
-  max-height: calc(100vh - var(--app-shell-header-height, 48px) - 28px);
+  /* 与左侧表格等高，内部独立滚动 */
+  height: var(--traffic-panel-h);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -3172,12 +3182,17 @@ h4,
 
   .console-traffic-table {
     order: 1;
+    height: auto;
+  }
+
+  /* 单列时回到按内容收缩：表格 600 封顶，详情跟在下面一起滚 */
+  .console-traffic-table .console-table-scroll {
+    max-height: 600px;
   }
 
   .console-inspector {
     order: 2;
-    /* 单列时详情跟在表格下面，跟着页面一起滚，不要再吸顶 */
-    position: static;
+    height: auto;
     max-height: none;
   }
 
