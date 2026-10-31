@@ -111,6 +111,8 @@ export interface RequestAttempt {
   started_at: string
   /** 本次尝试实际请求的上游完整地址（已打码）；旧数据为 null */
   forward_url: string | null
+  /** 本次尝试注入的前置随机串；路由开关关闭或旧数据为 null */
+  nonce?: string | null
   platform_name: string | null
 }
 

@@ -935,6 +935,11 @@ export default function Traffic() {
                         {attempt.error_message && (
                           <span className="console-attempt-msg">{attempt.error_message}</span>
                         )}
+                        {attempt.nonce && (
+                          <span className="console-attempt-nonce" title={t(locale, 'payloadNonceTitle')} data-e2e-attempt-nonce={attempt.nonce}>
+                            {t(locale, 'attemptNonce', attempt.nonce, String(attempt.nonce.length))}
+                          </span>
+                        )}
                       </div>
                     )
                   })

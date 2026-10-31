@@ -1821,6 +1821,15 @@ h4,
   color: var(--text-1);
 }
 
+.console-attempt-nonce {
+  grid-column: 2 / -1;
+  padding-bottom: 4px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: normal;
+  word-break: break-all;
+}
+
 .console-attempt-msg {
   grid-column: 2 / -1;
   padding-bottom: 4px;
