@@ -1950,6 +1950,12 @@ h4,
   word-break: break-word;
 }
 
+/* 网关注入的前置随机串：正文的一部分，但颜色低一级便于和用户内容区分 */
+.console-payload-nonce {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
 .console-payload-thinking {
   padding: 6px 8px;
   border: 1px dashed var(--line);

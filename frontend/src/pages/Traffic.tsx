@@ -968,11 +968,6 @@ export default function Traffic() {
                           ? ` · ${payload.request_capture_enabled ? t(locale, 'payloadNotRecordedShort') : t(locale, 'payloadCaptureOffShort')}`
                           : payload.request.body_truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
-                      {payload.nonce && (
-                        <div className="console-attempts-note" data-e2e-nonce={payload.nonce}>
-                          {t(locale, 'requestNonceLine', payload.nonce, String(payload.nonce.length))}
-                        </div>
-                      )}
                       <RequestPayloadView payload={payload} locale={locale} />
                     </details>
                     <details className="console-payload-block" open>

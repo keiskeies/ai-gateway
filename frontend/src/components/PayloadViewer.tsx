@@ -162,6 +162,17 @@ export function RequestPayloadView({ payload, locale }: { payload: RequestPayloa
     () => (request.body ? parseRequestPayload(request.body, request.body_truncated, request.protocol) : null),
     [request.body, request.body_truncated, request.protocol],
   )
+  // 采集到的是入站正文，随机串是转发时才插在最前面的。详情页按实际注入规则
+  // 把它显示在正文最前面：有 system 就贴在 system 开头，没有就作为首条消息的开头。
+  const nonce = payload.nonce ?? null
+  const shownMessages = useMemo(() => {
+    if (!parsed || !nonce || parsed.system) return parsed?.messages ?? []
+    return parsed.messages.map((message, index) =>
+      index === 0
+        ? { ...message, blocks: [{ kind: 'text' as const, text: nonce }, ...message.blocks] }
+        : message,
+    )
+  }, [parsed, nonce])
 
   if (!request.body_captured) {
     return <CaptureMissing locale={locale} enabled={payload.request_capture_enabled} />
@@ -194,14 +205,21 @@ export function RequestPayloadView({ payload, locale }: { payload: RequestPayloa
             <div className="console-payload-section">
               <div className="console-payload-section-title">{t(locale, 'payloadSystem')}</div>
               <div className="console-payload-msg role-system">
-                <div className="console-payload-text">{parsed.system}</div>
+                <div className="console-payload-text">
+                  {nonce && (
+                    <span className="console-payload-nonce" title={t(locale, 'payloadNonceTitle')} data-e2e-nonce={nonce}>
+                      {nonce}{'\n'}
+                    </span>
+                  )}
+                  {parsed.system}
+                </div>
               </div>
             </div>
           )}
           {parsed.messages.length > 0 && (
             <div className="console-payload-section">
               <div className="console-payload-section-title">{t(locale, 'payloadMessages')}</div>
-              {parsed.messages.map((message, index) => (
+              {shownMessages.map((message, index) => (
                 <MessageView key={index} message={message} locale={locale} />
               ))}
             </div>
