@@ -2,10 +2,18 @@ import { useEffect, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Anchor, Badge, Button, Checkbox, Modal, PasswordInput, Select, TextInput, Tooltip } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
-import { IconExternalLink, IconPlugConnected } from '@tabler/icons-react'
-import { createPlatform, findKeyLink } from '../api'
+import { IconExternalLink, IconGift, IconPlugConnected } from '@tabler/icons-react'
+import {
+  createPlatform,
+  findKeyLink,
+  getAuthStatus,
+  getCheckin,
+  startCheckinLogin,
+  waitForCheckinAttempt,
+} from '../api'
 import { useAppContext } from '../ThemeContext'
 import { t } from '../i18n'
+import type { CheckinCapability } from '../types/checkin'
 import { PLATFORM_TYPE_LABELS, probePlatformConfig, type PlatformTestResult } from '../lib/platform'
 import { getPresetName, platformPresets } from '../presets'
 import { Field } from './Field'
@@ -60,6 +68,12 @@ export function ProviderCreateModal({
   const [test, setTest] = useState<PlatformTestResult | null>(null)
   const [keyLink, setKeyLink] = useState<KeyLink | null>(null)
   const [riskAccepted, setRiskAccepted] = useState(false)
+  // 登录换 Key：能力表与「本机桌面端」由后端给，服务器模式不显示这个入口
+  const [capabilities, setCapabilities] = useState<CheckinCapability[]>([])
+  const [checkinLogin, setCheckinLogin] = useState(false)
+  const [loginBusy, setLoginBusy] = useState(false)
+  const [loginAttemptId, setLoginAttemptId] = useState<string | null>(null)
+  const [loginNote, setLoginNote] = useState<string | null>(null)
 
   const presetOptions = platformPresets.map(p => ({ value: p.name, label: getPresetName(p, locale) }))
   const creditInvalid = draft.credit_budget.trim() !== ''
@@ -82,10 +96,31 @@ export function ProviderCreateModal({
     return () => { cancelled = true }
   }, [preset, draft.base_url, isProprietary])
 
+  // 打开弹窗时问一次：哪些平台支持「登录并获取 Key」、本机能不能开登录窗口
+  useEffect(() => {
+    if (!opened) return
+    let cancelled = false
+    Promise.all([getCheckin().catch(() => null), getAuthStatus().catch(() => null)]).then(
+      ([checkin, auth]) => {
+        if (cancelled) return
+        setCapabilities(checkin?.platforms ?? [])
+        setCheckinLogin(Boolean(auth?.checkin_login && auth?.local_console))
+      },
+    )
+    return () => { cancelled = true }
+  }, [opened])
+
+  const loginCapability = capabilities.find(cap =>
+    cap.login_supported
+    && draft.base_url.trim().toLowerCase().startsWith(cap.base_url_prefix.toLowerCase()),
+  )
+
   const applyPreset = (value: string | null) => {
     setPreset(value)
     setTest(null)
     setRiskAccepted(false)
+    setLoginAttemptId(null)
+    setLoginNote(null)
     if (!value) return
     const found = platformPresets.find(p => p.name === value)
     if (!found) return
@@ -103,6 +138,11 @@ export function ProviderCreateModal({
     setDraft(prev => ({ ...prev, [key]: value }))
     // 连接相关的字段一改，上一次测试结果就不再代表当前配置
     if (key === 'type' || key === 'base_url' || key === 'api_key') setTest(null)
+    // 换了平台类型或地址，之前那次登录的绑定就作废了
+    if (key === 'type' || key === 'base_url') {
+      setLoginAttemptId(null)
+      setLoginNote(null)
+    }
   }
 
   const reset = () => {
@@ -111,6 +151,8 @@ export function ProviderCreateModal({
     setTest(null)
     setKeyLink(null)
     setRiskAccepted(false)
+    setLoginAttemptId(null)
+    setLoginNote(null)
   }
 
   const runTest = async () => {
@@ -122,6 +164,42 @@ export function ProviderCreateModal({
     })
     setTest(result)
     setTesting(false)
+  }
+
+  // 登录窗口里完成登录 → 后端读账号名和 SDK 令牌 → 回填表单；保存时再绑定会话
+  const loginAndFill = async () => {
+    if (!loginCapability) return
+    setLoginBusy(true)
+    try {
+      const { attempt_id } = await startCheckinLogin(loginCapability.key)
+      setLoginNote(t(locale, 'checkinLoginWaiting'))
+      const attempt = await waitForCheckinAttempt(attempt_id)
+      if (!attempt) {
+        setLoginNote(t(locale, 'checkinLoginTimeout'))
+        return
+      }
+      if (attempt.status !== 'ok') {
+        setLoginNote(attempt.message || t(locale, 'checkinLoginFailed'))
+        return
+      }
+      setLoginAttemptId(attempt_id)
+      if (attempt.api_key) {
+        setField('api_key', attempt.api_key)
+        setLoginNote(t(locale, 'checkinKeyFilled'))
+      } else {
+        setLoginNote(t(locale, 'checkinKeyMissing'))
+      }
+      if (attempt.identity) {
+        setDraft(prev => ({
+          ...prev,
+          name: prev.name.trim() ? prev.name : `${loginCapability.brand} · ${attempt.identity}`,
+        }))
+      }
+    } catch (error: any) {
+      setLoginNote(error?.response?.data?.error?.message || t(locale, 'checkinLoginFailed'))
+    } finally {
+      setLoginBusy(false)
+    }
   }
 
   // 私有协议上游没有 API Key 可测，且必须勾选风险确认才能保存
@@ -149,10 +227,12 @@ export function ProviderCreateModal({
         credit_window: usesLedger && budget !== '' ? draft.credit_window : null,
         credit_unit: draft.quota_unit === 'none' ? null : draft.quota_unit,
         adapter: draft.adapter,
+        login_attempt: loginAttemptId ?? undefined,
       })
       notifications.show({ message: t(locale, 'createSuccess'), color: 'green' })
       reset()
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
+      await queryClient.invalidateQueries({ queryKey: ['checkin'] })
       onCreated?.(platform)
       onClose()
     } catch (error: any) {
@@ -173,6 +253,7 @@ export function ProviderCreateModal({
       title={t(locale, 'addPlatform')}
       size="lg"
       closeOnClickOutside={false}
+      closeButtonProps={{ 'aria-label': t(locale, 'close') }}
     >
       <div className="console-form-grid">
         <Field full label={t(locale, 'quickPreset').toUpperCase()}>
@@ -273,6 +354,24 @@ export function ProviderCreateModal({
           </div>
         ) : (
           <>
+            {loginCapability && checkinLogin && (
+              <div className="console-field console-form-full">
+                <div className="checkin-login-row">
+                  <Button
+                    size="xs"
+                    variant="default"
+                    leftSection={<IconGift size={14} />}
+                    loading={loginBusy}
+                    onClick={() => void loginAndFill()}
+                  >
+                    {t(locale, 'checkinGetKey')}
+                  </Button>
+                  <span className={loginAttemptId ? 'checkin-login-note ok' : 'checkin-login-note'}>
+                    {loginNote || t(locale, 'checkinGetKeyHint')}
+                  </span>
+                </div>
+              </div>
+            )}
             <Field label={t(locale, 'apiKey').toUpperCase()}>
               <PasswordInput
                 size="xs"

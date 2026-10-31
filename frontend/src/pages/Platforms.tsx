@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ActionIcon, Button, Group, Modal, Table, TextInput, Tooltip } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
   IconArrowRight,
+  IconGift,
   IconPlugConnected,
   IconPlus,
   IconRefresh,
@@ -15,15 +16,21 @@ import {
   deletePlatform,
   getAllPlatformHealth,
   getAllPlatformStats,
+  getAuthStatus,
+  getCheckin,
   getPlatformCredits,
   listAllRoutes,
   listModels,
   listPlatforms,
+  runAllCheckin,
+  runCheckin,
+  startPlatformCheckinLogin,
+  waitForCheckinAttempt,
 } from '../api'
 import { rangeToParams, useAppState } from '../app/AppState'
 import { usePollInterval } from '../app/LiveContext'
 import { useAppContext } from '../ThemeContext'
-import { t } from '../i18n'
+import { t, type Locale } from '../i18n'
 import { PageHeader } from '../components/ui/PageHeader'
 import { EmptyState, ErrorState, PageSkeleton } from '../components/ui/States'
 import { StatusPill } from '../components/ui/StatusPill'
@@ -32,6 +39,7 @@ import { platformTypeLabel, probePlatformConfig, type PlatformTestResult } from 
 import { ProviderCreateModal } from '../components/ProviderCreateModal'
 import { getPresetName, platformPresets } from '../presets'
 import type { PlatformCreditUsage, PlatformDetail, PlatformHealthSummary, PlatformStats, RouteRow } from '../types/stats'
+import type { CheckinStatus } from '../types/checkin'
 
 interface ModelRow {
   id: string
@@ -50,6 +58,20 @@ interface ProviderRow {
   credit: PlatformCreditUsage | null
 }
 
+const CHECKIN_TONE: Record<CheckinStatus, string> = {
+  new: 'signal',
+  ok: 'ok',
+  waiting: 'warn',
+  expired: 'err',
+  error: 'err',
+}
+
+function errorMessage(error: unknown, locale: Locale): string {
+  const anyError = error as { response?: { data?: { error?: { message?: string } } }; message?: string }
+  return anyError?.response?.data?.error?.message || anyError?.message || t(locale, 'requestFailed')
+}
+
+
 export default function Platforms() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -63,6 +85,28 @@ export default function Platforms() {
   // 行内测试的即时结果：后端已落健康历史，这里只用于刷新前的即时反馈
   const [tests, setTests] = useState<Record<string, PlatformTestResult>>({})
   const [deleteTarget, setDeleteTarget] = useState<ProviderRow | null>(null)
+  const [localConsole, setLocalConsole] = useState(false)
+  const [checkinLogin, setCheckinLogin] = useState(false)
+  const [loginBusyId, setLoginBusyId] = useState<string | null>(null)
+  const [claimBusyId, setClaimBusyId] = useState<string | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkNote, setBulkNote] = useState<string | null>(null)
+
+  useEffect(() => {
+    getAuthStatus()
+      .then(status => {
+        setLocalConsole(Boolean(status.local_console))
+        setCheckinLogin(Boolean(status.checkin_login))
+      })
+      .catch(() => {})
+  }, [])
+
+  // 登录/领取只在本机桌面端存在：远程控制台连请求都不发，避免每轮轮询刷 403
+  const checkinQuery = useQuery({
+    queryKey: ['checkin'],
+    queryFn: getCheckin,
+    enabled: localConsole,
+  })
 
   const providersQuery = useQuery({
     queryKey: ['platforms', range],
@@ -171,6 +215,7 @@ export default function Platforms() {
       await queryClient.invalidateQueries({ queryKey: ['platforms'] })
       await queryClient.invalidateQueries({ queryKey: ['models'] })
       await queryClient.invalidateQueries({ queryKey: ['overview'] })
+      await queryClient.invalidateQueries({ queryKey: ['checkin'] })
     } catch (error: any) {
       notifications.show({
         message: error?.response?.data?.error?.message || t(locale, 'loadFailed'),
@@ -178,6 +223,103 @@ export default function Platforms() {
       })
     } finally {
       setSaving(false)
+    }
+  }
+
+  const showCheckin = localConsole && checkinLogin
+  const checkinByPlatform = useMemo(
+    () => new Map((checkinQuery.data?.accounts ?? []).map(account => [account.platform_id, account])),
+    [checkinQuery.data],
+  )
+  const capabilityFor = (baseUrl: string) => {
+    const normalized = baseUrl.trim().toLowerCase()
+    return checkinQuery.data?.platforms.find(cap =>
+      normalized.startsWith(cap.base_url_prefix.toLowerCase()),
+    )
+  }
+  const supportedRows = (providersQuery.data ?? []).filter(item =>
+    capabilityFor(item.platform.base_url),
+  )
+
+  const claimPlatform = async (row: ProviderRow) => {
+    setClaimBusyId(row.platform.id)
+    try {
+      const view = await runCheckin(row.platform.id)
+      notifications.show({
+        color: view.status === 'ok' ? 'teal' : view.status === 'waiting' ? 'yellow' : 'red',
+        message: view.message || t(locale, 'checkinRunDone'),
+        autoClose: 6000,
+      })
+      await checkinQuery.refetch()
+    } catch (error) {
+      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+    } finally {
+      setClaimBusyId(null)
+    }
+  }
+
+  const loginPlatform = async (row: ProviderRow) => {
+    setLoginBusyId(row.platform.id)
+    try {
+      const { attempt_id } = await startPlatformCheckinLogin(row.platform.id)
+      notifications.show({ message: t(locale, 'checkinLoginWaiting'), autoClose: 5000 })
+      const attempt = await waitForCheckinAttempt(attempt_id)
+      if (!attempt) {
+        notifications.show({ color: 'yellow', message: t(locale, 'checkinLoginTimeout'), autoClose: 8000 })
+        return
+      }
+      if (attempt.status !== 'ok') {
+        notifications.show({ color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
+        return
+      }
+      await checkinQuery.refetch()
+      const view = await runCheckin(row.platform.id)
+      notifications.show({
+        color: view.status === 'ok' ? 'teal' : view.status === 'waiting' ? 'yellow' : 'red',
+        message: view.message,
+        autoClose: 6000,
+      })
+      await checkinQuery.refetch()
+    } catch (error) {
+      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+    } finally {
+      setLoginBusyId(null)
+    }
+  }
+
+  // 一键：先把已登录的都领一遍，再给还没登录的平台逐个弹登录窗口（一次一个）
+  const oneClick = async () => {
+    setBulkBusy(true)
+    try {
+      setBulkNote(t(locale, 'checkinBulkClaiming'))
+      await runAllCheckin()
+      const missing = supportedRows.filter(row => !checkinByPlatform.has(row.platform.id))
+      let logged = 0
+      for (const row of missing) {
+        setBulkNote(t(locale, 'checkinLoginWaiting'))
+        const { attempt_id } = await startPlatformCheckinLogin(row.platform.id)
+        const attempt = await waitForCheckinAttempt(attempt_id)
+        if (attempt?.status === 'ok') {
+          logged += 1
+          await runCheckin(row.platform.id)
+        } else if (attempt?.status === 'error') {
+          notifications.show({ color: 'red', message: attempt.message || t(locale, 'checkinLoginFailed') })
+        }
+      }
+      await Promise.all([
+        checkinQuery.refetch(),
+        queryClient.invalidateQueries({ queryKey: ['platforms'] }),
+      ])
+      notifications.show({
+        color: 'teal',
+        message: t(locale, 'checkinBulkDone', String(logged)),
+        autoClose: 6000,
+      })
+    } catch (error) {
+      notifications.show({ color: 'red', message: errorMessage(error, locale) })
+    } finally {
+      setBulkBusy(false)
+      setBulkNote(null)
     }
   }
 
@@ -199,6 +341,17 @@ export default function Platforms() {
         subtitle={`${total} ${t(locale, 'total')} · ${lastSync}`}
         actions={
           <>
+            {showCheckin && (
+              <Button
+                size="xs"
+                variant="default"
+                leftSection={<IconGift size={14} />}
+                loading={bulkBusy}
+                onClick={() => void oneClick()}
+              >
+                {t(locale, 'checkinOneClick')}
+              </Button>
+            )}
             <Button size="xs" variant="default" leftSection={<IconRefresh size={14} />} onClick={() => void providersQuery.refetch()}>
               {t(locale, 'refresh')}
             </Button>
@@ -215,6 +368,9 @@ export default function Platforms() {
         <span>{total} {t(locale, 'total')}</span>
         {degraded > 0 && (
           <span className="console-issue warn"><span className="console-dot warn" />{degraded} degraded</span>
+        )}
+        {bulkNote && (
+          <span className="console-issue"><span className="console-dot signal" />{bulkNote}</span>
         )}
         <span className="console-status-right">
           <TextInput
@@ -242,6 +398,7 @@ export default function Platforms() {
                   <Table.Th>{t(locale, 'thType')}</Table.Th>
                   <Table.Th>{t(locale, 'thBaseUrl')}</Table.Th>
                   <Table.Th>{t(locale, 'thCheck')}</Table.Th>
+                  {showCheckin && <Table.Th>{t(locale, 'checkinColumn')}</Table.Th>}
                   <Table.Th className="num">{t(locale, 'models')}</Table.Th>
                   <Table.Th className="num">{t(locale, 'thRefs')}</Table.Th>
                   <Table.Th className="num">{t(locale, 'reqCount')}</Table.Th>
@@ -267,6 +424,10 @@ export default function Platforms() {
                   )
                   const presetMatch = platformPresets.find(p => p.name === platform.name)
                   const displayName = presetMatch ? getPresetName(presetMatch, locale) : platform.name
+                  const checkinCapability = capabilityFor(platform.base_url)
+                  const checkinAccount = checkinByPlatform.get(platform.id)
+                  const checkinStatus = checkinAccount?.status
+                  const checkinBusy = loginBusyId === platform.id || claimBusyId === platform.id
                   return (
                     <Table.Tr key={platform.id} onClick={() => navigate(`/providers/${platform.id}`)}>
                       <Table.Td><span className="console-strong">{displayName}</span></Table.Td>
@@ -287,6 +448,39 @@ export default function Platforms() {
                           </Tooltip>
                         )}
                       </Table.Td>
+                      {showCheckin && (
+                        <Table.Td onClick={event => event.stopPropagation()}>
+                          {checkinCapability ? (
+                            <div className="checkin-cell">
+                              <span className={`console-dot ${checkinStatus ? CHECKIN_TONE[checkinStatus] : 'idle'}`} />
+                              {checkinAccount ? (
+                                <Tooltip label={checkinAccount.message || checkinAccount.label}>
+                                  <span className="checkin-identity">
+                                    {checkinAccount.identity || checkinAccount.label}
+                                  </span>
+                                </Tooltip>
+                              ) : (
+                                <span className="muted">{t(locale, 'checkinNotLoggedIn')}</span>
+                              )}
+                              <Button
+                                size="compact-xs"
+                                variant={checkinAccount && checkinStatus !== 'expired' ? 'default' : 'light'}
+                                loading={checkinBusy}
+                                onClick={() => {
+                                  if (checkinAccount && checkinStatus !== 'expired') void claimPlatform(item)
+                                  else void loginPlatform(item)
+                                }}
+                              >
+                                {checkinAccount
+                                  ? (checkinStatus === 'expired' ? t(locale, 'checkinRelogin') : t(locale, 'checkinClaim'))
+                                  : t(locale, 'checkinLogin')}
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="muted">—</span>
+                          )}
+                        </Table.Td>
+                      )}
                       <Table.Td className="num">{item.modelCount || '—'}</Table.Td>
                       <Table.Td className="num">
                         <span title={t(locale, 'providerReferenced', String(item.refBackends))}>
@@ -365,6 +559,7 @@ export default function Platforms() {
         onClose={() => setDeleteTarget(null)}
         title={`${t(locale, 'delete')} · ${deleteTarget?.platform.name ?? ''}`}
         size="sm"
+        closeButtonProps={{ 'aria-label': t(locale, 'close') }}
       >
         <div className="console-note warn">
           {deleteTarget

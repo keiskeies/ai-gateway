@@ -1,5 +1,6 @@
 import axios from 'axios'
 import type { ClientApplyBody, ClientApplyResult, ClientConfigFile, ClientConfigWrite, ClientPreview, ClientRestoreResult, ClientStatus, ExtraSpec } from './types/clients'
+import type { CheckinAccount, CheckinAttempt, CheckinData } from './types/checkin'
 
 // Detect Tauri desktop mode
 const isTauri = !!(window as any).__TAURI_INTERNALS__
@@ -48,6 +49,8 @@ export interface AuthStatus {
   admin_port: number
   /** 当前请求是否来自本机控制台；客户端接入只有本机可见 */
   local_console?: boolean
+  /** 本进程能否打开每日领取的登录窗口（桌面端为 true） */
+  checkin_login?: boolean
 }
 
 // Fetch auth status (public) to discover the configured port on startup
@@ -405,3 +408,31 @@ export const putClientConfig = (id: string, content: string): Promise<ClientConf
   api.put(`/clients/${id}/config`, { content }).then(r => r.data)
 export const restoreClientBackup = (id: string): Promise<ClientRestoreResult> =>
   api.post(`/clients/${id}/restore-backup`).then(r => r.data)
+
+// 每日领取：平台即账号。登录与领取都挂在平台行上。
+export const getCheckin = (): Promise<CheckinData> => api.get('/checkin/accounts').then(r => r.data)
+/** 新建平台流程：只认平台类型，登录结果通过 login_attempt 在创建时绑定 */
+export const startCheckinLogin = (platform: string): Promise<{ attempt_id: string }> =>
+  api.post('/checkin/login', { platform }).then(r => r.data)
+/** 已有平台登录 / 重新登录 */
+export const startPlatformCheckinLogin = (platformId: string): Promise<{ attempt_id: string }> =>
+  api.post(`/checkin/platforms/${platformId}/login`).then(r => r.data)
+export const getCheckinAttempt = (id: string): Promise<CheckinAttempt> =>
+  api.get(`/checkin/attempts/${id}`).then(r => r.data)
+/** 轮询登录结果：窗口里完成登录后 attempt 会翻状态；超时返回 null 而不是无限挂起 */
+export async function waitForCheckinAttempt(
+  attemptId: string,
+  timeoutMs = 5 * 60 * 1000,
+): Promise<CheckinAttempt | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const attempt = await getCheckinAttempt(attemptId)
+    if (attempt.status !== 'pending') return attempt
+    await new Promise(resolve => window.setTimeout(resolve, 1500))
+  }
+  return null
+}
+export const runCheckin = (platformId: string): Promise<CheckinAccount> =>
+  api.post(`/checkin/platforms/${platformId}/run`).then(r => r.data)
+export const runAllCheckin = (): Promise<CheckinAccount[]> =>
+  api.post('/checkin/run-all').then(r => r.data.accounts)

@@ -12,6 +12,7 @@ pub mod credit;
 pub mod auth;
 pub mod config_transfer;
 pub mod client_config;
+pub mod checkin;
 
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;

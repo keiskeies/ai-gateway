@@ -1,4 +1,5 @@
 use actix_web::{web, HttpResponse};
+use crate::api::settings::SharedAppConfig;
 use crate::cache::RouteCache;
 use crate::config::SystemProxy;
 use crate::db::DbPool;
@@ -28,12 +29,24 @@ pub async fn get(db: web::Data<DbPool>, path: web::Path<String>) -> AppResult<Ht
 pub async fn create(
     db: web::Data<DbPool>,
     cache: web::Data<Arc<RouteCache>>,
+    config: web::Data<SharedAppConfig>,
     body: web::Json<CreatePlatformRequest>,
 ) -> AppResult<HttpResponse> {
     let req = body.into_inner();
-    let db = db.into_inner();
-    let platform = web::block(move || crate::db::platform::create(&db, &req))
+    // 「登录并获取 Key」留下的会话：平台创建成功后再绑定，失败不影响平台本身
+    let login_attempt = req.login_attempt.clone();
+    let pool = db.into_inner();
+    let create_pool = pool.clone();
+    let platform = web::block(move || crate::db::platform::create(&create_pool, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
+    if let Some(attempt_id) = login_attempt {
+        let encrypt_key = config.read().security.encrypt_key.clone();
+        if let Err(error) =
+            crate::checkin::bind_attempt(&pool, &encrypt_key, &attempt_id, &platform.id)
+        {
+            tracing::warn!("平台 {} 绑定登录态失败: {}", platform.id, error);
+        }
+    }
     cache.refresh();
     Ok(HttpResponse::Created().json(platform))
 }

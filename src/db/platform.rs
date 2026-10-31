@@ -274,6 +274,8 @@ pub fn delete(pool: &DbPool, id: &str) -> AppResult<()> {
          )",
         [id],
     )?;
+    // 登录态跟着平台账号走：删平台就把它的每日领取会话一起删掉
+    tx.execute("DELETE FROM checkin_accounts WHERE platform_id = ?1", [id])?;
     tx.execute("DELETE FROM platforms WHERE id = ?1", [id])?;
     tx.commit().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     drop(conn);

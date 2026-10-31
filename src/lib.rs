@@ -12,4 +12,5 @@ pub mod protocol;
 pub mod proxy;
 pub mod api;
 pub mod clients;
+pub mod checkin;
 pub mod web_cache;

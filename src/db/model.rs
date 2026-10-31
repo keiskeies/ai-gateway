@@ -467,6 +467,7 @@ mod tests {
             credit_window: None,
             credit_unit: None,
             adapter: None,
+            login_attempt: None,
         })
         .expect("create platform")
         .id
@@ -548,6 +549,7 @@ mod tests {
             credit_window: None,
             credit_unit: None,
             adapter: None,
+            login_attempt: None,
         })
         .expect("create other platform")
         .id
@@ -774,6 +776,7 @@ mod tests {
             credit_window: Some("day".into()),
             credit_unit: Some("credits".into()),
             adapter: None,
+            login_attempt: None,
         }).expect("create sibling account").id;
 
         let model_id = seed_model(&pool, &first, "shared-model", 1.0);

@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 30;
+pub const CURRENT_SCHEMA_VERSION: i64 = 31;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -261,6 +261,12 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V30 (request_attempts.nonce)");
     }
 
+    if current_version < 31 {
+        conn.execute_batch(SCHEMA_V31_MIGRATION)?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 31)", [])?;
+        tracing::info!("Database migrated to V31 (checkin_accounts for daily reward collection)");
+    }
+
     Ok(())
 }
 
@@ -426,6 +432,33 @@ CREATE TABLE IF NOT EXISTS client_configs (
     applied_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+"#;
+
+/// V31：每日领取（签到）的登录态。一行绑一个平台记录——平台即账号，
+/// 多账号就是同一预设建多条平台；cookies_enc 是整条 Cookie 头的 AES-GCM 密文，
+/// 明文只在进程内存在。platform 是适配器 key（modelscope），identity 是登录后的账号名。
+const SCHEMA_V31_MIGRATION: &str = r#"
+CREATE TABLE IF NOT EXISTS checkin_accounts (
+    id            TEXT PRIMARY KEY,
+    platform_id   TEXT NOT NULL,
+    platform      TEXT NOT NULL,
+    identity      TEXT NOT NULL DEFAULT '',
+    label         TEXT NOT NULL DEFAULT '',
+    cookies_enc   TEXT NOT NULL,
+    cookie_names  TEXT NOT NULL DEFAULT '',
+    status        TEXT NOT NULL DEFAULT 'new',
+    last_message  TEXT NOT NULL DEFAULT '',
+    last_run_at   TEXT,
+    last_run_day  TEXT,
+    last_ok_day   TEXT,
+    balance       REAL,
+    daily_amount  REAL,
+    daily_done    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_checkin_accounts_platform
+    ON checkin_accounts(platform_id);
 "#;
 
 /// 请求正文只在显式开启时落库，默认关（见 §2 原则 10"默认不存请求正文"）。

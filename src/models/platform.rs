@@ -171,6 +171,9 @@ pub struct CreatePlatformRequest {
     /// 请求构造方式：OpenAI / Anthropic / Trae / WorkBuddy。默认由 type 推出。
     #[serde(default)]
     pub adapter: Option<String>,
+    /// 「登录并获取 Key」留下的登录 attempt：创建成功后把它的会话绑到这个平台。
+    #[serde(default)]
+    pub login_attempt: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

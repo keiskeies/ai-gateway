@@ -13,6 +13,7 @@ pub mod local;
 pub mod config_transfer;
 pub mod events;
 pub mod client_config;
+pub mod checkin;
 
 use actix_web::web;
 
@@ -141,6 +142,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         .route("/{id}/restore-backup", web::post().to(client_config::restore_backup))
                         .route("/{id}/config", web::get().to(client_config::read_config))
                         .route("/{id}/config", web::put().to(client_config::write_config)),
+                )
+                // 每日领取：登录窗口只存在于本机桌面端，整段同样只允许本机控制台
+                .service(
+                    web::scope("/checkin")
+                        .wrap(actix_web::middleware::from_fn(local::require_local_console))
+                        .route("/accounts", web::get().to(checkin::list))
+                        // 新平台：只认平台类型，登录结果由创建接口的 login_attempt 绑定
+                        .route("/login", web::post().to(checkin::login_new))
+                        .route("/attempts/{id}", web::get().to(checkin::attempt))
+                        .route("/platforms/{platform_id}/login", web::post().to(checkin::login_platform))
+                        .route("/platforms/{platform_id}/run", web::post().to(checkin::run))
+                        .route("/platforms/{platform_id}/session", web::delete().to(checkin::clear_session))
+                        .route("/run-all", web::post().to(checkin::run_all)),
                 )
         );
 }

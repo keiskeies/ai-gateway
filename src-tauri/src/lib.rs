@@ -46,8 +46,9 @@ pub fn run() {
             setup_tray(app)?;
 
             // Start the backend actix-web server in a background thread
+            let backend_handle = app.handle().clone();
             std::thread::spawn(move || {
-                start_backend_server();
+                start_backend_server(backend_handle);
             });
 
             // Wait for backend to be ready (up to 15 seconds)
@@ -183,6 +184,126 @@ fn resume_url(port: u16) -> Result<url::Url, url::ParseError> {
     Ok(origin)
 }
 
+/// 每日领取的登录窗口（必须在主线程调用）。
+///
+/// 每个 attempt 用独立的 WebView2 配置目录：否则第一个账号的会话会被第二个账号的
+/// 登录窗口直接复用，窗口一打开就是「已登录」，抓回来的永远是同一个账号。
+/// 窗口关闭后临时目录即丢弃，账号之间零串扰（代价是每个账号都要完整登录一次）。
+///
+/// 独立线程轮询 cookie：读 cookie 不能在同步命令/事件回调里做（Windows 上会死锁）。
+fn open_checkin_login(
+    handle: &tauri::AppHandle,
+    pool: ai_gateway::db::DbPool,
+    encrypt_key: String,
+    platform: &'static str,
+    attempt_id: String,
+) {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    const LABEL: &str = "checkin-login";
+
+    if let Some(window) = handle.get_webview_window(LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+
+    if platform != ai_gateway::checkin::MODELSCOPE {
+        tracing::error!("未支持的每日领取平台: {}", platform);
+        return;
+    }
+    let url = match url::Url::parse(ai_gateway::checkin::modelscope::LOGIN_URL) {
+        Ok(url) => url,
+        Err(error) => {
+            tracing::error!("登录地址解析失败: {}", error);
+            return;
+        }
+    };
+
+    let profile_dir = std::env::temp_dir().join(format!(
+        "aigw-checkin-login-{}",
+        attempt_id.get(..8).unwrap_or(attempt_id.as_str())
+    ));
+    if let Err(error) = std::fs::create_dir_all(&profile_dir) {
+        tracing::warn!("登录窗口配置目录创建失败（{}），改用默认目录", error);
+    }
+
+    let window = match WebviewWindowBuilder::new(handle, LABEL, WebviewUrl::External(url.clone()))
+        .title("登录 ModelScope 魔搭")
+        .inner_size(520., 760.)
+        .min_inner_size(420., 620.)
+        .center()
+        .visible(true)
+        .data_directory(profile_dir.clone())
+        .build()
+    {
+        Ok(window) => window,
+        Err(error) => {
+            tracing::error!("登录窗口创建失败: {}", error);
+            return;
+        }
+    };
+
+    let handle = handle.clone();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let session_cookie = ai_gateway::checkin::modelscope::SESSION_COOKIE;
+        loop {
+            // 用户自己关掉窗口就结束，不留孤儿线程
+            if handle.get_webview_window(LABEL).is_none() {
+                let _ = std::fs::remove_dir_all(&profile_dir);
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                let _ = window.close();
+                let _ = std::fs::remove_dir_all(&profile_dir);
+                return;
+            }
+            match window.cookies_for_url(url.clone()) {
+                Ok(cookies) => {
+                    let logged_in = cookies
+                        .iter()
+                        .any(|cookie| cookie.name() == session_cookie && !cookie.value().is_empty());
+                    if logged_in {
+                        let header = cookies
+                            .iter()
+                            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        let names = cookies
+                            .iter()
+                            .map(|cookie| cookie.name().to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let runtime = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .build();
+                        match runtime {
+                            Ok(runtime) => runtime.block_on(
+                                ai_gateway::checkin::complete_attempt(
+                                    &pool,
+                                    &encrypt_key,
+                                    &attempt_id,
+                                    &header,
+                                    &names,
+                                ),
+                            ),
+                            Err(error) => tracing::error!("登录线程 runtime 创建失败: {}", error),
+                        }
+                        let _ = window.close();
+                        // WebView2 可能还握着目录句柄，删不掉就留给系统临时目录清理
+                        let _ = std::fs::remove_dir_all(&profile_dir);
+                        return;
+                    }
+                }
+                Err(error) => tracing::warn!("读取登录窗口 cookie 失败: {}", error),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
+    });
+}
+
 fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
@@ -281,7 +402,7 @@ fn build_tray_menu_items(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry
     menu.build().expect("Failed to build tray menu")
 }
 
-fn start_backend_server() {
+fn start_backend_server(app_handle: tauri::AppHandle) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async {
         use actix_cors::Cors;
@@ -304,6 +425,32 @@ fn start_backend_server() {
         let db_pool = ai_gateway::db::init_pool(&db_path)
             .expect("Failed to initialize database");
 
+        // 每日领取的登录窗口只有桌面端能开：core 通过这个 opener 请求 Tauri 建窗，
+        // 抓到 cookie 后再回调 core 加密入库。服务器模式不注册，接口会明确返回 409。
+        {
+            let handle = app_handle.clone();
+            let pool = db_pool.clone();
+            let encrypt_key = app_config.security.encrypt_key.clone();
+            ai_gateway::checkin::register_login_opener(Box::new(
+                move |platform, attempt_id| {
+                    let dispatch = handle.clone();
+                    let pool = pool.clone();
+                    let encrypt_key = encrypt_key.clone();
+                    handle
+                        .run_on_main_thread(move || {
+                            open_checkin_login(
+                                &dispatch,
+                                pool,
+                                encrypt_key,
+                                platform,
+                                attempt_id,
+                            )
+                        })
+                        .map_err(|error| error.to_string())
+                },
+            ));
+        }
+
         // 自动检测系统代理
         let system_proxy = ai_gateway::config::SystemProxy::detect();
         let http_client = system_proxy.apply_to_builder(
@@ -321,6 +468,7 @@ fn start_backend_server() {
         let events_hub = ai_gateway::events::EventHub::new();
         let stats_writer = StatsWriter::start(db_pool.clone(), events_hub.clone());
         ai_gateway::maintenance::spawn_auto_purge(db_pool.clone(), shared_config.clone());
+        ai_gateway::checkin::spawn_daily_runner(db_pool.clone(), shared_config.clone());
         let api_cache = Arc::new(cache.clone());
         let login_limiter = web::Data::new(ai_gateway::api::auth::LoginLimiter::new());
 

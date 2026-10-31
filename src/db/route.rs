@@ -307,6 +307,7 @@ mod tests {
             credit_window: None,
             credit_unit: None,
             adapter: None,
+            login_attempt: None,
         }).expect("create platform");
         let proxy = crate::db::proxy::create(&pool, &CreateProxyRequest { name: "virtual-model".into() })
             .expect("create proxy");
@@ -367,6 +368,7 @@ mod tests {
             credit_budget: None, credit_window: None,
             credit_unit: None,
             adapter: None,
+            login_attempt: None,
         }).expect("create second platform");
         let mut conn = pool.get().unwrap();
         conn.execute("INSERT INTO models (id, platform_id, model_id, display_name, max_tokens, context_window, input_price, output_price, capabilities, status) VALUES ('m-other', ?1, 'gpt-test', 'Other', 4096, 8192, 9.9, 9.9, '[]', 'Active')",

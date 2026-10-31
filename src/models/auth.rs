@@ -51,6 +51,9 @@ pub struct AuthStatusResponse {
     /// 当前请求是否来自本机控制台：回环 peer + Host 为本机 + 无反向代理转发头。
     /// 客户端接入会改写网关所在机器的本地配置文件，只有这一种访问方式才允许。
     pub local_console: bool,
+    /// 本进程能否打开登录窗口（只有 Tauri 桌面端注册了 opener）。
+    /// 独立服务器模式下前端据此说明「登录仅桌面端可用」。
+    pub checkin_login: bool,
 }
 
 #[derive(Debug, Serialize)]

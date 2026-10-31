@@ -436,6 +436,7 @@ mod tests {
             // 否则 validate_credit_unit 会因为「带预算但不是 credits」而拒绝。
             credit_unit: Some("credits".into()),
             adapter: None,
+            login_attempt: None,
         })
         .expect("create platform")
         .id
