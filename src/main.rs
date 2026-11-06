@@ -65,6 +65,11 @@ async fn main() -> std::io::Result<()> {
 
     let static_dir = app_config.static_dir();
     let index_file = static_dir.join("index.html");
+    // index.html 启动时读一次进内存：SPA 深链回落曾经每个未命中请求都 tokio::fs::read
+    // 一次磁盘（N 并发就是 N 次 I/O）。文件内容在进程生命周期内不变（换版要重启）。
+    let index_body: Option<web::Bytes> = std::fs::read(&index_file)
+        .ok()
+        .map(|bytes| web::Bytes::from(bytes));
     let host = app_config.server.host.clone();
     let admin_port = app_config.server.admin_port;
 
@@ -100,13 +105,13 @@ async fn main() -> std::io::Result<()> {
                     // SPA 深链回落：/setup、/providers/:id 等路由刷新时也要返回 index.html，
                     // 带扩展名的资源缺失仍按 404 返回，避免把 404 的 JS 当成模块喂给浏览器
                     .default_handler(actix_web::dev::fn_service({
-                        let index_file = index_file.clone();
+                        let index_body = index_body.clone();
                         move |req: actix_web::dev::ServiceRequest| {
-                            let index = index_file.clone();
+                            let index = index_body.clone();
                             let is_asset = req.path().contains('.');
                             async move {
-                                let res = match tokio::fs::read(&index).await {
-                                    Ok(body) if !is_asset => HttpResponse::Ok()
+                                let res = match index {
+                                    Some(body) if !is_asset => HttpResponse::Ok()
                                         .insert_header((
                                             actix_web::http::header::CONTENT_TYPE,
                                             "text/html; charset=utf-8",

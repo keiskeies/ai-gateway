@@ -47,9 +47,14 @@ impl ConsoleEvent {
     }
 }
 
+/// 同时在线 SSE 连接上限。桌面端正常 2~3 条；反复刷新或异常客户端会堆积连接。
+const MAX_SUBSCRIBERS: usize = 64;
+
 #[derive(Clone)]
 pub struct EventHub {
     sender: broadcast::Sender<ConsoleEvent>,
+    /// 订阅者名额：每条 SSE 连接持有一个 permit，直到流结束
+    subscriber_slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for EventHub {
@@ -61,7 +66,18 @@ impl Default for EventHub {
 impl EventHub {
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(CHANNEL_CAPACITY);
-        Self { sender }
+        Self {
+            sender,
+            subscriber_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_SUBSCRIBERS)),
+        }
+    }
+
+    /// 订阅者数量上限。每条 SSE 连接持有一个 Receiver（各缓存 256 个事件）、
+    /// 一个 interval 定时器和一条长驻响应流；没有上限时反复刷新/多标签会把内存拉满。
+    /// 用 `try_acquire_owned` 非阻塞获取，超限的连接直接拒绝而不是排队。
+    pub fn try_subscribe(&self) -> Option<(broadcast::Receiver<ConsoleEvent>, tokio::sync::OwnedSemaphorePermit)> {
+        let permit = self.subscriber_slots.clone().try_acquire_owned().ok()?;
+        Some((self.sender.subscribe(), permit))
     }
 
     /// 非阻塞发布：没有订阅者时 `send` 返回 Err，这里直接吞掉

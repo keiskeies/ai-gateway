@@ -35,7 +35,14 @@ fn comment(text: &str) -> String {
 pub async fn stream(hub: web::Data<EventHub>, query: web::Query<EventsQuery>) -> HttpResponse {
     let topics = query.topics.clone().unwrap_or_default();
 
-    let events = BroadcastStream::new(hub.subscribe()).filter_map(move |item| {
+    // 订阅者上限：超限直接 503，避免无界连接堆积（每条连接都持有 Receiver + 定时器 + 长驻流）
+    let Some((receiver, permit)) = hub.try_subscribe() else {
+        return HttpResponse::ServiceUnavailable()
+            .insert_header((header::RETRY_AFTER, "5"))
+            .body("too many event subscribers");
+    };
+
+    let events = BroadcastStream::new(receiver).filter_map(move |item| {
         let topics = topics.clone();
         async move {
             match item {
@@ -51,8 +58,12 @@ pub async fn stream(hub: web::Data<EventHub>, query: web::Query<EventsQuery>) ->
     let pings = IntervalStream::new(tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS)))
         .map(|_| comment("ping"));
 
+    // 把 permit 挂到流上：连接断开、流结束、客户端消失时才释放名额
     let body = futures_util::stream::select(events, pings)
-        .map(|chunk| Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(chunk)));
+        .map(move |chunk| {
+            let _ = &permit; // 让 permit 活到流结束
+            Ok::<_, actix_web::Error>(actix_web::web::Bytes::from(chunk))
+        });
 
     HttpResponse::Ok()
         .insert_header((header::CONTENT_TYPE, "text/event-stream; charset=utf-8"))

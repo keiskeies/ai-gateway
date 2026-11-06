@@ -29,14 +29,17 @@ fn is_dynamic_path(path: &str) -> bool {
 ///
 /// `B` 由下游服务（actix-files）的 body 类型决定，这里用泛型让编译器自行推断。
 pub async fn cache_headers<B>(req: ServiceRequest, next: Next<B>) -> Result<ServiceResponse<B>> {
-    let path = req.path().to_string();
+    // 先判动态路径再决定要不要拷贝 path：/api、/v1、/health 占绝大多数请求，
+    // 它们根本不需要这份 String（曾经每个请求都无条件 to_string 一次）。
+    let dynamic = is_dynamic_path(req.path());
+    let hashed_asset = !dynamic && req.path().starts_with(HASHED_ASSET_PREFIX);
     let mut res = next.call(req).await?;
 
-    if is_dynamic_path(&path) {
+    if dynamic {
         return Ok(res);
     }
 
-    let value = if path.starts_with(HASHED_ASSET_PREFIX) {
+    let value = if hashed_asset {
         "public, max-age=31536000, immutable"
     } else {
         "no-cache"
