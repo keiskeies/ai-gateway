@@ -2122,7 +2122,7 @@ fn handle_stream(
         .body("upstream stream error");
     }
 
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, None));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, conn_guard));
     let body = StreamPassthroughBody {
         inner: Box::pin(IdleTimeoutStream::new(
             resp.bytes_stream(),
