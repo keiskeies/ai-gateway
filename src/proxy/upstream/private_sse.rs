@@ -22,6 +22,14 @@ pub enum NormalizedEvent {
     Ignore,
 }
 
+/// 单行缓冲上限（字节）：超过说明上游在发不带换行的异常数据流。
+const MAX_LINE_BUFFER_BYTES: usize = 1024 * 1024;
+/// 非流式聚合的正文上限：私有协议上游恒回 SSE，客户端要 JSON 时必须读完并拼起来，
+/// 没有上限时 N 个长输出请求会把整条生成结果常驻内存。
+const MAX_AGGREGATE_TEXT_BYTES: usize = 8 * 1024 * 1024;
+/// 单个 tool_call 的参数上限
+const MAX_TOOL_ARG_BYTES: usize = 4 * 1024 * 1024;
+
 /// 归一化器：按行喂入上游 SSE，吐出 OpenAI 形态事件。
 pub struct PrivateSseNormalizer {
     kind: ProtocolKind,
@@ -31,6 +39,8 @@ pub struct PrivateSseNormalizer {
     started: bool,
     /// 累积的 tool_calls：上游可能分多帧给，需要按 index 聚合
     tool_calls: Vec<Value>,
+    /// tool_call 参数的增量缓冲：按 index 累加，避免每帧重拼整段字符串
+    args_buf: std::collections::HashMap<i64, String>,
     /// 是否已经出现过 tool_call（决定 finish_reason 要不要改写）
     saw_tool_call: bool,
     /// 累积的 usage
@@ -64,6 +74,7 @@ impl PrivateSseNormalizer {
             line_buf: String::new(),
             started: false,
             tool_calls: Vec::new(),
+            args_buf: std::collections::HashMap::new(),
             saw_tool_call: false,
             usage: None,
             text: String::new(),
@@ -74,9 +85,46 @@ impl PrivateSseNormalizer {
         }
     }
 
+    /// 追加正文，超过聚合上限就不再增长（非流式聚合不能无界累积整条生成流）。
+    fn push_text(&mut self, text: &str) {
+        if self.text.len() >= MAX_AGGREGATE_TEXT_BYTES {
+            return;
+        }
+        let remaining = MAX_AGGREGATE_TEXT_BYTES - self.text.len();
+        if text.len() <= remaining {
+            self.text.push_str(text);
+        } else {
+            self.text.push_str(&text[..remaining]);
+        }
+    }
+
+    /// 追加推理内容（同一上限）
+    fn push_reasoning(&mut self, reasoning: &str) {
+        if self.reasoning.len() >= MAX_AGGREGATE_TEXT_BYTES {
+            return;
+        }
+        let remaining = MAX_AGGREGATE_TEXT_BYTES - self.reasoning.len();
+        if reasoning.len() <= remaining {
+            self.reasoning.push_str(reasoning);
+        } else {
+            self.reasoning.push_str(&reasoning[..remaining]);
+        }
+    }
+
     /// 喂入一批字节，返回需要转发给客户端的事件序列。
     pub fn push(&mut self, bytes: &[u8]) -> Vec<NormalizedEvent> {
         self.line_buf.push_str(&String::from_utf8_lossy(bytes));
+        // 残行缓冲上限：上游持续发不带换行的数据（心跳/异常帧）时，
+        // 这个 String 会随流生命周期无界增长。超过上限按协议错误收尾。
+        if self.line_buf.len() > MAX_LINE_BUFFER_BYTES {
+            self.line_buf.clear();
+            self.business_error = Some(crate::proxy::upstream::UpstreamBusinessError {
+                code: None,
+                message: "upstream sent a single line larger than the buffer limit".to_string(),
+                raw: String::new(),
+            });
+            return Vec::new();
+        }
         let mut out = Vec::new();
         while let Some(nl) = self.line_buf.find('\n') {
             let line: String = self.line_buf.drain(..=nl).collect();
@@ -197,10 +245,10 @@ impl PrivateSseNormalizer {
         let delta = choice.get("delta").cloned().unwrap_or_else(|| json!({}));
 
         if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
-            self.text.push_str(text);
+            self.push_text(text);
         }
         if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-            self.reasoning.push_str(reasoning);
+            self.push_reasoning(reasoning);
         }
         if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             self.saw_tool_call = true;
@@ -288,8 +336,8 @@ impl PrivateSseNormalizer {
         if content.is_empty() && reasoning.is_empty() && tool_calls.is_empty() {
             return None;
         }
-        self.text.push_str(&content);
-        self.reasoning.push_str(&reasoning);
+        self.push_text(&content);
+        self.push_reasoning(&reasoning);
         if !tool_calls.is_empty() {
             self.saw_tool_call = true;
             self.merge_tool_calls(&tool_calls);
@@ -335,11 +383,13 @@ impl PrivateSseNormalizer {
                 .and_then(|f| f.get("arguments"))
                 .and_then(|v| v.as_str())
             {
-                let existing = entry["function"]["arguments"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
-                entry["function"]["arguments"] = json!(format!("{existing}{args}"));
+                // 增量拼接改走独立 String 累加：曾经每帧都 `format!("{existing}{args}")`
+                // 把已累积的整段参数复制一遍，长 arguments（100KB 分几百帧）是 O(m²)。
+                let buf = self.args_buf.entry(index).or_insert_with(String::new);
+                if buf.len() < MAX_TOOL_ARG_BYTES {
+                    buf.push_str(args);
+                }
+                entry["function"]["arguments"] = json!(buf.clone());
             }
         }
     }

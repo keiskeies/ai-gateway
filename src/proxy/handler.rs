@@ -1718,6 +1718,9 @@ async fn read_bounded_body(
     Ok(out.freeze())
 }
 
+/// 流式透传的残行缓冲上限：上游一直不发换行时，buffer 会随流生命周期无界增长。
+const MAX_STREAM_LINE_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// 流式 chunk 之间的空闲上限：上游在这么长时间内一个字节都没给，就认为连接已经挂死。
 /// 与整条流的 stream_timeout_secs（默认 1800s）互补——后者管总时长，这个管「中途卡住」。
 const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
@@ -1960,6 +1963,28 @@ impl Stream for StreamPassthroughBody {
                         capture.push(&bytes);
                     }
                     self.buffer.extend_from_slice(&bytes);
+                    // 残行缓冲上限：上游持续发不带换行的数据时，这个 Vec 会随流生命周期
+                    // 无界增长（stream_timeout 默认 1800s）。超限按上游流错误收尾。
+                    if self.buffer.len() > MAX_STREAM_LINE_BUFFER_BYTES {
+                        tracing::warn!(
+                            "上游单行超过 {} 字节，按流错误收尾",
+                            MAX_STREAM_LINE_BUFFER_BYTES
+                        );
+                        self.stats.failed.store(true, Ordering::SeqCst);
+                        self.finished = true;
+                        self.buffer.clear();
+                        let mut out = String::new();
+                        let payload = serde_json::json!({
+                            "error": {"message": "upstream sent a single line larger than the buffer limit", "type": "upstream_error"}
+                        });
+                        out.push_str(&format!("data: {payload}\n\n"));
+                        out.push_str(&self.tracker.finish_only());
+                        if let Some(capture) = &mut self.capture {
+                            capture.flush();
+                        }
+                        self.stats.record_once();
+                        return Poll::Ready(Some(Ok(Bytes::from(out))));
+                    }
                     // 逐行解析已完整的 SSE 行：
                     // 完整行立即转发（不攒到 EOF，上游若在 [DONE] 之后保持连接也不会卡住客户端），
                     // 不完整的半行留在 buffer 里等下一个 chunk。
