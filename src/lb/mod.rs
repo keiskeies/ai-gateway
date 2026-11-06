@@ -10,6 +10,9 @@ pub struct BackendSelector {
     counters: DashMap<String, AtomicUsize>,
     /// 活跃连接数：(route_id:backend_id) → count
     connections: DashMap<String, AtomicUsize>,
+    /// 每后端并发闸门：(route_id:backend_id) → (在途数, 上限)。
+    /// 只存「配置了 max_concurrent 的后端」；上限变化时按新值重建。
+    limits: DashMap<String, (AtomicUsize, usize)>,
 }
 
 impl BackendSelector {
@@ -17,6 +20,40 @@ impl BackendSelector {
         Self {
             counters: DashMap::new(),
             connections: DashMap::new(),
+            limits: DashMap::new(),
+        }
+    }
+
+    /// 尝试为某后端占用一个并发槽位。未配置 max_concurrent 的后端直接放行（返回 true）。
+    /// 配置了上限且已满则返回 false，调用方应换下一个候选后端。
+    pub fn try_acquire_slot(&self, route_id: &str, backend_id: &str, max_concurrent: Option<u32>) -> bool {
+        let Some(limit) = max_concurrent.filter(|v| *v > 0) else {
+            return true;
+        };
+        let limit = limit as usize;
+        let key = format!("{}:{}", route_id, backend_id);
+        let mut entry = self.limits.entry(key).or_insert_with(|| {
+            (AtomicUsize::new(0), limit)
+        });
+        // 上限被改过：按新上限重建计数（在途数归零，宁可短暂放宽也不永久卡死）
+        if entry.1 != limit {
+            entry.1 = limit;
+            entry.0.store(0, Ordering::Relaxed);
+        }
+        entry.0
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v < limit { Some(v + 1) } else { None }
+            })
+            .is_ok()
+    }
+
+    /// 释放并发槽位。未配置上限的后端是 no-op。
+    pub fn release_slot(&self, route_id: &str, backend_id: &str) {
+        let key = format!("{}:{}", route_id, backend_id);
+        if let Some(entry) = self.limits.get(&key) {
+            let _ = entry.0.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
         }
     }
 
@@ -68,7 +105,12 @@ impl BackendSelector {
     pub fn dec_connection(&self, route_id: &str, backend_id: &str) {
         let key = format!("{}:{}", route_id, backend_id);
         if let Some(counter) = self.connections.get(&key) {
-            counter.fetch_sub(1, Ordering::Relaxed);
+            // 饱和减法：曾经 inc 与 dec 之间的 `?` 早退会漏掉一次 dec，
+            // 下一次 fetch_sub 从 0 下溢回绕成 usize::MAX，LeastConnections 会把
+            // 这个后端永久避开。这里兜底不让计数低于 0。
+            let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
         }
     }
 

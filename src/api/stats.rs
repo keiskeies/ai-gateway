@@ -15,6 +15,12 @@ pub struct RangeQuery {
     pub to: Option<String>,
 }
 
+/// 概览页在「没带时间范围」时的默认窗口。
+/// overview 一个请求要在同一条连接上跑约 9 条全表聚合，前端又按 24h/7d/30d 传参；
+/// 不带范围的老调用会退化成全历史扫描，把 8 条连接池占住，饿死热路径的 pool.get()。
+/// 30 天是界面「30d」档的最大值，足够覆盖所有正常用法，又给全表扫描兜了个上界。
+const OVERVIEW_DEFAULT_WINDOW_DAYS: i64 = 30;
+
 pub async fn overview(
     db: web::Data<DbPool>,
     state: web::Data<Arc<ProxyState>>,
@@ -23,7 +29,16 @@ pub async fn overview(
     // 并发连接来自内存中的 selector 计数器，无需触库
     let active_connections = state.selector.active_connections_total();
     let db = db.into_inner();
-    let q = query.into_inner();
+    let mut q = query.into_inner();
+    // 两个都缺省时才补默认窗口：只给 from 或只给 to 的调用保持原语义
+    if q.from.is_none() && q.to.is_none() {
+        let now = chrono::Utc::now();
+        q.to = Some(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false));
+        q.from = Some(
+            (now - chrono::Duration::days(OVERVIEW_DEFAULT_WINDOW_DAYS))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        );
+    }
     let stats = web::block(move || {
         crate::db::stats::overview(&db, active_connections, q.from.as_deref(), q.to.as_deref())
     })

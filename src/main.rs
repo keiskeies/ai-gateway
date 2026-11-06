@@ -60,6 +60,7 @@ async fn main() -> std::io::Result<()> {
         http_client,
         cache: cache.clone(),
         stats_writer,
+        quota_usage_cache: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
     });
 
     let static_dir = app_config.static_dir();

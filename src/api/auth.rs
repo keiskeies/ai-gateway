@@ -203,31 +203,43 @@ pub(crate) async fn drop_session(req: &HttpRequest, db: &web::Data<DbPool>) -> A
     Ok(())
 }
 
-fn create_session(pool: &DbPool, user_id: &str) -> AppResult<String> {
+/// 创建会话：同步的 purge/INSERT 放进 blocking 线程池，绝不占 actix worker。
+async fn create_session(pool: &DbPool, user_id: &str) -> AppResult<String> {
     let mut raw = [0u8; 32];
     let mut rng = OsRng;
     rng.fill_bytes(&mut raw);
     let token = hex::encode(raw);
     let now = Utc::now();
-    crate::db::auth::purge_expired_sessions(pool, &now.to_rfc3339())?;
-    crate::db::auth::create_session(
-        pool,
-        &Session {
-            token_hash: hash_token(&token),
-            user_id: user_id.to_string(),
-            created_at: now.to_rfc3339(),
-            expires_at: (now + Duration::days(SESSION_TTL_DAYS)).to_rfc3339(),
-        },
-    )?;
+    let session = Session {
+        token_hash: hash_token(&token),
+        user_id: user_id.to_string(),
+        created_at: now.to_rfc3339(),
+        expires_at: (now + Duration::days(SESSION_TTL_DAYS)).to_rfc3339(),
+    };
+    let purge_before = now.to_rfc3339();
+    let db = pool.clone();
+    web::block(move || -> AppResult<()> {
+        crate::db::auth::purge_expired_sessions(&db, &purge_before)?;
+        crate::db::auth::create_session(&db, &session)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
     Ok(token)
 }
 
-fn current_user(req: &HttpRequest, pool: &DbPool) -> AppResult<Option<AuthUser>> {
+/// 会话查询走 blocking 线程池：中间件里曾经同步跑 rusqlite，
+/// 会把 actix worker 钉在 `pool.get()` / JOIN 上，N 并发时全站 /api 一起变慢。
+async fn current_user(req: &HttpRequest, pool: &DbPool) -> AppResult<Option<AuthUser>> {
     let Some(token) = session_token(req) else {
         return Ok(None);
     };
     let token_hash = hash_token(&token);
-    Ok(crate::db::auth::find_session(pool, &token_hash)?.map(|(_, user)| user))
+    let db = pool.clone();
+    web::block(move || -> AppResult<Option<AuthUser>> {
+        Ok(crate::db::auth::find_session(&db, &token_hash)?.map(|(_, user)| user))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
 }
 
 /// `/api` 作用域中间件：除登录、初始化、状态探测外均要求有效会话。
@@ -248,7 +260,7 @@ pub async fn require_auth<B: MessageBody>(
     };
     let pool = db.get_ref().clone();
 
-    match current_user(req.request(), &pool) {
+    match current_user(req.request(), &pool).await {
         Ok(Some(user)) => {
             req.extensions_mut().insert(user);
             next.call(req).await
@@ -280,7 +292,7 @@ pub async fn status(
     let initialized = web::block(move || crate::db::auth::user_count(&count_pool))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?? > 0;
-    let user = current_user(&req, &pool)?;
+    let user = current_user(&req, &pool).await?;
     Ok(no_store(HttpResponse::Ok().json(AuthStatusResponse {
         initialized,
         authenticated: user.is_some(),
@@ -328,7 +340,7 @@ pub async fn setup(
         ));
     };
 
-    let token = create_session(&pool, &user.id)?;
+    let token = create_session(&pool, &user.id).await?;
     Ok(no_store(
         HttpResponse::Ok()
             .cookie(session_cookie(&token))
@@ -385,7 +397,7 @@ pub async fn login(
     };
 
     limiter.reset(&key);
-    let token = create_session(&pool, &user.id)?;
+    let token = create_session(&pool, &user.id).await?;
     Ok(no_store(
         HttpResponse::Ok()
             .cookie(session_cookie(&token))
@@ -441,7 +453,7 @@ pub async fn change_password(
         ));
     }
 
-    let token = create_session(&pool, &auth_user.id)?;
+    let token = create_session(&pool, &auth_user.id).await?;
     Ok(no_store(
         HttpResponse::Ok()
             .cookie(session_cookie(&token))
@@ -684,6 +696,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             cache,
             stats_writer,
+            quota_usage_cache: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         });
         let app = aw_test::init_service(
             App::new()

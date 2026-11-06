@@ -236,10 +236,124 @@ impl StreamCapture {
 }
 
 /// 一次成功预留的积分；失败分支必须调用 release，成功分支则保留扣费。
+/// 实现 Drop 作为兜底：预留成功后、确认收到 2xx 之前任何早退（`?` / panic）
+/// 都会自动释放，避免「请求没发出去但积分被永久扣掉」。
 struct CreditReservation {
     platform_id: String,
     window: Option<String>,
     price: f64,
+    db: Option<crate::db::DbPool>,
+    request_id: Option<String>,
+    model_id: Option<String>,
+    armed: bool,
+}
+
+impl CreditReservation {
+    fn new(
+        platform_id: String,
+        window: Option<String>,
+        price: f64,
+        db: crate::db::DbPool,
+        request_id: String,
+        model_id: String,
+    ) -> Self {
+        Self {
+            platform_id,
+            window,
+            price,
+            db: Some(db),
+            request_id: Some(request_id),
+            model_id: Some(model_id),
+            armed: true,
+        }
+    }
+
+    /// 确认扣费：上游已给出成功响应，之后 drop 不再释放。
+    fn confirm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CreditReservation {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.price <= 0.0 || !self.price.is_finite() {
+            return;
+        }
+        let (Some(db), Some(request_id), Some(model_id)) = (
+            self.db.take(),
+            self.request_id.take(),
+            self.model_id.take(),
+        ) else {
+            return;
+        };
+        let platform_id = self.platform_id.clone();
+        let window = self.window.clone();
+        let price = self.price;
+        // Drop 不是 async：把同步 DB 释放丢到 blocking 线程池，既不阻塞请求
+        // 也不依赖调用方记得走 release_credit。
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = crate::db::credit::release(
+                &db, &platform_id, window.as_deref(), price, &request_id, &model_id,
+            ) {
+                tracing::warn!("释放积分预留失败(drop): {}", e);
+            }
+        });
+    }
+}
+
+/// 连接计数的 RAII 守卫：inc 之后无论正常返回、`?` 早退还是 panic，
+/// 都恰好 dec 一次。曾经手工配对的 inc/dec 在 `build(...)?` 早退时会泄漏计数。
+struct ConnectionGuard {
+    selector: std::sync::Arc<BackendSelector>,
+    route_id: String,
+    backend_id: String,
+    active: bool,
+}
+
+impl ConnectionGuard {
+    fn new(selector: &std::sync::Arc<BackendSelector>, route_id: &str, backend_id: &str) -> Self {
+        selector.inc_connection(route_id, backend_id);
+        Self {
+            selector: selector.clone(),
+            route_id: route_id.to_string(),
+            backend_id: backend_id.to_string(),
+            active: true,
+        }
+    }
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.selector.dec_connection(&self.route_id, &self.backend_id);
+        }
+    }
+}
+
+/// 并发槽位的 RAII 守卫：和 ConnectionGuard 一起覆盖所有早退路径。
+struct SlotGuard {
+    selector: std::sync::Arc<BackendSelector>,
+    route_id: String,
+    backend_id: String,
+}
+
+impl SlotGuard {
+    fn new(selector: &std::sync::Arc<BackendSelector>, route_id: &str, backend_id: &str) -> Self {
+        Self {
+            selector: selector.clone(),
+            route_id: route_id.to_string(),
+            backend_id: backend_id.to_string(),
+        }
+    }
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.selector.release_slot(&self.route_id, &self.backend_id);
+    }
 }
 
 pub struct ProxyState {
@@ -251,7 +365,15 @@ pub struct ProxyState {
     pub http_client: reqwest::Client,
     pub cache: RouteCache,
     pub stats_writer: StatsWriter,
+    /// 配额判定的短 TTL 用量缓存：设了配额的 Key 每请求都要一次全历史聚合，
+    /// 而统计本身是 500ms 批量落库的。用 2s 快照把「每请求一次扫描」降成
+    /// 「每 2s 一次扫描」，口径与界面仍然一致（统计本来就滞后）。
+    pub quota_usage_cache: Arc<parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, crate::models::api_key::KeyUsage)>>>,
 }
+
+/// 配额用量快照的 TTL：比 StatsWriter 的 500ms 批量间隔略长，
+/// 避免每个请求都去打同一份全历史聚合。
+const QUOTA_USAGE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn extract_auth(req: &HttpRequest) -> Option<String> {
     req.headers().get("Authorization").and_then(|v| v.to_str().ok())
@@ -267,10 +389,16 @@ pub async fn openai_chat_completions(
     let auth_key = validate_auth_cached(&state.cache, &auth)?;
     let meta = inbound_meta(&req, state.config.read().defaults.capture_request_bodies);
 
-    // 解析会吃掉这份 JSON，所以要在交给解析器之前留一份原样正文（采集开着才用得上）
-    let raw = body.0.clone();
+    // 只有正文采集开关打开时才留一份原样正文：默认关闭时深拷贝整份 Value
+    // 纯属浪费（64MB 上限下 N 并发会放大成 O(N) 内存）。开关读一次，后面
+    // capture_body 里也会复核一次，避免配置在两者之间被改掉时 inconsistent。
+    let raw = if state.config.read().defaults.capture_request_bodies {
+        Some(body.0.clone())
+    } else {
+        None
+    };
     let unified = openai::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI, auth_key, Some(raw), None, meta).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::OpenAI, auth_key, raw, None, meta).await
 }
 
 /// Global Anthropic-compatible endpoint: POST /v1/messages
@@ -281,9 +409,13 @@ pub async fn anthropic_messages(
     let auth_key = validate_auth_cached(&state.cache, &auth)?;
     let meta = inbound_meta(&req, state.config.read().defaults.capture_request_bodies);
 
-    let raw = body.0.clone();
+    let raw = if state.config.read().defaults.capture_request_bodies {
+        Some(body.0.clone())
+    } else {
+        None
+    };
     let unified = anthropic::parse_request(body.into_inner()).map_err(AppError::BadRequest)?;
-    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, Some(raw), None, meta).await
+    handle_request(&state, unified, crate::models::proxy::Protocol::Anthropic, auth_key, raw, None, meta).await
 }
 
 /// 正文采集上限：超过时保留前缀并标记 `truncated`，详情仍可阅读；截断的正文不能重放。
@@ -424,12 +556,33 @@ async fn enforce_quota(
 }
 
 async fn usage_for(state: &Arc<ProxyState>, id: &str, window: Option<&str>) -> Result<crate::models::api_key::KeyUsage, AppError> {
+    // 短 TTL 快照：设了配额的 Key 曾经每个请求都做一次 request_stats 全历史聚合，
+    // 表越大越慢且完全串行。2s 的缓存把热路径从「每请求一次扫描」降到「每 2s 一次」，
+    // 口径与界面仍一致——统计本身就是 500ms 批量落库的，本来就滞后。
+    let cache_key = format!("{}:{}", id, window.unwrap_or(""));
+    {
+        let cache = state.quota_usage_cache.lock();
+        if let Some((at, usage)) = cache.get(&cache_key) {
+            if at.elapsed() < QUOTA_USAGE_TTL {
+                return Ok(usage.clone());
+            }
+        }
+    }
     let db = state.db.clone();
-    let id = id.to_string();
-    let window = window.map(str::to_string);
-    web::block(move || crate::db::api_key::usage_for_key(&db, &id, window.as_deref()))
+    let id_owned = id.to_string();
+    let window_owned = window.map(str::to_string);
+    let usage = web::block(move || crate::db::api_key::usage_for_key(&db, &id_owned, window_owned.as_deref()))
         .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    {
+        let mut cache = state.quota_usage_cache.lock();
+        // 简单容量兜底：Key 数量有限，但窗口组合可能变；超过阈值就整体清空
+        if cache.len() > 4096 {
+            cache.clear();
+        }
+        cache.insert(cache_key, (std::time::Instant::now(), usage.clone()));
+    }
+    Ok(usage)
 }
 
 /// 重放一条存过正文的请求：把当时的原始正文重新送进网关，路由、负载均衡、重试、
@@ -611,14 +764,16 @@ async fn reserve_credit(
 
 async fn release_credit(
     state: &Arc<ProxyState>,
-    reservation: CreditReservation,
+    reservation: &mut CreditReservation,
     request_id: &str,
     model_id: &str,
 ) {
+    // 显式释放已在处理，先解除 Drop 兜底，避免重复退费
+    reservation.confirm();
     let db = state.db.clone();
-    let platform_id = reservation.platform_id;
+    let platform_id = reservation.platform_id.clone();
     let price = reservation.price;
-    let window = reservation.window;
+    let window = reservation.window.clone();
     let request_id = request_id.to_string();
     let model_id = model_id.to_string();
     match web::block(move || {
@@ -732,6 +887,21 @@ async fn handle_request(
                 .find(|rb| rb.backend.id == selected.id)
                 .cloned()
                 .ok_or_else(|| AppError::Internal("Backend not found in cache".to_string()))?;
+            // 每后端并发闸门：配置了 max_concurrent 且已满时换下一个候选，
+            // 而不是把请求堆上去。没有配置上限的后端这里直接放行。
+            if !state.selector.try_acquire_slot(
+                &resolved_route.route_id,
+                &selected.id,
+                resolved.backend.max_concurrent,
+            ) {
+                candidates.retain(|b| b.id != selected.id);
+                if candidates.is_empty() {
+                    return Err(AppError::TooManyRequests(
+                        "所有可用后端的并发上限都已占满，请稍后重试".to_string(),
+                    ));
+                }
+                continue;
+            }
             let needs_reserve = resolved.platform.credit_budget.is_some()
                 && resolved.backend.effective_credit_price().unwrap_or(0.0) > 0.0;
             let reserve = if needs_reserve {
@@ -745,11 +915,14 @@ async fn handle_request(
                 crate::db::credit::CreditReserve::NotMetered => break (selected, resolved, None, None),
                 crate::db::credit::CreditReserve::Free => break (selected, resolved, Some(0.0), None),
                 crate::db::credit::CreditReserve::Reserved { charged } => {
-                    let reservation = CreditReservation {
-                        platform_id: resolved.platform.id.clone(),
-                        window: resolved.platform.credit_window.clone(),
-                        price: charged,
-                    };
+                    let reservation = CreditReservation::new(
+                        resolved.platform.id.clone(),
+                        resolved.platform.credit_window.clone(),
+                        charged,
+                        state.db.clone(),
+                        request_id.clone(),
+                        resolved.backend.model_id.clone(),
+                    );
                     break (selected, resolved, Some(charged), Some(reservation));
                 }
                 crate::db::credit::CreditReserve::Exhausted { .. } => {
@@ -761,7 +934,17 @@ async fn handle_request(
             }
         };
 
-        state.selector.inc_connection(&resolved_route.route_id, &backend.id);
+        // RAII 守卫覆盖 `build(...)?` 等早退路径：不会再用手工 inc/dec 配对漏计数
+        let _connection_guard = ConnectionGuard::new(
+            &state.selector,
+            &resolved_route.route_id,
+            &backend.id,
+        );
+        let _slot_guard = SlotGuard::new(
+            &state.selector,
+            &resolved_route.route_id,
+            &backend.id,
+        );
         let start = Instant::now();
         let started_at = chrono::Utc::now().to_rfc3339();
         let attempt_no = attempt as i64 + 1;
@@ -850,7 +1033,7 @@ async fn handle_request(
         // 在响应分支里判断——那里同时决定「透传 SSE」还是「聚合后再返回 JSON」。
 
         let result = req_builder.json(&forward_body).send().await;
-        state.selector.dec_connection(&resolved_route.route_id, &backend.id);
+        // 连接计数由 _connection_guard 的 Drop 统一递减，这里不再手工配对
         let latency_ms = start.elapsed().as_millis() as i64;
 
         match result {
@@ -860,6 +1043,10 @@ async fn handle_request(
                     .and_then(|v| v.to_str().ok()).map(str::to_string);
                 if status.is_success() {
                     // 拿到响应头即算本次尝试成功；积分预留到此确认，不再释放。
+                    // 显式 confirm 解除 Drop 兜底，否则成功响应也会被退费。
+                    if let Some(r) = reservation.as_mut() {
+                        r.confirm();
+                    }
                     state.stats_writer.record_attempt(make_attempt(
                         &request_id,
                         attempt_no,
@@ -1041,7 +1228,7 @@ async fn handle_request(
                     return Ok(HttpResponse::Ok().json(cr));
                 } else {
                     // 上游业务失败：先释放预留，再落尝试轨迹，最后判断是否重试
-                    if let Some(r) = reservation.take() {
+                    if let Some(r) = reservation.as_mut() {
                         release_credit(state, r, &request_id, &backend.model_id).await;
                     }
                     let eb = resp.text().await.unwrap_or_default();
@@ -1129,7 +1316,7 @@ async fn handle_request(
             }
             Err(e) => {
                 // 连接错误：先释放预留，再逐次记录轨迹；统计只在最终结果落一条
-                if let Some(r) = reservation.take() {
+                if let Some(r) = reservation.as_mut() {
                     release_credit(state, r, &request_id, &backend.model_id).await;
                 }
                 last_error = Some(format!("Connection: {}", e));
@@ -1271,7 +1458,12 @@ impl PassthroughTracker {
     }
 
     /// 观察一行 `data:` 的 payload（调用方已剥掉前缀并 trim）
-    fn observe(&mut self, payload: &str, usage: Option<(i64, i64, i64, i64)>) {
+    fn observe(
+        &mut self,
+        payload: &str,
+        usage: Option<(i64, i64, i64, i64)>,
+        parsed: Option<&serde_json::Value>,
+    ) {
         if let Some(u) = usage {
             // usage 是累计值，取最大即可（与 StreamStatCtx::absorb_usage 同口径）
             self.usage.0 = self.usage.0.max(u.0);
@@ -1283,7 +1475,7 @@ impl PassthroughTracker {
             self.saw_done = true;
             return;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+        let Some(v) = parsed else {
             return;
         };
         if self.anthropic {
@@ -1406,12 +1598,9 @@ impl PassthroughTracker {
     /// 判它是因为两个协议的客户端都在读到哨兵的那一刻收尾：
     /// OpenAI SDK 遇到 `[DONE]` 直接 break，Anthropic SDK 读到 message_stop 就返回累积结果。
     /// 补发的终止帧必须落在哨兵**之前**，否则永远读不到。
-    fn is_terminal_sentinel(&self, payload: &str) -> bool {
+    fn is_terminal_sentinel(&self, payload: &str, parsed: Option<&serde_json::Value>) -> bool {
         if self.anthropic {
-            if !payload.starts_with('{') {
-                return false;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+            let Some(v) = parsed else {
                 return false;
             };
             return v.get("type").and_then(|t| t.as_str()) == Some("message_stop");
@@ -1483,6 +1672,62 @@ impl Drop for StreamPassthroughBody {
         if let Some(capture) = &mut self.capture {
             capture.flush();
         }
+    }
+}
+
+/// 流式 chunk 之间的空闲上限：上游在这么长时间内一个字节都没给，就认为连接已经挂死。
+/// 与整条流的 stream_timeout_secs（默认 1800s）互补——后者管总时长，这个管「中途卡住」。
+const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
+
+/// 流式「空闲超时」包装：只要两个 chunk 之间超过 `idle` 就结束流并报错。
+/// 上游总超时是 1800s（整条流），但没有 chunk 间空闲上限时，一个每秒滴一字节的
+/// 上游能把连接、resp、1MB StreamCapture 和 actix 响应流占满 30 分钟 × N。
+struct IdleTimeoutStream<S> {
+    inner: std::pin::Pin<Box<S>>,
+    idle: std::time::Duration,
+    sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<S> IdleTimeoutStream<S> {
+    fn new(inner: S, idle: std::time::Duration) -> Self {
+        Self {
+            inner: Box::pin(inner),
+            idle,
+            sleep: None,
+        }
+    }
+}
+
+impl<S, T, E> futures_util::Stream for IdleTimeoutStream<S>
+where
+    S: futures_util::Stream<Item = Result<T, E>>,
+{
+    type Item = Result<T, E>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        use futures_util::Future;
+        use std::task::Poll;
+        // 先看上游有没有新 chunk：有就重置空闲计时器
+        match self.inner.as_mut().poll_next(cx) {
+            Poll::Ready(item) => {
+                self.sleep = None;
+                return Poll::Ready(item);
+            }
+            Poll::Pending => {}
+        }
+        // 没有新 chunk：检查空闲计时器
+        if self.sleep.is_none() {
+            self.sleep = Some(Box::pin(tokio::time::sleep(self.idle)));
+        }
+        let sleep = self.sleep.as_mut().expect("sleep just set");
+        if sleep.as_mut().poll(cx).is_ready() {
+            // 空闲超时：返回 None 让上层走正常的收尾/错误帧路径
+            return Poll::Ready(None);
+        }
+        Poll::Pending
     }
 }
 
@@ -1611,18 +1856,23 @@ impl Stream for StreamPassthroughBody {
                         let text = String::from_utf8_lossy(&rest).into_owned();
                         payload = text.trim().strip_prefix("data:").map(|s| s.trim().to_string());
                         if let Some(p) = &payload {
-                            let usage = extract_stream_usage(p);
+                            // 同一条残行只解析一次，usage 提取与 tracker 复用同一份 Value
+                            let parsed: Option<serde_json::Value> = serde_json::from_str(p).ok();
+                            let usage = parsed.as_ref().and_then(usage_from_value);
                             if let Some((pi, po, cr, cw)) = usage {
                                 self.stats.absorb_usage(pi, po, cr, cw);
                             }
-                            self.tracker.observe(p, usage);
+                            self.tracker.observe(p, usage, parsed.as_ref());
                         }
                     }
                     // 残留那一行本身就是终止哨兵（`[DONE]` / message_stop）时，
                     // 补的只能是它前面缺的终止帧——哨兵由这一行自己充当，不能再补一份。
                     let rest_is_sentinel = payload
                         .as_deref()
-                        .map(|p| self.tracker.is_terminal_sentinel(p))
+                        .map(|p| {
+                            let parsed: Option<serde_json::Value> = serde_json::from_str(p).ok();
+                            self.tracker.is_terminal_sentinel(p, parsed.as_ref())
+                        })
                         .unwrap_or(false);
                     let add = if rest_is_sentinel {
                         self.tracker.finish_only()
@@ -1673,25 +1923,33 @@ impl Stream for StreamPassthroughBody {
                     // 按行转发是必须的：只有落在事件边界上，才有机会把补发的终止帧
                     // 插在 `[DONE]` 之前（否则 `[DONE]` 被 TCP 切成两段时会漏判）。
                     let mut out = Vec::with_capacity(bytes.len());
-                    while let Some(pos) = self.buffer.iter().position(|&b| b == b'\n') {
-                        let line: Vec<u8> = self.buffer.drain(..=pos).collect();
-                        let text = String::from_utf8_lossy(&line).into_owned();
+                    // 游标式切行：每行不再 `drain(..=pos)`（那会把剩余字节整体左移，
+                    // 单 chunk 含 K 行就是 O(K×chunk) 搬移）。扫到哪算到哪，
+                    // 循环结束后一次性 drain 掉已消费的前缀。
+                    let mut consumed = 0usize;
+                    while let Some(rel) = self.buffer[consumed..].iter().position(|&b| b == b'\n') {
+                        let line_start = consumed;
+                        let line_end = consumed + rel + 1;
+                        consumed = line_end;
+                        let text = String::from_utf8_lossy(&self.buffer[line_start..line_end]).into_owned();
                         let payload = match text.trim().strip_prefix("data:") {
                             Some(rest) => rest.trim().to_string(),
                             None => {
-                                out.extend_from_slice(&line);
+                                out.extend_from_slice(&self.buffer[line_start..line_end]);
                                 continue;
                             }
                         };
-                        let usage = extract_stream_usage(&payload);
+                        // 同一条 data: 行只解析一次：usage 提取与 tracker 共用这份 Value
+                        let parsed: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
+                        let usage = parsed.as_ref().and_then(usage_from_value);
                         if let Some((p, c, cr, cw)) = usage {
                             self.stats.absorb_usage(p, c, cr, cw);
                         }
                         // 补帧必须在哨兵之前：OpenAI SDK 读到 `[DONE]`、Anthropic SDK
                         // 读到 message_stop 都会立刻收尾，补在它们后面的终止帧永远读不到，
                         // 客户端照样报 Stream ended without finish_reason。
-                        if self.tracker.is_terminal_sentinel(&payload) && !self.tracker.saw_finish_reason {
-                            self.tracker.observe(&payload, usage);
+                        if self.tracker.is_terminal_sentinel(&payload, parsed.as_ref()) && !self.tracker.saw_finish_reason {
+                            self.tracker.observe(&payload, usage, parsed.as_ref());
                             let chunk = self.tracker.finish_only();
                             tracing::warn!(
                                 "上游流给了终止哨兵却没给 {}，已在哨兵之前补发终止帧",
@@ -1703,11 +1961,15 @@ impl Stream for StreamPassthroughBody {
                                 capture.push(chunk.as_bytes());
                             }
                             self.tracker.backfilled = true;
-                            out.extend_from_slice(&line);
+                            out.extend_from_slice(&self.buffer[line_start..line_end]);
                             continue;
                         }
-                        self.tracker.observe(&payload, usage);
-                        out.extend_from_slice(&line);
+                        self.tracker.observe(&payload, usage, parsed.as_ref());
+                        out.extend_from_slice(&self.buffer[line_start..line_end]);
+                    }
+                    // 一次性丢掉已消费的行前缀，保留未完成的半行
+                    if consumed > 0 {
+                        self.buffer.drain(..consumed);
                     }
                     if out.is_empty() {
                         // 整个 chunk 都是半行：不转发，继续拉上游
@@ -1783,7 +2045,10 @@ fn handle_stream(
 
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
     let body = StreamPassthroughBody {
-        inner: Box::pin(resp.bytes_stream()),
+        inner: Box::pin(IdleTimeoutStream::new(
+            resp.bytes_stream(),
+            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
+        )),
         buffer: Vec::new(),
         stats,
         capture,
@@ -1888,7 +2153,10 @@ fn handle_stream_convert(
 ) -> HttpResponse {
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
     let body = StreamConvertBody {
-        inner: Box::pin(resp.bytes_stream()),
+        inner: Box::pin(IdleTimeoutStream::new(
+            resp.bytes_stream(),
+            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
+        )),
         converter: crate::proxy::stream_convert::StreamConverter::new(
             client_anthropic,
             model,
@@ -2201,7 +2469,10 @@ fn handle_private_stream(
         None
     };
     let body = PrivateStreamBody {
-        inner: Box::pin(resp.bytes_stream()),
+        inner: Box::pin(IdleTimeoutStream::new(
+            resp.bytes_stream(),
+            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
+        )),
         normalizer: crate::proxy::upstream::private_sse::PrivateSseNormalizer::new(kind, model),
         converter,
         stats,
@@ -2340,9 +2611,15 @@ async fn handle_private_aggregate(
 /// 返回 (input, output, cache_read, cache_write)。
 /// 支持 OpenAI 风格（chunk 里的 usage.prompt_tokens/completion_tokens）
 /// 和 Anthropic 风格（message_start 的 input_tokens / message_delta 的 output_tokens）。
+#[allow(dead_code)]
 fn extract_stream_usage(payload: &str) -> Option<(i64, i64, i64, i64)> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    usage_from_value(&v)
+}
 
+/// 与 extract_stream_usage 同一口径，但复用调用方已经解析好的 Value：
+/// 同一条 SSE 行曾经被 usage 提取与 tracker 各解析一次。
+fn usage_from_value(v: &serde_json::Value) -> Option<(i64, i64, i64, i64)> {
     // OpenAI 风格：chunk 顶层带 usage
     if let Some(u) = v.get("usage").and_then(|u| u.as_object()) {
         let p = u.get("prompt_tokens").and_then(|x| x.as_i64()).unwrap_or(0);
@@ -2427,8 +2704,9 @@ mod tests {
     fn feed(anthropic: bool, payloads: &[&str]) -> (PassthroughTracker, String) {
         let mut t = PassthroughTracker::new(anthropic);
         for p in payloads {
-            let usage = super::extract_stream_usage(p);
-            t.observe(p, usage);
+            let parsed: Option<serde_json::Value> = serde_json::from_str(p).ok();
+            let usage = parsed.as_ref().and_then(super::usage_from_value);
+            t.observe(p, usage, parsed.as_ref());
         }
         let tail = t.backfill();
         (t, tail)
@@ -2559,7 +2837,8 @@ mod tests {
     #[test]
     fn backfill_happens_only_once() {
         let mut t = PassthroughTracker::new(false);
-        t.observe(r#"{"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}"#, None);
+        let v = serde_json::json!({"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]});
+        t.observe(&v.to_string(), None, Some(&v));
         let first = t.backfill();
         assert!(!first.is_empty());
         assert!(t.backfill().is_empty(), "第二次不该再补帧");
@@ -2570,7 +2849,8 @@ mod tests {
         // 上游报错那条路：错误帧之后必须还有完整的终止序列，否则
         // 客户端只会看到半条流并报 Stream ended without finish_reason
         let mut t = PassthroughTracker::new(false);
-        t.observe(r#"{"id":"a","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}"#, None);
+        let v = serde_json::json!({"id":"a","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]});
+        t.observe(&v.to_string(), None, Some(&v));
         let _ = t.backfill();
         t.backfilled = true;
         let tail = t.error_tail();

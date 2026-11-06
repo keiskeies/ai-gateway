@@ -1,4 +1,4 @@
-﻿//! 跨协议流式转换器：上游 SSE 事件流 → 客户端协议事件流（逐事件实时转换）
+//! 跨协议流式转换器：上游 SSE 事件流 → 客户端协议事件流（逐事件实时转换）
 //!
 //! - Anthropic 上游 → OpenAI 客户端（/v1/chat/completions 入口 + anthropic 平台 backend）
 //! - OpenAI 上游 → Anthropic 客户端（/v1/messages 入口 + openai 兼容平台 backend）
@@ -112,7 +112,8 @@ impl StreamConverter {
             let line: String = self.line_buf.drain(..=nl).collect();
             self.process_line(line.trim_end_matches(['\r', '\n']));
         }
-        self.out.clone()
+        // mem::take 交出所有权：每 chunk clone 整段累积输出是 O(chunk × 行数) 的浪费
+        std::mem::take(&mut self.out)
     }
 
     /// 上游流结束：补发收尾事件（若上游未正常收尾）并返回剩余输出
@@ -140,7 +141,7 @@ impl StreamConverter {
             }
             self.finished = true;
         }
-        self.out.clone()
+        std::mem::take(&mut self.out)
     }
 
     /// 上游未发 content_block_stop 时兜底收尾当前 thinking 块
@@ -186,7 +187,7 @@ impl StreamConverter {
             }
             self.finished = true;
         }
-        self.out.clone()
+        std::mem::take(&mut self.out)
     }
 
     pub fn usage(&self) -> (i64, i64, i64, i64) {

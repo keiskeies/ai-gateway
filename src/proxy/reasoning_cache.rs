@@ -96,24 +96,41 @@ pub fn cache_assistant_message(
     store(&ids, &msg.reasoning_blocks, backend_id, model_id);
 }
 
+/// 淘汰只在 store 触发。旧实现是 `retain` 之后每删一条都全表 `min_by_key`：
+/// 满 4096 且都未过期时单次 store 最坏 O(N²)≈1.6e7 次迭代，并且
+/// `retain/iter` 会锁住 DashMap 全部分片，令所有工具循环请求一起停顿。
+/// 这里改成「一次遍历收集 + 一次排序 + 按需删除」，仍是 O(N log N)，且只有一轮全分片锁。
 fn evict_if_needed() {
     if CACHE.len() < MAX_ENTRIES {
         return;
     }
     let now = Instant::now();
-    CACHE.retain(|_, entry| now.duration_since(entry.inserted_at) <= TTL);
-    while CACHE.len() >= MAX_ENTRIES {
-        let oldest = CACHE
-            .iter()
-            .min_by_key(|entry| entry.value().inserted_at)
-            .map(|entry| entry.key().clone());
-        match oldest {
-            Some(key) => {
-                CACHE.remove(&key);
-            }
-            None => break,
+    // 一次遍历同时清过期 + 收集存活项的插入时间（避免 retain 之后再全表扫）
+    let mut alive: Vec<(String, Instant)> = Vec::with_capacity(CACHE.len());
+    CACHE.retain(|key, entry| {
+        if now.duration_since(entry.inserted_at) > TTL {
+            return false;
         }
+        alive.push((key.clone(), entry.inserted_at));
+        true
+    });
+    if alive.len() < MAX_ENTRIES {
+        return;
     }
+    // 按插入时间升序，只删超出容量的最旧部分
+    alive.sort_unstable_by_key(|(_, inserted_at)| *inserted_at);
+    let excess = alive.len() - MAX_ENTRIES + 1;
+    for (key, _) in alive.into_iter().take(excess) {
+        CACHE.remove(&key);
+    }
+}
+
+/// 后台定时清理过期项：不可达的 tool_id 永远等不到 lookup，
+/// 只能靠 store 触发 retain，满容量后每次 store 都要付淘汰成本。
+/// 这里由调用方（或定期任务）调用，摊销掉。
+pub fn sweep_expired() {
+    let now = Instant::now();
+    CACHE.retain(|_, entry| now.duration_since(entry.inserted_at) <= TTL);
 }
 
 #[cfg(test)]

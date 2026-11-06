@@ -207,26 +207,47 @@ pub fn try_reserve(
     let now = chrono::Utc::now().to_rfc3339();
 
     let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    // 单条原子 UPDATE 完成「读余额 → 判是否够 → 扣减」：
+    // 曾经是 BEGIN IMMEDIATE 事务里的 SELECT + UPDATE + INSERT 三步，N 个并发请求
+    // 全部串行在同一把 SQLite 写锁上。这里把 read-modify-write 压成一次带条件的 UPDATE，
+    // 写锁持有时间从「三条语句 + 事务开销」缩到一条语句。
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let (stored_period, mut spent, mut anchor) = ensure_state(&tx, platform_id, &period, &now)?;
+    // 确保状态行存在（周期首次访问）
+    tx.execute(
+        "INSERT OR IGNORE INTO platform_credit_state (platform_id, period_start, spent, updated_at)
+         VALUES (?1, ?2, 0, ?3)",
+        rusqlite::params![platform_id, period, now],
+    )?;
+    // 跨自然窗口：上一窗口的余额快照作废，退回配置预算
+    let stored_period: String = tx.query_row(
+        "SELECT period_start FROM platform_credit_state WHERE platform_id = ?1",
+        [platform_id],
+        |r| r.get(0),
+    )?;
     if stored_period != period {
-        // 跨自然窗口：上一窗口的余额快照已经作废，退回配置的预算
-        spent = 0.0;
-        anchor = None;
         tx.execute(
             "UPDATE platform_credit_state SET period_start = ?2, spent = 0, anchor = NULL, updated_at = ?3 WHERE platform_id = ?1",
             rusqlite::params![platform_id, period, now],
         )?;
     }
-    let total = total_budget(anchor, budget);
-    if spent + price > total + f64::EPSILON {
-        // 事务在这里直接由 drop 回滚；上一句的归零也不落库，下一次仍会重试。
+    // 原子扣减：只有余额够时才 +price。anchor 为空时退回配置预算。
+    let charged = tx.execute(
+        "UPDATE platform_credit_state
+         SET spent = spent + ?2, updated_at = ?3
+         WHERE platform_id = ?1
+           AND spent + ?2 <= COALESCE(anchor, ?4) + ?5",
+        rusqlite::params![platform_id, price, now, budget, f64::EPSILON],
+    )?;
+    if charged == 0 {
+        // 余额不足：读回当前值给调用方拼提示（不扣费）
+        let (spent, anchor): (f64, Option<f64>) = tx.query_row(
+            "SELECT spent, anchor FROM platform_credit_state WHERE platform_id = ?1",
+            [platform_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let total = total_budget(anchor, budget);
         return Ok(CreditReserve::Exhausted { spent, budget: total });
     }
-    tx.execute(
-        "UPDATE platform_credit_state SET spent = ?2, updated_at = ?3 WHERE platform_id = ?1",
-        rusqlite::params![platform_id, spent + price, now],
-    )?;
     insert_ledger(&tx, platform_id, Some(request_id), Some(model_id), price, "charge", None, &now)?;
     tx.commit()?;
     Ok(CreditReserve::Reserved { charged: price })

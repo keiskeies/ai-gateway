@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 34;
+pub const CURRENT_SCHEMA_VERSION: i64 = 35;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -316,6 +316,22 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         )?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 34)", [])?;
         tracing::info!("Database migrated to V34 (platform_credit_state.anchor)");
+    }
+
+    if current_version < 35 {
+        // 补几个高并发下真正被用到的索引（全部 IF NOT EXISTS，可安全重跑）：
+        // - request_stats(api_key_id, created_at)：配额闸门每请求一次窗口聚合
+        // - request_stats(backend_id, created_at)：后端/平台维度的时序聚合
+        // - platform_credit_ledger(created_at)：ledger 按时间清理（原索引只有 platform_id 前缀）
+        // - request_attempts(request_id)：轨迹与明细按 request_id 关联/清理
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_stats_api_key_created ON request_stats(api_key_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_stats_backend_created ON request_stats(backend_id, created_at);
+             CREATE INDEX IF NOT EXISTS idx_credit_ledger_created ON platform_credit_ledger(created_at);
+             CREATE INDEX IF NOT EXISTS idx_request_attempts_request_id ON request_attempts(request_id);",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 35)", [])?;
+        tracing::info!("Database migrated to V35 (concurrency indexes for stats/credit)");
     }
 
     Ok(())

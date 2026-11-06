@@ -589,6 +589,74 @@ pub fn record_attempt(pool: &DbPool, attempt: &RequestAttempt) -> AppResult<()> 
     Ok(())
 }
 
+/// 一批统计在**一个事务**里落库：五张表各一次 prepare，逐行 execute。
+/// 曾经逐行 `record()` 每次都 `pool.get()` + 隐式事务（WAL 下每条一次 fsync），
+/// N 并发时 SQLite 单写锁被 N 次提交打满，慢下来还会静默丢数据。
+/// 调用方（StatsWriter）已经把整批数据搬到 blocking 线程池，这里是纯同步 SQL。
+pub fn record_batch(
+    pool: &DbPool,
+    stats: &[RequestStat],
+    attempts: &[RequestAttempt],
+    bodies: &[RequestBody],
+    headers: &[crate::models::stats::RequestHeaders],
+    responses: &[ResponseBody],
+) -> AppResult<()> {
+    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, cache_savings, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        )?;
+        for s in stats {
+            stmt.execute(rusqlite::params![s.proxy_id, s.route_id, s.backend_id, s.status_code,
+                s.latency_ms, s.token_input, s.token_output, s.error_type, s.created_at,
+                s.ttft_ms, s.cache_read_tokens, s.cache_write_tokens, s.is_stream as i64,
+                s.api_key_id, s.cost, s.cache_savings, s.request_id, s.replayed_from,
+                s.path, s.credits])?;
+        }
+    }
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at, forward_url, nonce)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        )?;
+        for a in attempts {
+            stmt.execute(rusqlite::params![
+                a.request_id, a.attempt_no, a.backend_id, a.platform_id,
+                a.model_id, a.status_code, a.error_type, a.error_message,
+                a.latency_ms, a.started_at, a.forward_url, a.nonce
+            ])?;
+        }
+    }
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR REPLACE INTO request_bodies (request_id, protocol, body, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        )?;
+        for b in bodies {
+            stmt.execute(rusqlite::params![b.request_id, b.protocol, b.body, b.bytes, b.truncated as i64, b.created_at])?;
+        }
+    }
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR REPLACE INTO request_headers (request_id, headers, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5)",
+        )?;
+        for h in headers {
+            stmt.execute(rusqlite::params![h.request_id, h.headers, h.bytes, h.truncated as i64, h.created_at])?;
+        }
+    }
+    {
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR REPLACE INTO response_bodies (request_id, protocol, status_code, content_type, body, bytes, truncated, created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        )?;
+        for r in responses {
+            stmt.execute(rusqlite::params![r.request_id, r.protocol, r.status_code, r.content_type,
+                r.body, r.bytes, r.truncated as i64, r.created_at])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 const ATTEMPT_COLS: &str = "a.id, a.request_id, a.attempt_no, a.backend_id, a.platform_id, a.model_id, a.status_code, a.error_type, a.error_message, a.latency_ms, a.started_at, a.forward_url, p.name, a.nonce";
 const ATTEMPT_FROM: &str = "FROM request_attempts a LEFT JOIN platforms p ON p.id = a.platform_id";
 
@@ -1261,17 +1329,22 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
     let cutoff = (chrono::Utc::now() - chrono::Duration::days(days))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
 
+    // 五条 DELETE 放进同一个事务：既避免中途失败留下「明细删了、正文没删」的
+    // 不一致状态，也让 SQLite 只取一次写锁。逐条 autocommit 时，每条大 DELETE
+    // 都会持写锁一段时间，StatsWriter 的批量写会被 busy_timeout 卡住甚至丢数据。
+    let tx = conn.unchecked_transaction()?;
+
     // 先删轨迹再删明细：明细行一旦消失，"哪些轨迹属于它"就查不回来了。
     // 轨迹行按 `started_at` 存时间，但归属是那条明细行，所以按所属明细行的年龄判定。
     let attempts: i64 = if dry_run {
-        conn.query_row(
+        tx.query_row(
             "SELECT COUNT(*) FROM request_attempts a
              WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = a.request_id AND s.created_at <= ?)",
             rusqlite::params![cutoff],
             |row| row.get(0),
         )?
     } else {
-        conn.execute(
+        tx.execute(
             "DELETE FROM request_attempts
              WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
             rusqlite::params![cutoff],
@@ -1283,14 +1356,14 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
     // 明细行一旦消失，"哪些正文属于这批过期请求"就查不回来了。它比轨迹更该跟着走：
     // 那是用户的提示词，明细都过期了还留着正文，保留期就形同虚设。
     let bodies: i64 = if dry_run {
-        conn.query_row(
+        tx.query_row(
             "SELECT COUNT(*) FROM request_bodies b
              WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = b.request_id AND s.created_at <= ?)",
             rusqlite::params![cutoff],
             |row| row.get(0),
         )?
     } else {
-        conn.execute(
+        tx.execute(
             "DELETE FROM request_bodies
              WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
             rusqlite::params![cutoff],
@@ -1299,14 +1372,14 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
         .unwrap_or(0)
     };
     let headers: i64 = if dry_run {
-        conn.query_row(
+        tx.query_row(
             "SELECT COUNT(*) FROM request_headers h
              WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = h.request_id AND s.created_at <= ?)",
             rusqlite::params![cutoff],
             |row| row.get(0),
         )?
     } else {
-        conn.execute(
+        tx.execute(
             "DELETE FROM request_headers
              WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
             rusqlite::params![cutoff],
@@ -1315,14 +1388,14 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
         .unwrap_or(0)
     };
     let responses: i64 = if dry_run {
-        conn.query_row(
+        tx.query_row(
             "SELECT COUNT(*) FROM response_bodies r
              WHERE EXISTS (SELECT 1 FROM request_stats s WHERE s.request_id = r.request_id AND s.created_at <= ?)",
             rusqlite::params![cutoff],
             |row| row.get(0),
         )?
     } else {
-        conn.execute(
+        tx.execute(
             "DELETE FROM response_bodies
              WHERE request_id IN (SELECT request_id FROM request_stats WHERE request_id IS NOT NULL AND created_at <= ?)",
             rusqlite::params![cutoff],
@@ -1331,18 +1404,19 @@ pub fn purge_older_than(pool: &DbPool, days: i64, dry_run: bool) -> AppResult<St
         .unwrap_or(0)
     };
     let rows: i64 = if dry_run {
-        conn.query_row(
+        tx.query_row(
             "SELECT COUNT(*) FROM request_stats WHERE created_at <= ?",
             rusqlite::params![cutoff],
             |row| row.get(0),
         )?
     } else {
-        conn.execute("DELETE FROM request_stats WHERE created_at <= ?", rusqlite::params![cutoff])?
+        tx.execute("DELETE FROM request_stats WHERE created_at <= ?", rusqlite::params![cutoff])?
             .try_into()
             .unwrap_or(0)
     };
 
     if !dry_run {
+        tx.commit()?;
         tracing::info!(
             "Stats purge: removed {} request_stats row(s), {} attempt row(s), {} body row(s), {} header row(s), {} response row(s) older than {}",
             rows,

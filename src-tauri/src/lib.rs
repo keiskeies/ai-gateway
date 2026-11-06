@@ -51,20 +51,25 @@ pub fn run() {
                 start_backend_server(backend_handle);
             });
 
-            // Wait for backend to be ready (up to 15 seconds)
-            let mut waited = 0u64;
-            while !BACKEND_READY.load(Ordering::Relaxed) && waited < 150 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                waited += 1;
-            }
-
-            let port = BACKEND_PORT.load(Ordering::Relaxed);
-            if port == 0 {
-                tracing::error!("Backend server failed to start in time!");
-                return Ok(());
-            }
-
+            // 不在 UI 线程忙等：.setup() 跑在主/UI 线程上，曾经 sleep 轮询最多 15s，
+            // 窗口创建被推迟、界面表现为卡死。这里先建窗口，等后端就绪后由后台线程
+            // 投递一次「打开主窗口」，前端在窗口里重试即可。
             open_main_window(app.handle());
+
+            let ready_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut waited = 0u64;
+                while !BACKEND_READY.load(Ordering::Acquire) && waited < 300 {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    waited += 1;
+                }
+                if BACKEND_PORT.load(Ordering::Acquire) == 0 {
+                    tracing::error!("Backend server failed to start in time!");
+                    return;
+                }
+                // 后端真正就绪后再确保窗口指向正确端口（首次建窗可能落在未就绪的地址）
+                open_main_window(&ready_handle);
+            });
 
             Ok(())
         })
@@ -310,10 +315,13 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = app.handle().clone();
     let quit = app.handle().clone();
 
-    // 启动时构建一次菜单，避免在事件回调中动态 set_menu 导致菜单闪烁消失
-    let menu = build_tray_menu_items(app.handle());
+    // 启动时先用「只有 Show / Quit」的轻量菜单建托盘，避免在 UI 线程上
+    // init_pool（8 连接 + 跑迁移）再逐 proxy 跑统计 SQL —— 那是启动卡顿的来源。
+    // 统计项随后在后台线程算好，再 set_menu 一次（托盘只在启动时建一次菜单，
+    // 之后 set_menu 不会像事件回调里那样闪烁消失）。
+    let menu = build_tray_menu_items(app.handle(), &[]);
 
-    TrayIconBuilder::new()
+    let tray = TrayIconBuilder::new()
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("AI Gateway")
         .menu(&menu)
@@ -344,21 +352,47 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         })
         .build(app)?;
 
+    // 托盘统计项在后台算：单连接读、不建池、不跑迁移，算完把菜单整体 set 一次。
+    // UI 线程不再被 DB 查询占住。菜单对象只在主线程上构建（set_menu 走主线程投递）。
+    let refresh_handle = app.handle().clone();
+    let tray_for_refresh = tray.clone();
+    std::thread::spawn(move || {
+        let entries = compute_tray_entries();
+        if entries.is_empty() {
+            return;
+        }
+        let handle = refresh_handle.clone();
+        let menu_handle = refresh_handle.clone();
+        let tray = tray_for_refresh.clone();
+        let _ = handle.run_on_main_thread(move || {
+            let menu = build_tray_menu_items(&menu_handle, &entries);
+            let _ = tray.set_menu(Some(menu));
+        });
+    });
+
     Ok(())
 }
 
-fn build_tray_menu_items(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry> {
+/// 后台线程计算托盘菜单里的「模型名 + token 数」。
+/// 用单连接读，不调用 init_pool —— 后者会建 8 连接池并跑一遍迁移。
+fn compute_tray_entries() -> Vec<(String, String)> {
+    let app_config = ai_gateway::config::AppConfig::load_or_default();
+    match ai_gateway::db::tray_menu_entries(&app_config.resolved_db_path()) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("托盘菜单读取统计失败: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// 构建托盘菜单。`entries` 是后台线程预先算好的「模型名 + token 数」，
+/// 空则只有 Show / Quit —— 菜单数据不再在 UI 线程上查库。
+fn build_tray_menu_items(
+    app: &tauri::AppHandle,
+    entries: &[(String, String)],
+) -> tauri::menu::Menu<tauri::Wry> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
-
-    let db_path = {
-        let app_config = ai_gateway::config::AppConfig::load_or_default();
-        app_config.resolved_db_path()
-    };
-
-    let db_pool = ai_gateway::db::init_pool(&db_path).expect("Failed to init DB for tray menu");
-
-    // Get proxies for tray menu - show token stats instead of toggle
-    let proxies = ai_gateway::db::proxy::list(&db_pool).unwrap_or_default();
 
     let mut menu = MenuBuilder::new(app);
 
@@ -371,22 +405,8 @@ fn build_tray_menu_items(app: &tauri::AppHandle) -> tauri::menu::Menu<tauri::Wry
     menu = menu.item(&sep1);
 
     // Add virtual model token stats items
-    for proxy in &proxies {
-        // Get token stats for this proxy（托盘菜单固定展示全量口径，不做时段过滤）
-        let token_stats = ai_gateway::db::stats::proxy_stats(&db_pool, &proxy.id, None, None).ok();
-        let total_tokens = token_stats
-            .as_ref()
-            .map(|s| s.total_token_input + s.total_token_output)
-            .unwrap_or(0);
-        let token_str = if total_tokens >= 1_000_000 {
-            format!("{:.1}M", total_tokens as f64 / 1_000_000.0)
-        } else if total_tokens >= 1_000 {
-            format!("{:.1}K", total_tokens as f64 / 1_000.0)
-        } else {
-            total_tokens.to_string()
-        };
-        let label = format!("{}  Tokens: {}", proxy.name, token_str);
-        let item = MenuItemBuilder::with_id(format!("proxy_info_{}", proxy.id), label)
+    for (id, label) in entries {
+        let item = MenuItemBuilder::with_id(format!("proxy_info_{}", id), label.clone())
             .enabled(false)
             .build(app)
             .expect("Failed to build proxy menu item");
@@ -481,6 +501,7 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
             http_client,
             cache,
             stats_writer,
+            quota_usage_cache: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         });
 
         let static_dir = app_config.static_dir();
