@@ -7,10 +7,16 @@ use crate::db::DbPool;
 ///
 /// 刻意不放进请求链路：清理是后台的整表操作，失败只影响“旧数据还在”，
 /// 不影响任何转发。每轮检查配置，用户关掉开关后下一轮就停。
-/// 启动时先跑一次，之后每小时看一眼，同一自然日只真正执行一次。
+/// 每小时看一眼，同一自然日只真正执行一次。
+///
+/// 启动后刻意先等 5 分钟再跑第一轮：清理是大 DELETE，启动那一刻正好是
+/// 「应用刚起来、用户开始点页面、第一波代理请求进来」的时候，此时抢 SQLite
+/// 写锁最容易把 StatsWriter 的批量写和积分预留卡住。
 pub fn spawn_auto_purge(db: DbPool, config: SharedAppConfig) {
     std::thread::spawn(move || {
         let mut last_run_day: Option<String> = None;
+        // 启动后让出写锁，给首波流量与统计落库留出窗口
+        std::thread::sleep(Duration::from_secs(300));
         loop {
             let days = config.read().defaults.auto_purge_days;
             if days >= 30 {

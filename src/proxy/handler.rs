@@ -934,12 +934,14 @@ async fn handle_request(
             }
         };
 
-        // RAII 守卫覆盖 `build(...)?` 等早退路径：不会再用手工 inc/dec 配对漏计数
-        let _connection_guard = ConnectionGuard::new(
+        // RAII 守卫覆盖 `build(...)?` 等早退路径：不会再用手工 inc/dec 配对漏计数。
+        // 流式响应会把它 move 进 StreamStatCtx，让计数覆盖整条流的生命周期；
+        // 非流式路径则在本轮迭代结束时由 Drop 递减。
+        let mut connection_guard = Some(ConnectionGuard::new(
             &state.selector,
             &resolved_route.route_id,
             &backend.id,
-        );
+        ));
         let _slot_guard = SlotGuard::new(
             &state.selector,
             &resolved_route.route_id,
@@ -1130,15 +1132,16 @@ async fn handle_request(
                                 start,
                                 pricing_at,
                                 capture,
+                                connection_guard.take(),
                             ));
                         }
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, start, pricing_at, capture));
+                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, start, pricing_at, capture, connection_guard.take()));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
                             if upstream_anthropic { "anthropic" } else { "openai" });
-                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture));
+                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture, connection_guard.take()));
                     }
                     // 走到这里说明是标准协议（私有协议已在上面 `is_stream || private_protocol`
                     // 分支里全部处理完，因为它们的 always_sse 恒为 true）。
@@ -1780,6 +1783,11 @@ where
 /// 流式统计的共享上下文：token 累积 + 首字时长 + 恰好一次写入
 struct StreamStatCtx {
     base: RequestStat,
+    /// 连接计数守卫：随 StreamStatCtx（Arc 共享、与流 body 同寿命）一起 drop，
+    /// 让「活跃连接」覆盖整条流的生命周期，而不是只覆盖等响应头的那段。
+    /// 字段本身不读取，只靠 Drop 生效。
+    #[allow(dead_code)]
+    conn_guard: Option<ConnectionGuard>,
     /// 发出请求的时刻（用于计算首字时长）
     start: Instant,
     /// 首字时长：收到上游第一个 chunk 时写入（0 表示尚未到达）
@@ -1804,9 +1812,11 @@ impl StreamStatCtx {
         start: Instant,
         pricing: Option<crate::models::pricing::Pricing>,
         pricing_at: chrono::DateTime<chrono::Local>,
+        conn_guard: Option<ConnectionGuard>,
     ) -> Self {
         Self {
             base,
+            conn_guard,
             start,
             first_token_ms: std::sync::atomic::AtomicI64::new(0),
             token_in: std::sync::atomic::AtomicI64::new(0),
@@ -2096,6 +2106,7 @@ fn handle_stream(
     start: Instant,
     pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
+    conn_guard: Option<ConnectionGuard>,
 ) -> HttpResponse {
     let s = resp.status();
     if !s.is_success() {
@@ -2111,7 +2122,7 @@ fn handle_stream(
         .body("upstream stream error");
     }
 
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, None));
     let body = StreamPassthroughBody {
         inner: Box::pin(IdleTimeoutStream::new(
             resp.bytes_stream(),
@@ -2218,8 +2229,9 @@ fn handle_stream_convert(
     start: Instant,
     pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
+    conn_guard: Option<ConnectionGuard>,
 ) -> HttpResponse {
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, conn_guard));
     let body = StreamConvertBody {
         inner: Box::pin(IdleTimeoutStream::new(
             resp.bytes_stream(),
@@ -2524,8 +2536,9 @@ fn handle_private_stream(
     start: Instant,
     pricing_at: chrono::DateTime<chrono::Local>,
     capture: Option<StreamCapture>,
+    conn_guard: Option<ConnectionGuard>,
 ) -> HttpResponse {
-    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at));
+    let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, conn_guard));
     let converter = if client_anthropic {
         Some(crate::proxy::stream_convert::StreamConverter::new(
             true,
@@ -2990,6 +3003,7 @@ mod tests {
             std::time::Instant::now(),
             None,
             chrono::Local::now(),
+            None,
         ));
         let body = super::StreamPassthroughBody {
             inner: Box::pin(futures_util::stream::iter(chunks)),
