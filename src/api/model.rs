@@ -146,7 +146,7 @@ pub async fn create(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, bo
     let db = db.into_inner();
     let model = web::block(move || crate::db::model::create(&db, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Created().json(model))
 }
 
@@ -158,7 +158,7 @@ pub async fn update(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, pa
     let db = db.into_inner();
     let model = web::block(move || crate::db::model::update(&db, &id, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(model))
 }
 
@@ -167,6 +167,6 @@ pub async fn delete(db: web::Data<DbPool>, cache: web::Data<Arc<RouteCache>>, pa
     let db = db.into_inner();
     web::block(move || crate::db::model::delete(&db, &id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }

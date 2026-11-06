@@ -1142,7 +1142,10 @@ async fn handle_request(
                     }
                     // 走到这里说明是标准协议（私有协议已在上面 `is_stream || private_protocol`
                     // 分支里全部处理完，因为它们的 always_sse 恒为 true）。
-                    let body = resp.bytes().await.map_err(|e| AppError::Internal(e.to_string()))?;
+                    // 非流式响应体有上限：上游返回巨量正文时不能整段读进内存（N 并发放大）
+                    let body = read_bounded_body(resp, MAX_UPSTREAM_RESPONSE_BYTES)
+                        .await
+                        .map_err(|e| AppError::Internal(e.to_string()))?;
                     capture_response_body(
                         state,
                         &request_id,
@@ -1231,7 +1234,11 @@ async fn handle_request(
                     if let Some(r) = reservation.as_mut() {
                         release_credit(state, r, &request_id, &backend.model_id).await;
                     }
-                    let eb = resp.text().await.unwrap_or_default();
+                    // 错误体同样限长：正常错误只有几十字节，异常上游可能回一整页 HTML
+                    let eb = read_bounded_body(resp, MAX_UPSTREAM_ERROR_BYTES)
+                        .await
+                        .map(|b| String::from_utf8_lossy(&b).into_owned())
+                        .unwrap_or_default();
                     // 错误分类：私有协议要按上游业务码判（Trae 4008/4010/4015、
                     // WorkBuddy 14018 等），标准协议按 HTTP 状态码判。
                     // 这一步决定「换号 / 冷却 / 直接失败」，走错桶会让单账号封禁
@@ -1673,6 +1680,42 @@ impl Drop for StreamPassthroughBody {
             capture.flush();
         }
     }
+}
+
+/// 非流式响应体上限（与正文采集上限分开：采集是存不存，这里是读不读得进来）。
+/// 正常 JSON 响应远小于此；超出说明上游异常，宁可报错也不让 N 并发放大成 OOM。
+const MAX_UPSTREAM_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+/// 错误响应体上限：正常错误只有几十字节。
+const MAX_UPSTREAM_ERROR_BYTES: usize = 256 * 1024;
+
+/// 有上限地读完一个 reqwest 响应体。超过 `limit` 直接报错，不把剩余部分读进内存。
+async fn read_bounded_body(
+    resp: reqwest::Response,
+    limit: usize,
+) -> Result<bytes::Bytes, String> {
+    use futures_util::StreamExt;
+    // 先看 Content-Length，明显超限就立刻拒绝，不开始读
+    if let Some(len) = resp.content_length() {
+        if len as usize > limit {
+            return Err(format!(
+                "upstream response body {} bytes exceeds limit {}",
+                len, limit
+            ));
+        }
+    }
+    let mut stream = resp.bytes_stream();
+    let mut out = bytes::BytesMut::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if out.len() + chunk.len() > limit {
+            return Err(format!(
+                "upstream response body exceeds limit {} bytes",
+                limit
+            ));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out.freeze())
 }
 
 /// 流式 chunk 之间的空闲上限：上游在这么长时间内一个字节都没给，就认为连接已经挂死。

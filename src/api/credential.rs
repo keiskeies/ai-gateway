@@ -115,7 +115,7 @@ pub async fn put(
     })
     .await
     .map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -129,7 +129,7 @@ pub async fn delete(
     web::block(move || crate::db::credential::delete(&db, &platform_id))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -256,7 +256,7 @@ pub async fn quota_sync(
             );
         }
     }
-    cache.refresh();
+    cache.refresh_async().await?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "adapter": format!("{adapter:?}"),

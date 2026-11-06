@@ -101,7 +101,7 @@ pub async fn create(
         crate::db::api_key::create(&db, &req)
     })
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh_api_keys();
+    cache.refresh_api_keys_async().await?;
     let mut api_key = stored.to_public(KeyUsage::default());
     api_key.secret = Some(secret);
     Ok(HttpResponse::Created().json(api_key))
@@ -149,7 +149,7 @@ pub async fn update(
         return Err(AppError::NotFound("API key not found".to_string()));
     };
     // 过期/配额都活在缓存里：改完不刷一次，旧限制还能继续放行到下一轮
-    cache.refresh_api_keys();
+    cache.refresh_api_keys_async().await?;
     Ok(HttpResponse::Ok().json(api_key.to_public(usage)))
 }
 
@@ -175,7 +175,7 @@ pub async fn rotate(
     let Some((stored, usage)) = rotated else {
         return Err(AppError::NotFound("API key not found".to_string()));
     };
-    cache.refresh_api_keys();
+    cache.refresh_api_keys_async().await?;
     let mut api_key = stored.to_public(usage);
     api_key.secret = Some(secret);
     Ok(HttpResponse::Ok().json(api_key))
@@ -190,7 +190,7 @@ pub async fn delete(
     let db = db.into_inner();
     web::block(move || crate::db::api_key::delete(&db, &id))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh_api_keys();
+    cache.refresh_api_keys_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -236,7 +236,7 @@ pub async fn batch(
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
     // 停用与删除都要立刻反映到鉴权：缓存不刷，旧状态还能放行到下一轮
     if affected > 0 {
-        cache.refresh_api_keys();
+        cache.refresh_api_keys_async().await?;
     }
     Ok(HttpResponse::Ok().json(serde_json::json!({ "affected": affected, "missing": missing })))
 }

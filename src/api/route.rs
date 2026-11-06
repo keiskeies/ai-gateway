@@ -35,7 +35,7 @@ pub async fn create(
     let req = body.into_inner();
     let db = db.into_inner();
     let route = db_block!(db, crate::db::route::create(&db, &proxy_id, &req));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Created().json(route))
 }
 
@@ -49,7 +49,7 @@ pub async fn update(
     let req = body.into_inner();
     let db = db.into_inner();
     let route = db_block!(db, crate::db::route::update(&db, &id, &req));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(route))
 }
 
@@ -61,7 +61,7 @@ pub async fn delete(
     let id = path.into_inner();
     let db = db.into_inner();
     db_block!(db, crate::db::route::delete(&db, &id));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -82,7 +82,7 @@ pub async fn add_backend(
     let req = body.into_inner();
     let db = db.into_inner();
     let backend = db_block!(db, crate::db::route::add_backend(&db, &route_id, &req));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Created().json(backend))
 }
 
@@ -96,7 +96,7 @@ pub async fn update_backend(
     let req = body.into_inner();
     let db = db.into_inner();
     let backend = db_block!(db, crate::db::route::update_backend(&db, &id, &req));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(backend))
 }
 
@@ -111,7 +111,7 @@ pub async fn reorder_backends(
     let req = body.into_inner();
     let db = db.into_inner();
     let backends = db_block!(db, crate::db::route::set_order(&db, &route_id, &req.backend_ids));
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(backends))
 }
 
@@ -130,6 +130,6 @@ pub async fn delete_backend(
     })
     .await
     .map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }

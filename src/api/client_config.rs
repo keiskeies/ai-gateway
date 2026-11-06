@@ -79,7 +79,7 @@ pub async fn apply(
     .map_err(|error| AppError::Internal(error.to_string()))??;
     // 新建/停用 Key 后必须立刻刷新鉴权缓存，否则旧 Key 还能放行到下一轮。
     if outcome.cache_refresh {
-        cache.refresh_api_keys();
+        cache.refresh_api_keys_async().await?;
     }
     Ok(HttpResponse::Ok().json(outcome.result))
 }
@@ -98,7 +98,7 @@ pub async fn restore(
         .await
         .map_err(|error| AppError::Internal(error.to_string()))??;
     if outcome.cache_refresh {
-        cache.refresh_api_keys();
+        cache.refresh_api_keys_async().await?;
     }
     Ok(HttpResponse::Ok().json(outcome.result))
 }
@@ -117,7 +117,7 @@ pub async fn restore_backup(
         .await
         .map_err(|error| AppError::Internal(error.to_string()))??;
     if outcome.cache_refresh {
-        cache.refresh_api_keys();
+        cache.refresh_api_keys_async().await?;
     }
     Ok(HttpResponse::Ok().json(outcome.result))
 }

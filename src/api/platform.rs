@@ -47,7 +47,7 @@ pub async fn create(
             tracing::warn!("平台 {} 绑定登录态失败: {}", platform.id, error);
         }
     }
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Created().json(platform))
 }
 
@@ -62,7 +62,7 @@ pub async fn update(
     let db = db.into_inner();
     let platform = web::block(move || crate::db::platform::update(&db, &id, &req))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(platform))
 }
 
@@ -75,7 +75,7 @@ pub async fn delete(
     let db = db.into_inner();
     web::block(move || crate::db::platform::delete(&db, &id))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::NoContent().finish())
 }
 
@@ -206,7 +206,7 @@ pub async fn batch_update_models(
     let db = db.into_inner();
     let updated = web::block(move || crate::db::model::batch_patch(&db, &platform_id, &patch))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({ "ok": true, "updated": updated })))
 }
 
@@ -294,7 +294,7 @@ pub async fn import_prices(
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
     // 单价是读路由时 JOIN models 补进 RouteCache 的，不刷缓存之后的请求仍按旧价落 cost
     if result.written > 0 {
-        cache.refresh();
+        cache.refresh_async().await?;
     }
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "ok": true,

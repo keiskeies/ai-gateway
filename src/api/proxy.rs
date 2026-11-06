@@ -95,7 +95,7 @@ pub async fn create(
     let db = db.into_inner();
     let proxy = web::block(move || crate::db::proxy::create(&db, &req))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Created().json(proxy))
 }
 
@@ -110,7 +110,7 @@ pub async fn update(
     let db = db.into_inner();
     let proxy = web::block(move || crate::db::proxy::update(&db, &id, &req))
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
+    cache.refresh_async().await?;
     Ok(HttpResponse::Ok().json(proxy))
 }
 
@@ -130,7 +130,7 @@ pub async fn delete(
         Ok::<usize, AppError>(disabled)
     })
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
-    cache.refresh_api_keys();
+    cache.refresh_async().await?;
+    cache.refresh_api_keys_async().await?;
     Ok(HttpResponse::Ok().json(serde_json::json!({ "disabled_keys": disabled_keys })))
 }

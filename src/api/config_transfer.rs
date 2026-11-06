@@ -122,7 +122,7 @@ pub async fn apply(
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
     // 路由与 Key 都换了：不刷缓存的话，导入完的虚拟模型还要等一轮 TTL 才生效
-    cache.refresh();
-    cache.refresh_api_keys();
+    cache.refresh_async().await?;
+    cache.refresh_api_keys_async().await?;
     Ok(HttpResponse::Ok().json(result))
 }

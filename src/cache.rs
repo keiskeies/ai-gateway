@@ -187,6 +187,26 @@ impl RouteCache {
         tracing::info!("路由缓存已刷新，共 {} 个代理", count);
     }
 
+    /// 异步版刷新：把同步的 O(P×B) 查询 + 凭据解密搬到 blocking 线程池。
+    /// 管理接口曾经直接在 async handler 里调 `refresh()`，一次配置变更就能把
+    /// 一个 actix worker 钉在 DB 查询上，和同一 worker 上的代理请求一起变慢。
+    pub async fn refresh_async(&self) -> Result<(), AppError> {
+        let cache = self.clone();
+        actix_web::web::block(move || cache.refresh())
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 异步版 API key 刷新（同上，避免在 worker 线程上跑 DB 查询）
+    pub async fn refresh_api_keys_async(&self) -> Result<(), AppError> {
+        let cache = self.clone();
+        actix_web::web::block(move || cache.refresh_api_keys())
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
     /// 按代理名查找已解析的路由（零 DB 查询、零深拷贝）
     pub fn get_resolved_route(&self, proxy_name: &str) -> Option<Arc<ResolvedRoute>> {
         self.inner.snapshot.read().entries.get(proxy_name).cloned()

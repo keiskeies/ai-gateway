@@ -89,8 +89,8 @@ pub async fn restore(
     let result = web::block(move || db::backup::restore(&db2, &db_path, &name))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
-    cache.refresh();
-    cache.refresh_api_keys();
+    cache.refresh_async().await?;
+    cache.refresh_api_keys_async().await?;
     // 会话行也在被还原的那份库里，留着这条 Cookie 只会让人下一次请求撞上一个说不清的 401
     crate::api::auth::drop_session(&req, &db).await?;
     Ok(HttpResponse::Ok()
