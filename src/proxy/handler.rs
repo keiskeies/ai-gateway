@@ -341,12 +341,22 @@ struct SlotGuard {
 }
 
 impl SlotGuard {
-    fn new(selector: &std::sync::Arc<BackendSelector>, route_id: &str, backend_id: &str) -> Self {
-        Self {
+    /// 构造即占用槽位：占用与释放成对，不存在「先取后漏」的中间窗口。
+    /// 返回 None 表示该后端已到并发上限，调用方应换下一个候选。
+    fn try_new(
+        selector: &std::sync::Arc<BackendSelector>,
+        route_id: &str,
+        backend_id: &str,
+        max_concurrent: Option<u32>,
+    ) -> Option<Self> {
+        if !selector.try_acquire_slot(route_id, backend_id, max_concurrent) {
+            return None;
+        }
+        Some(Self {
             selector: selector.clone(),
             route_id: route_id.to_string(),
             backend_id: backend_id.to_string(),
-        }
+        })
     }
 }
 
@@ -873,8 +883,8 @@ async fn handle_request(
             return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
         }
 
-        // 选后端 + 预留积分。预留失败（被并发抢光）就把该后端从本轮候选里去掉再选。
-        let (backend, resolved, charge, mut reservation) = loop {
+        // 选后端 + 预留积分。预留失败（被并发抢光）或并发槽位已满，就把该后端从本轮候选里去掉再选。
+        let (backend, resolved, charge, mut reservation, slot_guard) = loop {
             let Some(selected) = state.selector.select(
                 &resolved_route.route_id,
                 &candidates,
@@ -887,13 +897,13 @@ async fn handle_request(
                 .find(|rb| rb.backend.id == selected.id)
                 .cloned()
                 .ok_or_else(|| AppError::Internal("Backend not found in cache".to_string()))?;
-            // 每后端并发闸门：配置了 max_concurrent 且已满时换下一个候选，
-            // 而不是把请求堆上去。没有配置上限的后端这里直接放行。
-            if !state.selector.try_acquire_slot(
+            // 并发槽位：占用成功才继续；满了就换下一个候选，避免把请求堆上去
+            let Some(slot_guard) = SlotGuard::try_new(
+                &state.selector,
                 &resolved_route.route_id,
                 &selected.id,
                 resolved.backend.max_concurrent,
-            ) {
+            ) else {
                 candidates.retain(|b| b.id != selected.id);
                 if candidates.is_empty() {
                     return Err(AppError::TooManyRequests(
@@ -901,7 +911,7 @@ async fn handle_request(
                     ));
                 }
                 continue;
-            }
+            };
             let needs_reserve = resolved.platform.credit_budget.is_some()
                 && resolved.backend.effective_credit_price().unwrap_or(0.0) > 0.0;
             let reserve = if needs_reserve {
@@ -912,8 +922,12 @@ async fn handle_request(
                 crate::db::credit::CreditReserve::NotMetered
             };
             match reserve {
-                crate::db::credit::CreditReserve::NotMetered => break (selected, resolved, None, None),
-                crate::db::credit::CreditReserve::Free => break (selected, resolved, Some(0.0), None),
+                crate::db::credit::CreditReserve::NotMetered => {
+                    break (selected, resolved, None, None, slot_guard)
+                }
+                crate::db::credit::CreditReserve::Free => {
+                    break (selected, resolved, Some(0.0), None, slot_guard)
+                }
                 crate::db::credit::CreditReserve::Reserved { charged } => {
                     let reservation = CreditReservation::new(
                         resolved.platform.id.clone(),
@@ -923,9 +937,11 @@ async fn handle_request(
                         request_id.clone(),
                         resolved.backend.model_id.clone(),
                     );
-                    break (selected, resolved, Some(charged), Some(reservation));
+                    break (selected, resolved, Some(charged), Some(reservation), slot_guard);
                 }
                 crate::db::credit::CreditReserve::Exhausted { .. } => {
+                    // 槽位在这里随 slot_guard Drop 释放，再换下一个候选
+                    drop(slot_guard);
                     candidates.retain(|b| b.id != selected.id);
                     if candidates.is_empty() {
                         return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
@@ -942,11 +958,8 @@ async fn handle_request(
             &resolved_route.route_id,
             &backend.id,
         ));
-        let _slot_guard = SlotGuard::new(
-            &state.selector,
-            &resolved_route.route_id,
-            &backend.id,
-        );
+        // 并发槽位由选择循环里的 slot_guard 持有，随本轮迭代结束/返回自动释放
+        let _slot_guard = slot_guard;
         let start = Instant::now();
         let started_at = chrono::Utc::now().to_rfc3339();
         let attempt_no = attempt as i64 + 1;

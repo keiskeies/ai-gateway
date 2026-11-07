@@ -122,3 +122,42 @@ impl BackendSelector {
             .sum()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrency_slot_is_bounded_and_released() {
+        let s = BackendSelector::new();
+        // 未配置上限：永远放行，release 是 no-op
+        assert!(s.try_acquire_slot("r", "b", None));
+        s.release_slot("r", "b");
+
+        // 上限 2：前两次成功，第三次被拒
+        assert!(s.try_acquire_slot("r", "b2", Some(2)));
+        assert!(s.try_acquire_slot("r", "b2", Some(2)));
+        assert!(!s.try_acquire_slot("r", "b2", Some(2)));
+
+        // 释放一个后又能获取，且不会下溢
+        s.release_slot("r", "b2");
+        assert!(s.try_acquire_slot("r", "b2", Some(2)));
+        s.release_slot("r", "b2");
+        s.release_slot("r", "b2");
+        s.release_slot("r", "b2");
+        s.release_slot("r", "b2");
+        // 多释放几次后仍可正常获取（饱和减法保证不会永久卡死）
+        assert!(s.try_acquire_slot("r", "b2", Some(2)));
+    }
+
+    #[test]
+    fn connection_counter_never_underflows() {
+        let s = BackendSelector::new();
+        s.dec_connection("r", "b"); // 没 inc 就 dec：不应下溢成 usize::MAX
+        assert_eq!(s.active_connections_total(), 0);
+        s.inc_connection("r", "b");
+        assert_eq!(s.active_connections_total(), 1);
+        s.dec_connection("r", "b");
+        assert_eq!(s.active_connections_total(), 0);
+    }
+}
