@@ -192,6 +192,9 @@ pub fn model_timeseries(
           AND (?3 IS NULL OR rs.created_at <  ?3)
         GROUP BY period, model_id
         ORDER BY period, model_id
+        -- SQL 层硬上限：时间桶本身最多 4000 个，再乘模型数没有上界。
+        -- 无 LIMIT 时全表分组结果会一次性进内存（曾经只在 Rust 侧截断）。
+        LIMIT 20000
         "#
     );
 
@@ -363,33 +366,33 @@ pub fn latency_percentiles(pool: &DbPool, from: Option<&str>, to: Option<&str>) 
         return Ok(LatencyPercentiles { p50: 0.0, p90: 0.0, p99: 0.0, max: 0.0 });
     }
 
-    let pct = |frac: f64| -> f64 {
-        let off = ((n as f64 * frac) as i64).clamp(0, n - 1);
-        conn.query_row(
-            &format!(
-                "SELECT COALESCE(latency_ms, 0) FROM request_stats{} ORDER BY latency_ms LIMIT 1 OFFSET ?",
-                range.where_clause("created_at")
-            ),
-            rusqlite::params_from_iter(
-                range
-                    .params()
-                    .into_iter()
-                    .map(|s| s.to_string())
-                    .chain(std::iter::once(off.to_string())),
-            ),
-            |r| r.get(0),
-        )
-        .unwrap_or(0.0)
-    };
-
-    let max: f64 = conn
-        .query_row(
-            &format!("SELECT COALESCE(MAX(latency_ms),0) FROM request_stats{}", range.where_clause("created_at")),
-            rusqlite::params_from_iter(range.params()),
-            |r| r.get(0),
-        )
-        .unwrap_or(0.0);
-    Ok(LatencyPercentiles { p50: pct(0.50), p90: pct(0.90), p99: pct(0.99), max })
+    // 三次分位点曾经各自 ORDER BY 全表一次（p50/p90/p99 各一次排序 + 一次 MAX），
+    // 大表上是 4 遍扫描。这里改成「一次有序扫描，在目标偏移处取值」：
+    // SQLite 仍会排序，但只排一次，且边读边判、读够就停。
+    let offsets: [i64; 3] = [
+        ((n as f64 * 0.50) as i64).clamp(0, n - 1),
+        ((n as f64 * 0.90) as i64).clamp(0, n - 1),
+        ((n as f64 * 0.99) as i64).clamp(0, n - 1),
+    ];
+    let mut stmt = conn.prepare(&format!(
+        "SELECT COALESCE(latency_ms, 0) FROM request_stats{} ORDER BY latency_ms",
+        range.where_clause("created_at")
+    ))?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(range.params()))?;
+    let mut out = [0.0f64; 3];
+    let mut max = 0.0f64;
+    let mut idx: i64 = 0;
+    let mut next_slot = 0usize;
+    while let Some(row) = rows.next()? {
+        let v: f64 = row.get(0)?;
+        max = max.max(v);
+        while next_slot < 3 && idx >= offsets[next_slot] {
+            out[next_slot] = v;
+            next_slot += 1;
+        }
+        idx += 1;
+    }
+    Ok(LatencyPercentiles { p50: out[0], p90: out[1], p99: out[2], max })
 }
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
@@ -1188,6 +1191,14 @@ pub struct StatsCleanupResult {
 pub fn cleanup_dangling(pool: &DbPool, dry_run: bool) -> AppResult<StatsCleanupResult> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
 
+    // 五条 DELETE 收进同一事务：中途失败不会留下「明细删了、正文还在」的不一致状态，
+    // 也让 SQLite 只取一次写锁（逐条 autocommit 时每条都持锁一段时间）。
+    let tx = if dry_run { None } else { Some(conn.unchecked_transaction()?) };
+    let conn: &rusqlite::Connection = match &tx {
+        Some(t) => t,
+        None => &conn,
+    };
+
     // proxy_id / route_id / backend_id 任一指向不存在的记录，即视为悬挂行
     const DANGLING: &str = r#"
         proxy_id NOT IN (SELECT id FROM proxies)
@@ -1285,6 +1296,10 @@ pub fn cleanup_dangling(pool: &DbPool, dry_run: bool) -> AppResult<StatsCleanupR
         .try_into()
         .unwrap_or(0)
     };
+
+    if let Some(tx) = tx {
+        tx.commit()?;
+    }
 
     if !dry_run {
         tracing::info!(
@@ -1467,9 +1482,11 @@ pub fn db_info(pool: &DbPool, path: &std::path::Path) -> AppResult<DbInfo> {
         attempt_rows: count("SELECT COUNT(*) FROM request_attempts")?,
         alert_rows: count("SELECT COUNT(*) FROM alerts")?,
         body_rows: count("SELECT COUNT(*) FROM request_bodies")?,
-        // 实际占库的是存下来的文本，不是原始长度（截断行两者不同）
+        // 用 bytes 列而不是 SUM(LENGTH(CAST(body AS BLOB)))：
+        // 后者会把每张正文表的**全文**读一遍再算长度，大库上是一次重扫描；
+        // bytes 列本来就是落库时记下的实际字节数，点查即可。
         body_bytes: conn.query_row(
-            "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM request_bodies",
+            "SELECT COALESCE(SUM(bytes), 0) FROM request_bodies",
             [],
             |row| row.get::<_, i64>(0),
         )?,
@@ -1481,7 +1498,7 @@ pub fn db_info(pool: &DbPool, path: &std::path::Path) -> AppResult<DbInfo> {
         )?,
         response_rows: count("SELECT COUNT(*) FROM response_bodies")?,
         response_bytes: conn.query_row(
-            "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM response_bodies",
+            "SELECT COALESCE(SUM(bytes), 0) FROM response_bodies",
             [],
             |row| row.get::<_, i64>(0),
         )?,
