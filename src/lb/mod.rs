@@ -89,8 +89,13 @@ impl BackendSelector {
     }
 
     fn least_connections_inner<'a>(&self, route_id: &str, backends: &[&'a Backend]) -> Option<&'a Backend> {
+        // 每候选一次 format! 分配：用可复用的 String 拼 key，避免 N 个后端 N 次分配
+        let mut key = String::with_capacity(route_id.len() + 40);
         backends.iter().min_by_key(|b| {
-            let key = format!("{}:{}", route_id, b.id);
+            key.clear();
+            key.push_str(route_id);
+            key.push(':');
+            key.push_str(&b.id);
             self.connections.get(&key).map(|c| c.load(Ordering::Relaxed)).unwrap_or(0)
         }).copied()
     }

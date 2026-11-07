@@ -55,8 +55,11 @@ pub async fn stream(hub: web::Data<EventHub>, query: web::Query<EventsQuery>) ->
         }
     });
 
-    let pings = IntervalStream::new(tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS)))
-        .map(|_| comment("ping"));
+    // MissedTickBehavior::Delay：worker 被长任务占住后恢复时，
+    // 默认的 Burst 会一次性补发多个心跳，Delay 只补一次。
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(KEEPALIVE_SECS));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let pings = IntervalStream::new(ping_interval).map(|_| comment("ping"));
 
     // 把 permit 挂到流上：连接断开、流结束、客户端消失时才释放名额
     let body = futures_util::stream::select(events, pings)
