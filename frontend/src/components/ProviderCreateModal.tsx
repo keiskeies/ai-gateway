@@ -5,9 +5,9 @@ import { notifications } from '@mantine/notifications'
 import { IconExternalLink, IconGift, IconPlugConnected } from '@tabler/icons-react'
 import {
   createPlatform,
-  findKeyLink,
   getAuthStatus,
   getCheckin,
+  listKeyLinks,
   startCheckinLogin,
   waitForCheckinAttempt,
 } from '../api'
@@ -39,9 +39,12 @@ const emptyDraft: ProviderDraft = {
 
 const typeOptions = Object.entries(PLATFORM_TYPE_LABELS).map(([value, label]) => ({ value, label }))
 
-/** Key 申请入口的响应形态（后端注册表）。 */
+/** Key 申请入口的响应形态（后端注册表）。
+ * preset / base_url_prefix 用于前端本地匹配，避免为每次输入打一次可能 404 的查询。 */
 interface KeyLink {
   brand: string
+  preset?: string | null
+  base_url_prefix?: string | null
   apply_url: string
   console_url?: string | null
   docs_url?: string | null
@@ -83,18 +86,34 @@ export function ProviderCreateModal({
   // 只有 credits 才用积分台账，其余单位不接受预算
   const usesLedger = draft.quota_unit === 'credits'
 
-  // 预设切换时反查 Key 申请入口；切到私有协议时清空（它们没有 API Key 可申请）
+  // Key 申请入口：拉一次全量注册表在本地匹配。
+  // 曾经每改一次 base_url 就 GET /platforms/key-link，未命中时后端按设计回 404，
+  // 浏览器因此每次都记一条 console error（E2E 的 errors 断言会因此失败）。
+  // 注册表很小且基本不变，全量拉一次 + 本地前缀匹配既没有 404 噪音，也少打一轮请求。
+  const [keyLinks, setKeyLinks] = useState<KeyLink[]>([])
   useEffect(() => {
+    if (!opened) return
     let cancelled = false
+    listKeyLinks()
+      .then((all: KeyLink[]) => { if (!cancelled) setKeyLinks(all) })
+      .catch(() => { if (!cancelled) setKeyLinks([]) })
+    return () => { cancelled = true }
+  }, [opened])
+
+  useEffect(() => {
     if (!draft.base_url.trim() || isProprietary) {
       setKeyLink(null)
       return
     }
-    findKeyLink({ preset: preset ?? undefined, base_url: draft.base_url.trim() })
-      .then(found => { if (!cancelled) setKeyLink(found) })
-      .catch(() => { if (!cancelled) setKeyLink(null) })
-    return () => { cancelled = true }
-  }, [preset, draft.base_url, isProprietary])
+    const byPreset = preset
+      ? keyLinks.find(link => link.preset === preset)
+      : undefined
+    const normalized = draft.base_url.trim().replace(/\/+$/, '')
+    const byUrl = keyLinks.find(link =>
+      link.base_url_prefix ? normalized.startsWith(link.base_url_prefix) : false,
+    )
+    setKeyLink(byPreset ?? byUrl ?? null)
+  }, [preset, draft.base_url, isProprietary, keyLinks])
 
   // 打开弹窗时问一次：哪些平台支持「登录并获取 Key」、本机能不能开登录窗口
   useEffect(() => {
