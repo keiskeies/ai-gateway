@@ -13,10 +13,11 @@ use crate::models::route::{
 /// 导出的是"配置"，不是运行数据：六张表就是全部，统计、健康历史、账号与会话都不在这里。
 // custom_body / param_overrides 只能加在末尾：下面的读取全按下标取值，插在中间会读错列。
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, \
-    status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, custom_body";
+    status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, custom_body, \
+    credit_unit, adapter";
 const MODEL_COLS: &str = "id, platform_id, model_id, display_name, max_tokens, context_window, \
     input_price, output_price, cache_read_price, cache_write_price, credit_price, peak_pricing, \
-    catalog_key, capabilities, status";
+    catalog_key, capabilities, status, credit_multiplier";
 const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides";
 const BACKEND_COLS: &str = "id, route_id, platform_id, model_id, weight, priority, max_concurrent, \
     capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo";
@@ -79,6 +80,7 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
         catalog_key: row.get(12)?,
         capabilities: decode::<Vec<Capability>>(row.get::<_, String>(13)?, vec![]),
         status: decode(row.get::<_, String>(14)?, ModelStatus::Active),
+        credit_multiplier: row.get(15)?,
     }))? {
         doc.models.push(row?);
     }
@@ -132,6 +134,25 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
     }
     drop(stmt);
 
+    // 定时领取的日程：只带「几点跑、跑哪些账号、开没开」，
+    // 运行记账（last_run_*）一律不留——带到新机台上会让当天首次领取被当成已跑过。
+    let mut stmt = conn.prepare(
+        "SELECT id, name, time, platform_ids, enabled, created_at, updated_at \
+         FROM checkin_tasks ORDER BY time, created_at",
+    )?;
+    for row in stmt.query_map([], |row| Ok(CheckinTaskRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        time: row.get(2)?,
+        platform_ids: decode::<Vec<String>>(row.get::<_, String>(3)?, vec![]),
+        enabled: row.get::<_, i64>(4)? != 0,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    }))? {
+        doc.checkin_tasks.push(row?);
+    }
+    drop(stmt);
+
     let sql = format!("SELECT {API_KEY_COLS} FROM api_keys ORDER BY created_at, id");
     let mut stmt = conn.prepare(&sql)?;
     for row in stmt.query_map([], |row| Ok(ApiKeyRow {
@@ -171,6 +192,8 @@ fn map_platform(row: &Row<'_>, include_secrets: bool) -> rusqlite::Result<Platfo
         rate_limit: decode_opt(row.get::<_, Option<String>>(8)?),
         credit_budget: row.get(9)?,
         credit_window: row.get(10)?,
+        credit_unit: row.get(15)?,
+        adapter: row.get(16)?,
         catalog_key: row.get(11)?,
         created_at: row.get(12)?,
         updated_at: row.get(13)?,
@@ -184,6 +207,8 @@ struct Existing {
     model_ids: std::collections::HashSet<String>,
     model_pairs: std::collections::HashSet<(String, String)>,
     model_catalog_pairs: std::collections::HashSet<(String, String)>,
+    /// 平台 id → catalog_key：计划要照搬 apply 那套「按 catalog_key 而不是 platform_id 找模型」的口径
+    platform_catalog: std::collections::HashMap<String, String>,
     proxy_ids: std::collections::HashSet<String>,
     proxy_names: std::collections::HashSet<String>,
     route_ids: std::collections::HashSet<String>,
@@ -191,17 +216,101 @@ struct Existing {
     backend_ids: std::collections::HashSet<String>,
     key_ids: std::collections::HashSet<String>,
     key_hashes: std::collections::HashSet<String>,
+    task_ids: std::collections::HashSet<String>,
 }
 
 /// 分隔符用 `\x1f`：id 与模型名都可能含空格，用逗号切会切错。
 const SEP: char = '\u{1f}';
 
+/// 某一行模型的归属目录键，口径与 `apply` 完全一致：
+/// 本机已有这个平台就用库里的键（那行 INSERT 会被跳过，键不会变），
+/// 否则用文档里那行平台自己的键——新平台在 apply 里先落库，键就是按这个算的。
+fn catalog_of_platform(
+    current: &Existing,
+    doc: &ConfigDocument,
+    platform_id: &str,
+) -> Option<String> {
+    if let Some(key) = current.platform_catalog.get(platform_id) {
+        return Some(key.clone());
+    }
+    let platform = doc.platforms.iter().find(|p| p.id == platform_id)?;
+    Some(
+        platform
+            .catalog_key
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| crate::catalog::catalog_key_with_adapter(
+                &platform.platform_type,
+                &platform.base_url,
+                platform.adapter.as_deref(),
+            )),
+    )
+}
+
+/// 一行模型最终会不会落库。计划与落库共用同一趟判断，
+/// 因为两边各自推一遍「这行会不会真的进去」迟早会说法不一——
+/// 计划报 add、落库却是 0 行，是这类导入功能最难查的那种错。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelFate {
+    /// 会插入，附带算好的归属目录键
+    Insert { catalog_key: String },
+    /// merge 模式下这个 id 本机已有
+    KeepExisting,
+    /// (平台, 模型) 已挂在别的 id 下，插进去撞 UNIQUE
+    PairTaken,
+    /// 文档里另一个平台已经认领了这个 (目录键, 模型)
+    DuplicateInDoc,
+    /// 同目录键下本机已有同名模型（两个平台共用一个 catalog_key 时出现）
+    CatalogTaken,
+    /// 既没带目录键、平台也没有，无法归属
+    NoCatalog,
+}
+
+/// 逐行决定模型的落库命运，顺序与 `apply` 的插入顺序一致（文档顺序），
+/// 这样「文档内先到的那个平台认领模型」这件事两边看到的一样。
+fn model_fates(current: &Existing, doc: &ConfigDocument, mode: ImportMode) -> Vec<ModelFate> {
+    let merge = mode == ImportMode::Merge;
+    let mut claimed: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    doc.models
+        .iter()
+        .map(|row| {
+            if merge && current.model_ids.contains(&row.id) {
+                return ModelFate::KeepExisting;
+            }
+            // 同一 (平台, 模型) 已经挂在别的 id 下：这只是冗余行，跳过比让整个导入失败好
+            if merge && current.model_pairs.contains(&(row.platform_id.clone(), row.model_id.clone())) {
+                return ModelFate::PairTaken;
+            }
+            let Some(catalog_key) = row
+                .catalog_key
+                .clone()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| catalog_of_platform(current, doc, &row.platform_id))
+            else {
+                return ModelFate::NoCatalog;
+            };
+            let pair = (catalog_key.clone(), row.model_id.clone());
+            if !claimed.insert(pair.clone()) {
+                return ModelFate::DuplicateInDoc;
+            }
+            if merge && current.model_catalog_pairs.contains(&pair) {
+                return ModelFate::CatalogTaken;
+            }
+            ModelFate::Insert { catalog_key }
+        })
+        .collect()
+}
+
 fn existing(conn: &Connection) -> AppResult<Existing> {
     let mut out = Existing::default();
 
     let mut stmt = conn.prepare("SELECT id, name FROM platforms")?;
-    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        out.platform_ids.insert(row?);
+    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))? {
+        let (id, catalog_key) = row?;
+        out.platform_ids.insert(id.clone());
+        if let Some(key) = catalog_key.filter(|k| !k.trim().is_empty()) {
+            out.platform_catalog.insert(id, key);
+        }
     }
     drop(stmt);
 
@@ -249,6 +358,12 @@ fn existing(conn: &Connection) -> AppResult<Existing> {
         let (id, hash) = row?;
         out.key_ids.insert(id);
         out.key_hashes.insert(hash);
+    }
+    drop(stmt);
+
+    let mut stmt = conn.prepare("SELECT id FROM checkin_tasks")?;
+    for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        out.task_ids.insert(row?);
     }
 
     Ok(out)
@@ -300,8 +415,7 @@ pub fn plan(conn: &Connection, doc: &ConfigDocument, mode: ImportMode) -> AppRes
         plan.backends.drop = keeps(&current.backend_ids, &doc_backends);
         plan.api_keys.drop = keeps(&current.key_ids, &doc_keys);
         let dropped = plan.platforms.drop + plan.models.drop + plan.proxies.drop
-            + plan.routes.drop + plan.backends.drop + plan.api_keys.drop;
-        if dropped > 0 {
+            + plan.routes.drop + plan.backends.drop + plan.api_keys.drop;        if dropped > 0 {
             plan.warnings.insert(
                 0,
                 Issue::new(
@@ -322,18 +436,21 @@ pub fn plan(conn: &Connection, doc: &ConfigDocument, mode: ImportMode) -> AppRes
     for row in &doc.platforms {
         count(&mut plan.platforms, mode, current.platform_ids.contains(&row.id));
     }
-    for row in &doc.models {
-        let known = current.model_ids.contains(&row.id);
-        // 同一 (平台, 模型) 已经挂在别的 id 下：插进去会撞 UNIQUE。这只是冗余行，
-        // 跳过并说明，不该让整个导入失败。
-        let taken = merge
-            && !known
-            && current.model_pairs.contains(&(row.platform_id.clone(), row.model_id.clone()));
-        if taken {
-            plan.models.skip += 1;
-            plan.warnings.push(Issue::new("cfgModelPairTaken", [row.model_id.clone(), row.platform_id.clone()]));
-        } else {
-            count(&mut plan.models, mode, known);
+    for (row, fate) in doc.models.iter().zip(model_fates(&current, doc, mode)) {
+        match fate {
+            // 覆盖模式下同一 id 是「由文档版本取代」，不是新增
+            ModelFate::Insert { .. } if merge => plan.models.add += 1,
+            ModelFate::Insert { .. } | ModelFate::KeepExisting => {
+                count(&mut plan.models, mode, current.model_ids.contains(&row.id));
+            }
+            ModelFate::PairTaken | ModelFate::CatalogTaken | ModelFate::DuplicateInDoc => {
+                plan.models.skip += 1;
+                plan.warnings.push(Issue::new("cfgModelPairTaken", [row.model_id.clone(), row.platform_id.clone()]));
+            }
+            ModelFate::NoCatalog => {
+                plan.models.skip += 1;
+                plan.warnings.push(Issue::new("cfgModelNoCatalog", [row.model_id.clone()]));
+            }
         }
     }
     for row in &doc.proxies {
@@ -366,6 +483,19 @@ pub fn plan(conn: &Connection, doc: &ConfigDocument, mode: ImportMode) -> AppRes
             plan.errors.push(Issue::new("cfgKeyHashTaken", [row.name.clone()]));
         } else {
             count(&mut plan.api_keys, mode, known);
+        }
+    }
+    // 定时任务只增不删，覆盖模式也不例外：日程本身能重建，
+    // 但它挂的登录态（cookies）不随配置文件走，删掉就再也接不回来了。
+    if !merge && !current.task_ids.is_empty() {
+        plan.warnings.push(Issue::new("cfgCheckinAdditiveReplace", [current.task_ids.len().to_string()]));
+    }
+    for row in &doc.checkin_tasks {
+        let known = current.task_ids.contains(&row.id);
+        if known {
+            plan.checkin_tasks.skip += 1;
+        } else {
+            plan.checkin_tasks.add += 1;
         }
     }
 
@@ -408,9 +538,13 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
         }
         let catalog_key = row.catalog_key.clone()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| crate::catalog::catalog_key(&row.platform_type, &row.base_url));
+            .unwrap_or_else(|| crate::catalog::catalog_key_with_adapter(
+                &row.platform_type,
+                &row.base_url,
+                row.adapter.as_deref(),
+            ));
         tx.execute(
-            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"),
             rusqlite::params![
                 row.id,
                 row.name,
@@ -428,34 +562,25 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.created_at,
                 row.updated_at,
                 encode(&crate::models::route::normalize_override_object(&row.custom_body))?,
+                // 这两列存的是裸字符串（不是 JSON），口径必须与 db/platform.rs 一致：
+                // unit 写 key_str() 小写，adapter 写 Debug 变体名。resolve 一遍
+                // 让手改文件里的野值退成「不启用 / 由 type 推出」，而不是存个运行时认不出的串。
+                credit_unit_column(row.credit_unit.as_deref()),
+                adapter_column(row.adapter.as_deref()),
             ],
         )?;
         result.platforms.add += 1;
     }
 
-    let platform_keys: std::collections::HashMap<String, String> = {
-        let mut stmt = tx.prepare("SELECT id, catalog_key FROM platforms WHERE catalog_key IS NOT NULL")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        rows.filter_map(|row| row.ok()).collect()
-    };
-    let mut seen_catalog = std::collections::HashSet::new();
-    for row in &doc.models {
-        let Some(catalog_key) = row.catalog_key.clone()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| platform_keys.get(&row.platform_id).cloned())
-        else {
+    // 落库命运与计划共用同一趟判断（见 `model_fates`）：两边各推一遍迟早说法不一。
+    // `changed` 只作兜底，正常情况下不该和 fates 说的那样多或少。
+    for (row, fate) in doc.models.iter().zip(model_fates(&current, doc, mode)) {
+        let ModelFate::Insert { catalog_key } = fate else {
             continue;
         };
-        let catalog_pair = (catalog_key.clone(), row.model_id.clone());
-        if !seen_catalog.insert(catalog_pair.clone()) {
-            continue;
-        }
-        if merge && (current.model_ids.contains(&row.id) || current.model_catalog_pairs.contains(&catalog_pair)) {
-            continue;
-        }
         let peak_pricing = row.peak_pricing.as_ref().map(serde_json::to_string).transpose()?;
         let changed = tx.execute(
-            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+            &format!("INSERT OR IGNORE INTO models ({MODEL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
             rusqlite::params![
                 row.id,
                 row.platform_id,
@@ -472,6 +597,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 catalog_key,
                 encode(&row.capabilities)?,
                 encode(&row.status)?,
+                row.credit_multiplier,
             ],
         )?;
         if changed > 0 {
@@ -560,6 +686,26 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
         )?;
         result.api_keys.add += 1;
     }
+    // 定时任务：只补缺的，同 id 一律不动，覆盖模式也不清空（原因见计划里那段注释）。
+    for row in &doc.checkin_tasks {
+        if current.task_ids.contains(&row.id) {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO checkin_tasks (id, name, time, platform_ids, enabled, last_message, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, '', ?6, ?7)",
+            rusqlite::params![
+                row.id,
+                row.name,
+                row.time,
+                encode(&row.platform_ids)?,
+                row.enabled as i64,
+                row.created_at,
+                row.updated_at,
+            ],
+        )?;
+        result.checkin_tasks.add += 1;
+    }
 
     tx.commit().map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(result)
@@ -569,6 +715,32 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
 /// 而不是留空——列表里空白的凭据列会让人以为 Key 没导进来。
 fn redact_hint(hash: &str) -> String {
     format!("••••{}", hash.chars().take(8).collect::<String>())
+}
+
+/// `platforms.credit_unit` 的落库口径：认得的写规范小写串，认不出的一律 NULL。
+///
+/// 这里刻意**不做** `db::platform::resolve_create_unit` 那句「没写单位但给了预算 = credits」：
+/// 那条是给 API 新建/编辑兜底的，而库里 credit_unit 为 NULL 的存量行在运行时
+/// （`CreditUnit::resolve(NULL)` = None）本来就不计量。导入顺手补成 credits 会让
+/// 一台跑得好好的机器突然开始卡额度，等于用「恢复备份」偷偷改了计费语义。
+fn credit_unit_column(raw: Option<&str>) -> Option<String> {
+    use crate::models::adapter::CreditUnit;
+    raw.map(str::trim).filter(|s| !s.is_empty()).and_then(|_| {
+        let parsed = CreditUnit::resolve(raw);
+        (parsed != CreditUnit::None).then(|| parsed.key_str().to_string())
+    })
+}
+
+/// `platforms.adapter` 的落库口径，与 `db::platform::normalize_adapter` 同源（存 Debug 变体名），
+/// 但野值退成 NULL 而不是报错——NULL 的运行时含义就是「由 type 推出」，
+/// 与直接按 type 造一个变体名等价，没必要为此拒掉整份导入。
+fn adapter_column(raw: Option<&str>) -> Option<String> {
+    use crate::models::adapter::PlatformAdapter;
+    let raw = raw.map(str::trim).filter(|s| !s.is_empty())?;
+    PlatformAdapter::all()
+        .into_iter()
+        .find(|a| a.key_str().eq_ignore_ascii_case(raw) || format!("{a:?}").eq_ignore_ascii_case(raw))
+        .map(|a| format!("{a:?}"))
 }
 
 pub fn plan_pool(pool: &DbPool, doc: &ConfigDocument, mode: ImportMode) -> AppResult<ImportPlan> {
@@ -618,7 +790,9 @@ mod tests {
              INSERT INTO backends (id,route_id,platform_id,model_id,weight,priority,max_concurrent,capabilities,status,param_overrides,unknown_params,reasoning_style,reasoning_echo)
                VALUES ('b1','r1','p1','llama',3,1,NULL,'[]','\"Active\"','{\"temperature\":0.2}','\"Drop\"','\"AnthropicThinking\"','\"Keep\"');
              INSERT INTO api_keys (id,name,key_hash,key_mask,proxy_id,created_at,last_used,enabled,expires_at,quota_requests,quota_tokens,quota_cost,quota_window)
-               VALUES ('k1','prod','0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a6978','sk-p••••••••oc','x1','2026-01-02T00:00:00Z',NULL,1,'2027-01-01T23:59:59+00:00',100,NULL,12.5,'month');",
+               VALUES ('k1','prod','0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a6978','sk-p••••••••oc','x1','2026-01-02T00:00:00Z',NULL,1,'2027-01-01T23:59:59+00:00',100,NULL,12.5,'month');
+             INSERT INTO checkin_tasks (id,name,time,platform_ids,enabled,last_run_at,last_run_day,last_message,created_at,updated_at)
+               VALUES ('t1','早上','07:05','[\"p1\"]',1,'2026-03-01T07:05:00','2026-03-01','1 已到账','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
         )
         .unwrap();
         let catalog_key = crate::catalog::catalog_key(
@@ -627,6 +801,13 @@ mod tests {
         );
         conn.execute("UPDATE platforms SET catalog_key = ?1 WHERE id = 'p1'", [&catalog_key]).unwrap();
         conn.execute("UPDATE models SET catalog_key = ?1 WHERE platform_id = 'p1'", [&catalog_key]).unwrap();
+        // 积分单位 / 适配器 / 模型积分倍率：V28 起才有，seed 走裸 SQL 所以要点一下才有值
+        conn.execute(
+            "UPDATE platforms SET credit_unit = 'credits', adapter = 'WorkBuddy', custom_body = '{\"stream\":true}' WHERE id = 'p1'",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE models SET credit_multiplier = 0.79 WHERE id = 'm1'", []).unwrap();
     }
 
     /// 导出→清空→导入必须回到同一个形状：备份功能的最低要求。
@@ -639,6 +820,12 @@ mod tests {
         assert_eq!(exported.platforms[0].api_key.as_deref(), Some("sk-secret"));
         assert_eq!(exported.platforms[0].credit_budget, Some(250.0));
         assert_eq!(exported.platforms[0].credit_window.as_deref(), Some("day"));
+        // V28 之后的三列：漏一个都会让"配置看着一样但行为不同"——
+        // 单位丢了预算就不生效，adapter 丢了私有协议直接转发失败，倍率丢了计费金额翻倍。
+        assert_eq!(exported.platforms[0].credit_unit.as_deref(), Some("credits"));
+        assert_eq!(exported.platforms[0].adapter.as_deref(), Some("WorkBuddy"));
+        assert_eq!(exported.platforms[0].custom_body, serde_json::json!({"stream": true}));
+        assert_eq!(exported.models[0].credit_multiplier, Some(0.79));
         assert_eq!(exported.models[0].credit_price, Some(2.0));
         assert_eq!(
             exported.platforms[0].custom_headers,
@@ -653,6 +840,9 @@ mod tests {
         assert_eq!(exported.backends[0].unknown_params, UnknownParams::Drop);
         assert_eq!(exported.backends[0].param_overrides, serde_json::json!({"temperature": 0.2}));
         assert_eq!(exported.api_keys[0].quota_requests, Some(100));
+        assert_eq!(exported.checkin_tasks.len(), 1);
+        assert_eq!(exported.checkin_tasks[0].time, "07:05");
+        assert_eq!(exported.checkin_tasks[0].platform_ids, vec!["p1".to_string()]);
         assert_eq!(exported.api_keys[0].quota_cost, Some(12.5));
         assert_eq!(exported.api_keys[0].quota_window.as_deref(), Some("month"));
         assert_eq!(exported.api_keys[0].expires_at.as_deref(), Some("2027-01-01T23:59:59+00:00"));
@@ -669,10 +859,67 @@ mod tests {
         cleanup_db(&path);
     }
 
+    /// 手改/旧版导出文件里的积分单位与 adapter 必须按运行时认得的写法落库：
+    /// 大小写随意的 `workBuddy` 要归一成变体名，认不出的值退成 NULL（= 由 type 推出），
+    /// 而不是存一个 `CreditUnit::resolve` 谁也认不出的字符串。
+    #[test]
+    fn untrusted_unit_and_adapter_columns_are_canonicalized_or_cleared() {
+        let (pool, path) = test_db("normalize-vault-cols");
+        let mut doc = ConfigDocument {
+            format: Some(CONFIG_FORMAT.to_string()),
+            version: Some(CONFIG_VERSION),
+            ..Default::default()
+        };
+        doc.platforms.push(PlatformRow {
+            id: "p1".to_string(),
+            name: "A".to_string(),
+            platform_type: PlatformType::OpenAI,
+            base_url: "https://x.example/v1".to_string(),
+            api_key: Some("sk-a".to_string()),
+            organization: None,
+            custom_headers: serde_json::json!({}),
+            custom_body: serde_json::json!({}),
+            status: PlatformStatus::Active,
+            rate_limit: None,
+            credit_budget: Some(250.0),
+            credit_window: Some("day".to_string()),
+            // 大小写随意的合法值 + 存量语义：有预算但没写单位（库里应保持 NULL = 不计量）
+            credit_unit: Some("  credits ".to_string()),
+            adapter: Some("workBuddy".to_string()),
+            catalog_key: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        });
+        doc.platforms.push(PlatformRow {
+            id: "p2".to_string(),
+            name: "B".to_string(),
+            credit_unit: Some("gold-coins".to_string()),
+            adapter: Some(" nonsense".to_string()),
+            catalog_key: None,
+            ..doc.platforms[0].clone()
+        });
+        doc.platforms[1].id = "p2".to_string();
+        doc.platforms[1].base_url = "https://y.example/v1".to_string();
+
+        apply_pool(&pool, &doc, ImportMode::Merge).expect("apply");
+        let conn = pool.get().unwrap();
+        let read = |id: &str| -> (Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT credit_unit, adapter FROM platforms WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(read("p1"), (Some("credits".into()), Some("WorkBuddy".into())));
+        // 野值退成 NULL：运行时含义就是「不计量 / 由 type 推出」，与直接按 type 造一个变体等价
+        assert_eq!(read("p2"), (None, None));
+        cleanup_db(&path);
+    }
+
     /// 默认导出脱敏：文件里没有 api_key 字段；增量导入也不许覆盖已有密钥
     #[test]
-    fn default_export_omits_secrets_and_merge_keeps_them() {
-        let (pool, path) = test_db("redact");
+    fn default_export_omits_secrets_and_merge_keeps_them() {        let (pool, path) = test_db("redact");
         seed(&pool);
         let doc = export(&pool, false).unwrap();
         let text = serde_json::to_string(&doc).unwrap();
@@ -737,10 +984,84 @@ mod tests {
         cleanup_db(&path);
     }
 
+    /// 定时日程会随配置走，但它挂的登录态不会：导入到新机器后任务只会报「离线」。
+    /// 覆盖导入也不许删本机日程——删了就没法再接回来（要重新登录），
+    /// 所以两个模式都是只增不删，并且要在预演里说清楚。
+    #[test]
+    fn checkin_schedules_are_additive_and_survive_replace() {
+        let (pool, path) = test_db("checkin-tasks");
+        seed(&pool);
+        let doc = export(&pool, false).unwrap();
+        assert_eq!(doc.checkin_tasks.len(), 1);
+        // 运行记账不该出现在文件里：带到另一台机器上会让当天首次领取被当成已跑过
+        let text = serde_json::to_string(&doc).unwrap();
+        assert!(!text.contains("2026-03-01"), "last_run_* 属于运行记账，不导出");
+
+        // 覆盖导入：连文档都不带日程，本机那条也要留着
+        let mut empty = ConfigDocument {
+            format: Some(CONFIG_FORMAT.to_string()),
+            version: Some(CONFIG_VERSION),
+            ..Default::default()
+        };
+        empty.platforms = doc.platforms.clone();
+        let plan = plan_pool(&pool, &empty, ImportMode::Replace).unwrap();
+        assert!(plan.ok, "{:?}", plan.errors);
+        assert!(
+            plan.warnings.iter().any(|w| w.code == "cfgCheckinAdditiveReplace" && w.args == vec!["1".to_string()]),
+            "{:?}",
+            plan.warnings
+        );
+        apply_pool(&pool, &empty, ImportMode::Replace).unwrap();
+        let conn = pool.get().unwrap();
+        let (kept, message): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(last_message), '') FROM checkin_tasks WHERE id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kept, 1, "覆盖导入不得删掉定时日程");
+        assert_eq!(message, "1 已到账", "本机那条的运行记账原样保留");
+
+        // 同 id 再导一次也只是跳过，不会把「今天跑过没有」覆盖成导出那一刻的状态
+        let plan = plan_pool(&pool, &doc, ImportMode::Merge).unwrap();
+        assert_eq!(plan.checkin_tasks.skip, 1);
+        apply_pool(&pool, &doc, ImportMode::Merge).unwrap();
+        let message: String = conn
+            .query_row("SELECT last_message FROM checkin_tasks WHERE id='t1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(message, "1 已到账");
+        cleanup_db(&path);
+    }
+
+    /// 点位写歪的日程永远等不到调度器叫醒，而界面存不出这种值——只能来自手改的文件
+    #[test]
+    fn checkin_task_with_unparsable_time_is_rejected() {
+        let mut doc = ConfigDocument {
+            format: Some(CONFIG_FORMAT.to_string()),
+            version: Some(CONFIG_VERSION),
+            ..Default::default()
+        };
+        doc.checkin_tasks.push(CheckinTaskRow {
+            id: "t1".to_string(),
+            name: "早".to_string(),
+            time: "7am".to_string(),
+            platform_ids: vec![],
+            enabled: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        });
+        assert!(doc.check().iter().any(|e| e.code == "cfgCheckinBadTime"), "{:?}", doc.check());
+        // 合法点位不报错
+        doc.checkin_tasks[0].time = "07:05".to_string();
+        assert!(doc.check().is_empty(), "{:?}", doc.check());
+        // 带日程的文件要提醒「重新登录」
+        assert!(doc.notes().iter().any(|n| n.code == "cfgCheckinNeedsLogin"));
+    }
+
     /// 同名不同 id 的虚拟模型、摘要撞车的 Key：既不静默插入也不静默跳过
     #[test]
-    fn merge_refuses_silent_identity_collisions() {
-        let (pool, path) = test_db("collide");
+    fn merge_refuses_silent_identity_collisions() {        let (pool, path) = test_db("collide");
         seed(&pool);
         let mut doc = ConfigDocument {
             format: Some(CONFIG_FORMAT.to_string()),
@@ -807,6 +1128,44 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1, "撞 UNIQUE 的那行没有写进去");
+        cleanup_db(&path);
+    }
+
+    /// 两个平台同 type + 同 base_url = 共用一个 catalog_key，模型按目录键归属而不是平台 id。
+    /// 这时第二行会撞 (catalog_key, model_id)：改动前计划报 add=1、落库却是 0 行，
+    /// 因为 apply 靠 `INSERT OR IGNORE` 静默吃掉。计划与落库必须说同一套话。
+    #[test]
+    fn plan_and_apply_agree_when_two_platforms_share_a_catalog_key() {
+        let (pool, path) = test_db("shared-catalog");
+        seed(&pool);
+        let base = export(&pool, false).unwrap();
+        let catalog_key = base.platforms[0].catalog_key.clone().expect("seed sets catalog_key");
+
+        let mut doc = base.clone();
+        // 第二个平台：换个 id 和名字，但 URL 一样 → 同一个目录键
+        doc.platforms.push(PlatformRow {
+            id: "p3".to_string(),
+            name: "同一个上游的另一个账号".to_string(),
+            catalog_key: Some(catalog_key.clone()),
+            ..base.platforms[0].clone()
+        });
+        // 挂在 p3 下的同名模型：(目录键, llama) 已被 p1 的 m1 占着
+        doc.models.push(ModelRow {
+            id: "m3".to_string(),
+            platform_id: "p3".to_string(),
+            catalog_key: Some(catalog_key),
+            ..base.models[0].clone()
+        });
+
+        let plan = plan_pool(&pool, &doc, ImportMode::Merge).unwrap();
+        assert!(plan.ok, "{:?}", plan.errors);
+        assert_eq!(plan.models.add, 0, "计划不许报会插入——那行撞的是目录键唯一索引");
+        apply_pool(&pool, &doc, ImportMode::Merge).unwrap();
+        let conn = pool.get().unwrap();
+        let models: i64 = conn.query_row("SELECT COUNT(*) FROM models", [], |r| r.get(0)).unwrap();
+        let platforms: i64 = conn.query_row("SELECT COUNT(*) FROM platforms", [], |r| r.get(0)).unwrap();
+        assert_eq!(platforms, 2, "平台本身照样导得进来");
+        assert_eq!(models, 1, "落库确实是 0 行——与计划一致");
         cleanup_db(&path);
     }
 

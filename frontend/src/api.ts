@@ -365,6 +365,7 @@ export interface ImportPlan {
   routes: TablePlan
   backends: TablePlan
   api_keys: TablePlan
+  checkin_tasks: TablePlan
   warnings: ConfigIssue[]
   errors: ConfigIssue[]
 }
@@ -376,6 +377,7 @@ export interface ImportResult {
   routes: TablePlan
   backends: TablePlan
   api_keys: TablePlan
+  checkin_tasks: TablePlan
   warnings: ConfigIssue[]
 }
 export type ImportModeName = 'merge' | 'replace'

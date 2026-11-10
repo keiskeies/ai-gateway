@@ -442,7 +442,7 @@ pub async fn run_all(pool: &DbPool, encrypt_key: &str) -> AppResult<Vec<AccountV
 // ── 定时任务 ────────────────────────────────────────────────
 
 /// `'HH:MM'` → 当天第几分钟；格式不合法返回 None（脏数据宁可跳过也不猜）
-fn minutes_of(raw: &str) -> Option<u32> {
+pub(crate) fn minutes_of(raw: &str) -> Option<u32> {
     let raw = raw.trim();
     let (hour, minute) = raw.split_once(':')?;
     if hour.is_empty() || hour.len() > 2 || minute.len() != 2 {

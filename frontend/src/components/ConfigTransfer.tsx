@@ -21,7 +21,7 @@ import {
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale, type TranslationKey } from '../i18n'
 
-type PlanTableField = 'platforms' | 'models' | 'proxies' | 'routes' | 'backends' | 'api_keys'
+type PlanTableField = 'platforms' | 'models' | 'proxies' | 'routes' | 'backends' | 'api_keys' | 'checkin_tasks'
 
 const PLAN_TABLES: { field: PlanTableField; labelKey: TranslationKey }[] = [
   { field: 'platforms', labelKey: 'tablePlatforms' },
@@ -30,6 +30,7 @@ const PLAN_TABLES: { field: PlanTableField; labelKey: TranslationKey }[] = [
   { field: 'routes', labelKey: 'tableRoutes' },
   { field: 'backends', labelKey: 'tableBackends' },
   { field: 'api_keys', labelKey: 'tableApiKeys' },
+  { field: 'checkin_tasks', labelKey: 'tableCheckinTasks' },
 ]
 
 const serverMessage = (err: any): string => err?.response?.data?.error?.message ?? ''

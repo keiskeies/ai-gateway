@@ -10,8 +10,10 @@ use super::route::{
 /// 而不是拿到任意 JSON 就往库里插。版本号变化时导入必须显式拒绝，
 /// 让新程序先告诉用户它读不懂，而不是按老口径插一半。
 pub const CONFIG_FORMAT: &str = "aigw-config";
-/// v2 增加平台积分预算与模型积分单价；v1 旧文档仍然可导入（缺失字段按未启用处理）。
-pub const CONFIG_VERSION: u32 = 2;
+/// v2 增加平台积分预算与模型积分单价；v3 补上积分单位/适配器与模型积分倍率；
+/// v4 带上每日领取的定时任务（那是用户配的日程，丢了得手动重建）。
+/// v1~v3 旧文档仍然可导入（缺失字段按未启用/没有处理）。
+pub const CONFIG_VERSION: u32 = 4;
 
 /// 配置文档：虚拟模型 + 平台 + 模型 + 路由 + 后端 + 网关 Key。
 /// 不含统计、健康历史、账号与会话——那些是运行数据，不是"配置"，
@@ -42,6 +44,28 @@ pub struct ConfigDocument {
     pub backends: Vec<BackendRow>,
     #[serde(default)]
     pub api_keys: Vec<ApiKeyRow>,
+    /// 每日领取的定时日程。账号（登录态）是运行数据、不导出，
+    /// 所以导入到新机器时任务会先「离线」，直到那边重新登录一次。
+    #[serde(default)]
+    pub checkin_tasks: Vec<CheckinTaskRow>,
+}
+
+/// `checkin_tasks` 的一行。刻意不带 `last_run_at` / `last_run_day` / `last_message`：
+/// 那是「今天跑过没有」的运行记账，跟着备份跑到另一台机器上，
+/// 会让那边的当天首次领取被当成已跑过而静默跳过。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckinTaskRow {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// `'HH:MM'`，本地时间
+    pub time: String,
+    #[serde(default)]
+    pub platform_ids: Vec<String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,7 +95,15 @@ pub struct PlatformRow {
     pub credit_budget: Option<f64>,
     #[serde(default)]
     pub credit_window: Option<String>,
-    /// 上游目录键；旧配置没有时按 type + base_url 重算。
+    /// 积分计价单位（credits / currency / requests）；NULL = 不启用台账。
+    /// 缺了它，`credit_budget` 会在导入后变成"有预算但没有计价口径"的半套配置。
+    #[serde(default)]
+    pub credit_unit: Option<String>,
+    /// 私有协议适配器；NULL = 由 type 推出。丢掉它会让 Trae/WorkBuddy 平台
+    /// 导入后退回标准协议转发，配置看着一样但请求必然失败。
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// 上游目录键；旧配置没有时按 type + base_url + adapter 重算。
     #[serde(default)]
     pub catalog_key: Option<String>,
     pub created_at: String,
@@ -101,6 +133,10 @@ pub struct ModelRow {
     /// 每次成功请求的积分单价；NULL = 未定价。
     #[serde(default)]
     pub credit_price: Option<f64>,
+    /// 积分倍率，口径同 `models.credit_multiplier`；NULL = 1.0。
+    /// 实际消耗 = credit_price × credit_multiplier，所以倍率 0 = 该模型不扣积分。
+    #[serde(default)]
+    pub credit_multiplier: Option<f64>,
     /// 共享目录键；旧配置没有时从 platform 推导。
     #[serde(default)]
     pub catalog_key: Option<String>,
@@ -234,6 +270,7 @@ pub struct ImportPlan {
     pub routes: TablePlan,
     pub backends: TablePlan,
     pub api_keys: TablePlan,
+    pub checkin_tasks: TablePlan,
     pub warnings: Vec<Issue>,
     pub errors: Vec<Issue>,
 }
@@ -248,6 +285,7 @@ pub struct ImportResult {
     pub routes: TablePlan,
     pub backends: TablePlan,
     pub api_keys: TablePlan,
+    pub checkin_tasks: TablePlan,
     pub warnings: Vec<Issue>,
 }
 
@@ -273,6 +311,7 @@ impl ConfigDocument {
             && self.routes.is_empty()
             && self.backends.is_empty()
             && self.api_keys.is_empty()
+            && self.checkin_tasks.is_empty()
     }
 
     /// 文档内自查：格式标识、id 唯一、引用完整。一次报全部而不是第一个就退出——
@@ -286,8 +325,8 @@ impl ConfigDocument {
             None => errors.push(Issue::new("cfgFormatMissing", [] as [String; 0])),
         }
         match self.version {
-            // v1 文档没有积分字段：按默认值导入，等同于“未启用积分”。
-            Some(v) if v == 1 || v == CONFIG_VERSION => {}
+            // v1/v2 文档没有后来补的积分/适配器字段：按默认值导入，等同于"未启用"。
+            Some(v) if (1..=CONFIG_VERSION).contains(&v) => {}
             Some(v) => errors.push(Issue::new("cfgVersionMismatch", [v.to_string(), CONFIG_VERSION.to_string()])),
             None => errors.push(Issue::new("cfgVersionMissing", [] as [String; 0])),
         }
@@ -312,6 +351,14 @@ impl ConfigDocument {
         dup("routes", |r: &RouteRow| r.id.as_str(), &self.routes, &mut errors);
         dup("backends", |r: &BackendRow| r.id.as_str(), &self.backends, &mut errors);
         dup("api_keys", |r: &ApiKeyRow| r.id.as_str(), &self.api_keys, &mut errors);
+        dup("checkin_tasks", |r: &CheckinTaskRow| r.id.as_str(), &self.checkin_tasks, &mut errors);
+        // 点位格式错的定时任务永远等不到调度器叫醒（`minutes_of` 解析不出来就跳过），
+        // 而界面根本存不出这种值——只能来自手改的文件，所以宁可在预演里点名。
+        for row in &self.checkin_tasks {
+            if crate::checkin::minutes_of(&row.time).is_none() {
+                errors.push(Issue::new("cfgCheckinBadTime", [row.id.clone(), row.time.clone()]));
+            }
+        }
 
         // (platform_id, model_id) 在库里是 UNIQUE：文档内重复会在插入时炸掉整个事务，
         // 提前报出来比让 SQLite 抱怨更好读。
@@ -384,6 +431,11 @@ impl ConfigDocument {
         let redacted = self.platforms.iter().filter(|p| p.api_key.is_none()).count();
         if redacted > 0 {
             notes.push(Issue::new("cfgRedactedKeys", [redacted.to_string()]));
+        }
+        // 定时任务会原样导过去，但它依赖的登录态（cookies）属于运行数据、不随配置走：
+        // 新机器上任务会一直报「离线」，直到那边重新登录一次。不说的话就是「日程明明导进来了却不干活」。
+        if !self.checkin_tasks.is_empty() {
+            notes.push(Issue::new("cfgCheckinNeedsLogin", [self.checkin_tasks.len().to_string()]));
         }
         let model_keys: std::collections::HashSet<(&str, &str)> = self
             .models
@@ -535,6 +587,7 @@ mod tests {
             cache_write_price: None,
             peak_pricing: None,
             credit_price: None,
+            credit_multiplier: None,
             catalog_key: None,
             capabilities: vec![],
             status: ModelStatus::Active,
