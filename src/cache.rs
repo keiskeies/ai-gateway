@@ -36,6 +36,8 @@ pub struct ResolvedRoute {
     pub default_max_tokens: Option<u32>,
     /// 每次上游尝试前置 32~128 位随机字母数字串
     pub request_nonce: bool,
+    /// 路由级参数覆盖（该虚拟模型下所有后端共用），见 `Route::param_overrides`
+    pub param_overrides: serde_json::Value,
 }
 
 /// 请求热路径的只读快照。整份快照一次原子替换，绝不原地 clear：
@@ -172,6 +174,7 @@ impl RouteCache {
                     fallback: route.fallback,
                     default_max_tokens: route.default_max_tokens,
                     request_nonce: route.request_nonce,
+                    param_overrides: route.param_overrides,
                 }),
             );
         }

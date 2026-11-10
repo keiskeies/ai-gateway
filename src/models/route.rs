@@ -117,6 +117,10 @@ pub struct Route {
     /// 每次上游尝试在整段 prompt 最前面插入 32~128 位随机字母数字串（默认关）
     #[serde(default)]
     pub request_nonce: bool,
+    /// 路由级参数覆盖：JSON object，该虚拟模型下每条后端转发前都会 merge，
+    /// 优先级低于 backend 级同名键（见 `merge_param_overrides`）
+    #[serde(default = "default_param_overrides")]
+    pub param_overrides: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,7 +134,8 @@ pub struct Backend {
     pub max_concurrent: Option<u32>,
     pub capabilities: Vec<String>,
     pub status: BackendStatus,
-    /// 参数覆盖：JSON object，转发前 merge 进请求体（覆盖优先于客户端值）
+    /// 参数覆盖：JSON object，转发前 merge 进请求体（覆盖优先于客户端值）。
+    /// 三档覆盖里优先级最高的一档，压过路由级与平台级的同名键
     #[serde(default = "default_param_overrides")]
     pub param_overrides: serde_json::Value,
     /// 未知参数转发策略（默认 Auto：按源/目标协议自动决定）
@@ -242,6 +247,38 @@ pub(crate) fn cost_from_prices(
 
 pub(crate) fn default_param_overrides() -> serde_json::Value { serde_json::json!({}) }
 
+/// 请求体覆盖：按 `layers` 给定的顺序逐层浅合并进 `body`，后面的层压过前面的。
+///
+/// 调用方传的次序就是优先级：平台 → 路由 → 后端。三档都落在同一份语义上，
+/// 换上游适配器不用重写一遍（Trae / WorkBuddy 以前各自复制过一段同样的循环）。
+///
+/// 浅合并只替换顶层键，不递归：写 `{"thinking": {"type": "disabled"}}` 是整块替换
+/// 协议转换生成的 `thinking`，不是往里补一个字段。深合并会让"关掉一个嵌套开关"
+/// 变成要先把原对象全写一遍，反而没人写得对。
+///
+/// 覆盖类字段只认 JSON object：数组/标量/null 一律归成空对象。
+///
+/// 不在入口归一的话，一句 `"custom_body": []` 会一路带到转发时才被 `as_object()`
+/// 静默丢掉——屏上看着填了，实际一个字段都没注入，这种"填了没生效"最难查。
+pub fn normalize_override_object(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(_) => value.clone(),
+        _ => default_param_overrides(),
+    }
+}
+
+/// 值为 JSON `null` 时按字面量写入（发一个显式 null 给上游），**不是**删除该键——
+/// 与 V6 以来 backend 级覆盖的行为一致。
+pub fn merge_param_overrides(body: &mut serde_json::Value, layers: &[&serde_json::Value]) {
+    let Some(obj) = body.as_object_mut() else { return };
+    for layer in layers {
+        let Some(overrides) = layer.as_object() else { continue };
+        for (key, value) in overrides {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRouteRequest {
     #[serde(default = "default_lb_strategy")]
@@ -253,6 +290,8 @@ pub struct CreateRouteRequest {
     pub default_max_tokens: Option<u32>,
     #[serde(default)]
     pub request_nonce: bool,
+    #[serde(default = "default_param_overrides")]
+    pub param_overrides: serde_json::Value,
     pub backends: Vec<CreateBackendRequest>,
 }
 
@@ -263,6 +302,8 @@ pub struct UpdateRouteRequest {
     pub fallback: Option<String>,
     pub default_max_tokens: Option<u32>,
     pub request_nonce: Option<bool>,
+    /// 没写 = 不改；写了（含 `{}`）= 整份替换
+    pub param_overrides: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -409,5 +450,43 @@ mod tests {
         assert_eq!(b.estimate_cost(None, Some(500)), None);
         assert_eq!(b.estimate_cost(Some(1000), None), None);
         assert_eq!(b.estimate_cost(None, None), None);
+    }
+
+    // 三档覆盖的合并契约钉在这里：改任何一档的语义都得先让这两条测试红。
+    #[test]
+    fn override_layers_merge_in_priority_order() {
+        // 调用方给的次序就是赢家次序：平台 → 路由 → 后端。
+        let platform = serde_json::json!({ "temperature": 0.1, "top_k": 5 });
+        let route = serde_json::json!({ "temperature": 0.5, "user": "acct" });
+        let backend = serde_json::json!({ "temperature": 0.9 });
+        let mut body = serde_json::json!({ "model": "m1", "max_tokens": 100 });
+        merge_param_overrides(&mut body, &[&platform, &route, &backend]);
+        assert_eq!(body["temperature"], serde_json::json!(0.9), "后端压过路由与平台");
+        assert_eq!(body["user"], serde_json::json!("acct"), "低层的独占键要留着");
+        assert_eq!(body["top_k"], serde_json::json!(5));
+        assert_eq!(body["model"], serde_json::json!("m1"), "不能碰请求原有字段");
+    }
+
+    #[test]
+    fn overrides_are_shallow_and_null_is_written_literally() {
+        let mut body = serde_json::json!({ "nested": { "a": 1, "b": 2 } });
+        merge_param_overrides(&mut body, &[&serde_json::json!({ "nested": { "a": 9 } })]);
+        // 浅合并：整个对象换掉，不递归 —— `b` 不是被保留，而是跟着旧对象一起没了。
+        assert_eq!(body["nested"], serde_json::json!({ "a": 9 }));
+
+        merge_param_overrides(&mut body, &[&serde_json::json!({ "nested": null })]);
+        // null 按字面量写入，不是删键：上游会收到 "nested": null。
+        assert!(body["nested"].is_null());
+        assert!(body.as_object().unwrap().contains_key("nested"));
+    }
+
+    #[test]
+    fn non_object_overrides_normalize_to_empty() {
+        // 入口归一：填成数组/标量要在保存时就塌成 {}，而不是转发时静默失效。
+        for bad in [serde_json::json!([]), serde_json::json!("x"), serde_json::json!(7), serde_json::json!(null)] {
+            assert_eq!(normalize_override_object(&bad), serde_json::json!({}), "{bad} 应归一成空对象");
+        }
+        let ok = serde_json::json!({ "temperature": 0.2 });
+        assert_eq!(normalize_override_object(&ok), ok, "object 原样保留");
     }
 }

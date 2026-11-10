@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 35;
+pub const CURRENT_SCHEMA_VERSION: i64 = 36;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -334,6 +334,20 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         tracing::info!("Database migrated to V35 (concurrency indexes for stats/credit)");
     }
 
+    if current_version < 36 {
+        // 请求体覆盖此前只有 backend 一档（V6 的 backends.param_overrides），
+        // 想给整个虚拟模型或整个账号统一改参数就得逐个后端复制一遍。
+        // 补上路由级与平台级两档，合并口径见 `models::route::merge_param_overrides`。
+        // 两条 ALTER 走 add_column_if_missing：备份"只改版本号"的重放场景里列已存在，
+        // 裸 ALTER 会撞 duplicate column 把迁移卡死（V21 的测试钉的就是这个契约）。
+        add_column_if_missing(conn, "routes", "param_overrides",
+            "ALTER TABLE routes ADD COLUMN param_overrides TEXT")?;
+        add_column_if_missing(conn, "platforms", "custom_body",
+            "ALTER TABLE platforms ADD COLUMN custom_body TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 36)", [])?;
+        tracing::info!("Database migrated to V36 (route/platform param_overrides)");
+    }
+
     Ok(())
 }
 
@@ -545,6 +559,7 @@ CREATE TABLE IF NOT EXISTS checkin_tasks (
     updated_at    TEXT NOT NULL
 );
 "#;
+
 
 /// 请求正文只在显式开启时落库，默认关（见 §2 原则 10"默认不存请求正文"）。
 /// 单独一张表而不是给 `request_stats` 加 TEXT 列：绝大多数部署一行正文都不存，

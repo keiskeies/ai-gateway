@@ -153,6 +153,7 @@ pub(crate) mod test_support {
             api_key: String::new(),
             organization: None,
             custom_headers: serde_json::json!({}),
+            custom_body: serde_json::json!({}),
             status: PlatformStatus::Active,
             rate_limit: None,
             credit_budget: None,

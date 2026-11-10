@@ -59,6 +59,9 @@ pub struct PlatformRow {
     pub organization: Option<String>,
     #[serde(default = "empty_object")]
     pub custom_headers: serde_json::Value,
+    /// 平台级请求体覆盖；旧导出文档没有这个字段时按空对象处理。
+    #[serde(default = "empty_object")]
+    pub custom_body: serde_json::Value,
     #[serde(default = "default_platform_status")]
     pub status: PlatformStatus,
     #[serde(default)]
@@ -130,6 +133,9 @@ pub struct RouteRow {
     /// 每次上游尝试前置随机串；旧导出文档没有这个字段时按关闭处理。
     #[serde(default)]
     pub request_nonce: bool,
+    /// 路由级请求体覆盖；旧导出文档没有这个字段时按空对象处理。
+    #[serde(default = "empty_object")]
+    pub param_overrides: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +517,7 @@ mod tests {
             fallback: None,
             default_max_tokens: None,
             request_nonce: false,
+            param_overrides: serde_json::json!({}),
         });
         assert!(codes(&d.check()).contains(&"cfgMultipleRoutes"));
 

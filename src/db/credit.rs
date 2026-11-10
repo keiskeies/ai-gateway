@@ -571,6 +571,7 @@ mod tests {
             api_key: "sk-test".into(),
             organization: None,
             custom_headers: serde_json::Value::Null,
+            custom_body: serde_json::Value::Null,
             credit_budget: Some(budget),
             credit_window: Some(window.into()),
             // 积分台账只在 credit_unit=credits 时生效，所以这里必须显式声明，

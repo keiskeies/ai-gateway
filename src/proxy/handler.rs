@@ -9,7 +9,7 @@ use std::time::Instant;
 use crate::cache::{RouteCache, StatsWriter};
 use crate::error::AppError;
 use crate::lb::BackendSelector;
-use crate::models::route::ErrorType;
+use crate::models::route::{merge_param_overrides, ErrorType};
 use crate::models::stats::{RequestAttempt, RequestStat};
 use crate::protocol::{openai, anthropic, types::UnifiedRequest};
 
@@ -1009,13 +1009,25 @@ async fn handle_request(
             resolved_route.default_max_tokens,
         )?;
 
-        let (forward_body, forward_url_raw) = match &plan {
+        let (mut forward_body, forward_url_raw) = match &plan {
             Some(plan) => (plan.body.clone(), plan.url.clone()),
             None => {
                 let (body, url) = build_forward_request(unified_ref, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
                 (body, url)
             }
         };
+        // 请求体覆盖三档，一次合并在最后：平台 → 路由 → 后端，越具体越赢。
+        // 标准路径与私有适配器都在自己的 build 里合过一次 backend 档，这里按序重放
+        // 三档既补上了平台/路由两级，也让"最后合并"的优先级真正成立（适配器只会先写后端档，
+        // 后面平台/路由档不会反过来压过它——同键会被后端档再写一次）。
+        merge_param_overrides(
+            &mut forward_body,
+            &[
+                &resolved.platform.custom_body,
+                &resolved_route.param_overrides,
+                &resolved.backend.param_overrides,
+            ],
+        );
         let forward_url = sanitize_forward_url(&forward_url_raw, &resolved.platform.api_key);
 
         let mut req_builder = state.http_client.post(&forward_url_raw)
@@ -1417,14 +1429,10 @@ fn build_forward_request(
             }
         }
     }
-    // backend 级参数覆盖：最后 merge，覆盖优先（可强制 temperature / 注入平台特有字段等）
-    if let Some(overrides) = backend.param_overrides.as_object() {
-        if let Some(body_obj) = body.as_object_mut() {
-            for (k, v) in overrides {
-                body_obj.insert(k.clone(), v.clone());
-            }
-        }
-    }
+    // backend 级参数覆盖：先 merge 一档，让本函数返回的 body 自身是完整的
+    // （可强制 temperature / 注入平台特有字段等）。调用方随后按「平台 → 路由 → 后端」
+    // 再合一次三档，同键同值重写，优先级仍然由后端档说了算。
+    merge_param_overrides(&mut body, &[&backend.param_overrides]);
     // 思考映射观测：只记录参数形态，不记录思考内容
     if let Some(cfg) = &unified.reasoning {
         tracing::debug!(

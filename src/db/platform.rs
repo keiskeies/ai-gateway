@@ -4,8 +4,10 @@ use crate::models::model::NullableNumber;
 use crate::models::platform::*;
 use crate::db::DbPool;
 
+// custom_body 只能加在末尾：map_platform 全按下标取值，插在中间会把后面每一列读错。
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, status, \
-    rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, credit_unit, adapter";
+    rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, credit_unit, adapter, \
+    custom_body";
 
 fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
     let rate_limit_str: Option<String> = row.get(8)?;
@@ -26,6 +28,10 @@ fn map_platform(row: &rusqlite::Row) -> rusqlite::Result<Platform> {
         updated_at: row.get(13)?,
         credit_unit: row.get(14)?,
         adapter: row.get(15)?,
+        // NULL（V36 之前的行）与坏 JSON 都按空对象：不注入任何字段
+        custom_body: row.get::<_, Option<String>>(16)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default())),
     })
 }
 
@@ -76,6 +82,7 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
         api_key: req.api_key.clone(),
         organization: req.organization.clone(),
         custom_headers: req.custom_headers.clone(),
+        custom_body: crate::models::route::normalize_override_object(&req.custom_body),
         status: PlatformStatus::Active,
         rate_limit: None,
         credit_budget: req.credit_budget,
@@ -89,7 +96,7 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO platforms (id, name, type, base_url, api_key, organization, custom_headers, status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, credit_unit, adapter) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO platforms (id, name, type, base_url, api_key, organization, custom_headers, status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, credit_unit, adapter, custom_body) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             platform.id,
             platform.name,
@@ -107,6 +114,7 @@ pub fn create(pool: &DbPool, req: &CreatePlatformRequest) -> AppResult<Platform>
             platform.updated_at,
             platform.credit_unit,
             platform.adapter,
+            serde_json::to_string(&platform.custom_body)?,
         ],
     )?;
     Ok(platform)
@@ -183,6 +191,10 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdatePlatformRequest) -> AppResult
     if let Some(key) = &req.api_key { platform.api_key = key.clone(); }
     if let Some(org) = &req.organization { platform.organization = Some(org.clone()); }
     if let Some(hdrs) = &req.custom_headers { platform.custom_headers = hdrs.clone(); }
+    // 整份替换语义与 custom_headers 一致：屏上那份文本就是全部，删掉一行即少一个键
+    if let Some(body) = &req.custom_body {
+        platform.custom_body = crate::models::route::normalize_override_object(body);
+    }
     if let Some(status) = &req.status { platform.status = status.clone(); }
 
     // 积分字段是三态：没写 = 不改，null = 关闭，给值 = 设值。
@@ -239,7 +251,7 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdatePlatformRequest) -> AppResult
 
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE platforms SET name=?2, type=?3, base_url=?4, api_key=?5, organization=?6, custom_headers=?7, status=?8, credit_budget=?9, credit_window=?10, catalog_key=?11, updated_at=?12, credit_unit=?13, adapter=?14 WHERE id=?1",
+        "UPDATE platforms SET name=?2, type=?3, base_url=?4, api_key=?5, organization=?6, custom_headers=?7, status=?8, credit_budget=?9, credit_window=?10, catalog_key=?11, updated_at=?12, credit_unit=?13, adapter=?14, custom_body=?15 WHERE id=?1",
         rusqlite::params![
             id, platform.name, serde_json::to_string(&platform.platform_type)?,
             platform.base_url, platform.api_key, platform.organization,
@@ -247,6 +259,7 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdatePlatformRequest) -> AppResult
             serde_json::to_string(&platform.status)?,
             platform.credit_budget, platform.credit_window, platform.catalog_key, platform.updated_at,
             platform.credit_unit, platform.adapter,
+            serde_json::to_string(&platform.custom_body)?,
         ],
     )?;
     drop(conn);

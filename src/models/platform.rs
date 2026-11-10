@@ -126,6 +126,11 @@ pub struct Platform {
     pub api_key: String,
     pub organization: Option<String>,
     pub custom_headers: serde_json::Value,
+    /// 平台级参数覆盖：JSON object，该账号每次转发前都会 merge 进请求体。
+    /// 三档覆盖里优先级最低的一档（被路由级、backend 级的同名键压过）。
+    /// 与 `custom_headers` 对称：那个附加在头里，这个注入 body 顶层。
+    #[serde(default = "crate::models::route::default_param_overrides")]
+    pub custom_body: serde_json::Value,
     pub status: PlatformStatus,
     pub rate_limit: Option<RateLimit>,
     /// 上游账号的积分预算（如魔塔每天 250 分）。NULL = 不启用积分计费。
@@ -161,6 +166,9 @@ pub struct CreatePlatformRequest {
     pub organization: Option<String>,
     #[serde(default)]
     pub custom_headers: serde_json::Value,
+    /// 平台级参数覆盖；非对象（数组/标量）按空对象处理
+    #[serde(default)]
+    pub custom_body: serde_json::Value,
     #[serde(default)]
     pub credit_budget: Option<f64>,
     #[serde(default)]
@@ -185,6 +193,8 @@ pub struct UpdatePlatformRequest {
     pub api_key: Option<String>,
     pub organization: Option<String>,
     pub custom_headers: Option<serde_json::Value>,
+    /// 没写 = 不改；写了（含 `{}`）= 整份替换
+    pub custom_body: Option<serde_json::Value>,
     pub status: Option<PlatformStatus>,
     /// 三态：没写 = 不改，null = 关闭积分，数字 = 设值。
     #[serde(default = "keep_number")]
@@ -300,6 +310,7 @@ mod tests {
             api_key: api_key.into(),
             organization: None,
             custom_headers: serde_json::json!({}),
+            custom_body: serde_json::json!({}),
             status: PlatformStatus::Active,
             rate_limit: None,
             credit_budget: None,

@@ -53,6 +53,7 @@ import { StatusPill } from '../components/ui/StatusPill'
 import { formatCompact, formatDuration, formatNumber, successRateTone } from '../lib/format'
 import type { ApiKeyRow, PlatformRow, ProxyRow, ProxyStats } from '../types/stats'
 import { Field } from '../components/Field'
+import { isOverrideTextInvalid, jsonText, parseOverrideText } from '../lib/overrides'
 
 interface BackendInfo {
   id: string
@@ -78,6 +79,7 @@ interface RouteInfo {
   fallback?: string | null
   default_max_tokens?: number | null
   request_nonce?: boolean | null
+  param_overrides?: Record<string, unknown>
   backends: BackendInfo[]
 }
 
@@ -120,6 +122,16 @@ const emptyDraft: BackendDraft = {
   reasoning_style: 'Auto',
   reasoning_echo: 'Drop',
   param_overrides: '',
+}
+
+const emptyRouteDraft = {
+  strategy: 'RoundRobin',
+  nonce: false,
+  retries: 2,
+  backoff: 500,
+  maxTokens: 4096,
+  // 覆盖类字段在屏上就是一段可编辑文本；空串 = 不注入任何字段
+  overrides: '',
 }
 
 const LB_OPTIONS = [
@@ -289,13 +301,7 @@ export default function ModelDetail() {
   const impact = impactQuery.data
   const adminPort = settingsQuery.data?.admin_port ?? 1994
 
-  const [routeDraft, setRouteDraft] = useState({
-    strategy: 'RoundRobin',
-    nonce: false,
-    retries: 2,
-    backoff: 500,
-    maxTokens: 4096,
-  })
+  const [routeDraft, setRouteDraft] = useState(emptyRouteDraft)
 
   useEffect(() => {
     setTab('routing')
@@ -313,18 +319,14 @@ export default function ModelDetail() {
     // 所以只在用户没动过表单时用服务端值初始化。
     if (!routeDraftTouched.current) {
       setRouteDraft(firstRoute ? {
+        ...emptyRouteDraft,
         strategy: firstRoute.lb_strategy || 'RoundRobin',
         nonce: firstRoute.request_nonce ?? false,
         retries: firstRoute.retry_policy?.max_retries ?? 2,
         backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
         maxTokens: firstRoute.default_max_tokens ?? 4096,
-      } : {
-        strategy: 'RoundRobin',
-        nonce: false,
-        retries: 2,
-        backoff: 500,
-        maxTokens: 4096,
-      })
+        overrides: jsonText(firstRoute.param_overrides),
+      } : emptyRouteDraft)
     }
     setSelectedBackendId(current => (
       current && firstRoute?.backends?.some(backend => backend.id === current)
@@ -440,9 +442,7 @@ export default function ModelDetail() {
       unknown_params: backend.unknown_params || 'Auto',
       reasoning_style: backend.reasoning_style || 'Auto',
       reasoning_echo: backend.reasoning_echo || 'Drop',
-      param_overrides: backend.param_overrides && Object.keys(backend.param_overrides).length
-        ? JSON.stringify(backend.param_overrides, null, 2)
-        : '',
+      param_overrides: jsonText(backend.param_overrides),
     })
     setBackendModalOpen(true)
   }
@@ -454,16 +454,11 @@ export default function ModelDetail() {
       return
     }
     let overrides: Record<string, unknown> = {}
-    const overrideText = draft.param_overrides.trim()
-    if (overrideText) {
-      try {
-        const parsed = JSON.parse(overrideText)
-        if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) throw new Error('invalid')
-        overrides = parsed
-      } catch {
-        notifications.show({ message: t(locale, 'paramOverridesInvalid'), color: 'red' })
-        return
-      }
+    try {
+      overrides = parseOverrideText(draft.param_overrides)
+    } catch {
+      notifications.show({ message: t(locale, 'paramOverridesInvalid'), color: 'red' })
+      return
     }
     const payload = {
       platform_id: draft.platform_id,
@@ -513,6 +508,13 @@ export default function ModelDetail() {
 
   const saveRoute = async () => {
     if (!route) return
+    let routeOverrides: Record<string, unknown>
+    try {
+      routeOverrides = parseOverrideText(routeDraft.overrides)
+    } catch {
+      notifications.show({ message: t(locale, 'paramOverridesInvalid'), color: 'red' })
+      return
+    }
     setSaving(true)
     try {
       await updateRoute(route.id, {
@@ -524,6 +526,7 @@ export default function ModelDetail() {
         },
         default_max_tokens: routeDraft.maxTokens,
         request_nonce: routeDraft.nonce,
+        param_overrides: routeOverrides,
       })
       // 存过之后草稿就是服务端值了，让回填重新接管（拿到后端归一化后的结果）
       routeDraftTouched.current = false
@@ -721,6 +724,22 @@ export default function ModelDetail() {
                       />
                       <div className="console-note">{t(locale, 'nonceToggleHint')}</div>
                     </div>
+                    <div className="console-field console-form-full">
+                      <label>{t(locale, 'routeParamOverrides')}</label>
+                      <Textarea
+                        size="xs"
+                        autosize
+                        minRows={2}
+                        maxRows={8}
+                        value={routeDraft.overrides}
+                        onChange={event => editRouteDraft({ overrides: event.currentTarget.value })}
+                        placeholder='{"temperature": 0.2, "max_tokens": 8192}'
+                        error={isOverrideTextInvalid(routeDraft.overrides)}
+                      />
+                      {isOverrideTextInvalid(routeDraft.overrides)
+                        && <div className="console-note warn">{t(locale, 'paramOverridesInvalid')}</div>}
+                      <div className="console-note">{t(locale, 'routeParamOverridesHint')}</div>
+                    </div>
                     <div className="console-field">
                       <label>{t(locale, 'weightDistribution')}</label>
                       <div className="console-weight-preview">
@@ -740,6 +759,7 @@ export default function ModelDetail() {
                           retries: route.retry_policy?.max_retries ?? 2,
                           backoff: route.retry_policy?.backoff_ms ?? 500,
                           maxTokens: route.default_max_tokens ?? 4096,
+                          overrides: jsonText(route.param_overrides),
                         })
                       }}>{t(locale, 'discardChanges')}</Button>
                     </div>
@@ -995,7 +1015,8 @@ export default function ModelDetail() {
           <Field label={t(locale, 'unknownParamsLabel')}>
             <Select size="xs" data={UNKNOWN_OPTIONS.map(o => ({ ...o, label: optionLabel(UNKNOWN_LABEL_KEYS, o.value, locale) }))} value={draft.unknown_params} onChange={value => setDraft(prev => ({ ...prev, unknown_params: value || 'Auto' }))} allowDeselect={false} />
           </Field>
-          <Field full label={t(locale, 'paramOverridesLabel')}>
+          <div className="console-field console-form-full">
+            <label>{t(locale, 'paramOverridesLabel')}</label>
             <Textarea
               size="xs"
               autosize
@@ -1004,8 +1025,12 @@ export default function ModelDetail() {
               value={draft.param_overrides}
               onChange={event => setDraft(prev => ({ ...prev, param_overrides: event.currentTarget.value }))}
               placeholder='{"temperature": 0.2, "max_tokens": 8192}'
+              error={isOverrideTextInvalid(draft.param_overrides)}
             />
-          </Field>
+            {isOverrideTextInvalid(draft.param_overrides)
+              && <div className="console-note warn">{t(locale, 'paramOverridesInvalid')}</div>}
+            <div className="console-note">{t(locale, 'paramOverridesHint')}</div>
+          </div>
         </div>
         <div className="console-inspector-actions" style={{ padding: '16px 0 0' }}>
           <Button size="xs" variant="default" onClick={() => setBackendModalOpen(false)}>{t(locale, 'cancel')}</Button>

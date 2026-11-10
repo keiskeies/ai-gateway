@@ -11,12 +11,13 @@ use crate::models::route::{
 };
 
 /// 导出的是"配置"，不是运行数据：六张表就是全部，统计、健康历史、账号与会话都不在这里。
+// custom_body / param_overrides 只能加在末尾：下面的读取全按下标取值，插在中间会读错列。
 const PLATFORM_COLS: &str = "id, name, type, base_url, api_key, organization, custom_headers, \
-    status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at";
+    status, rate_limit, credit_budget, credit_window, catalog_key, created_at, updated_at, custom_body";
 const MODEL_COLS: &str = "id, platform_id, model_id, display_name, max_tokens, context_window, \
     input_price, output_price, cache_read_price, cache_write_price, credit_price, peak_pricing, \
     catalog_key, capabilities, status";
-const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce";
+const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides";
 const BACKEND_COLS: &str = "id, route_id, platform_id, model_id, weight, priority, max_concurrent, \
     capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo";
 const API_KEY_COLS: &str = "id, name, key_hash, key_mask, proxy_id, created_at, last_used, \
@@ -103,6 +104,7 @@ fn export_conn(conn: &Connection, include_secrets: bool) -> AppResult<ConfigDocu
         fallback: row.get(4)?,
         default_max_tokens: row.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u32),
         request_nonce: row.get::<_, i64>(6)? != 0,
+        param_overrides: decode_opt(row.get::<_, Option<String>>(7)?).unwrap_or_else(|| serde_json::json!({})),
     }))? {
         doc.routes.push(row?);
     }
@@ -164,6 +166,7 @@ fn map_platform(row: &Row<'_>, include_secrets: bool) -> rusqlite::Result<Platfo
         api_key: include_secrets.then_some(raw_key),
         organization: row.get(5)?,
         custom_headers: decode(row.get::<_, String>(6)?, serde_json::json!({})),
+        custom_body: decode_opt(row.get::<_, Option<String>>(14)?).unwrap_or_else(|| serde_json::json!({})),
         status: decode(row.get::<_, String>(7)?, PlatformStatus::Active),
         rate_limit: decode_opt(row.get::<_, Option<String>>(8)?),
         credit_budget: row.get(9)?,
@@ -407,7 +410,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| crate::catalog::catalog_key(&row.platform_type, &row.base_url));
         tx.execute(
-            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)"),
+            &format!("INSERT INTO platforms ({PLATFORM_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
             rusqlite::params![
                 row.id,
                 row.name,
@@ -424,6 +427,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 catalog_key,
                 row.created_at,
                 row.updated_at,
+                encode(&crate::models::route::normalize_override_object(&row.custom_body))?,
             ],
         )?;
         result.platforms.add += 1;
@@ -489,7 +493,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
             continue;
         }
         tx.execute(
-            &format!("INSERT INTO routes ({ROUTE_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7)"),
+            &format!("INSERT INTO routes ({ROUTE_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"),
             rusqlite::params![
                 row.id,
                 row.proxy_id,
@@ -498,6 +502,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.fallback,
                 row.default_max_tokens.map(|v| v as i64),
                 row.request_nonce as i64,
+                encode(&crate::models::route::normalize_override_object(&row.param_overrides))?,
             ],
         )?;
         result.routes.add += 1;
@@ -518,7 +523,7 @@ pub fn apply(conn: &mut Connection, doc: &ConfigDocument, mode: ImportMode) -> A
                 row.max_concurrent.map(|v| v as i64),
                 encode(&row.capabilities)?,
                 encode(&row.status)?,
-                encode(&row.param_overrides)?,
+                encode(&crate::models::route::normalize_override_object(&row.param_overrides))?,
                 encode(&row.unknown_params)?,
                 encode(&row.reasoning_style)?,
                 encode(&row.reasoning_echo)?,

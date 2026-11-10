@@ -236,6 +236,8 @@ pub fn restore(pool: &DbPool, db_path: &Path, name: &str) -> AppResult<RestoreRe
 
     let safety = create(pool, db_path)?;
 
+    // 还原后库结构版本；迁移成功时等于 supported。
+    let mut restored_version = backup_version;
     {
         let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
         conn.busy_timeout(std::time::Duration::from_millis(RESTORE_BUSY_MS))
@@ -247,11 +249,28 @@ pub fn restore(pool: &DbPool, db_path: &Path, name: &str) -> AppResult<RestoreRe
                     safety.name
                 ))
             })?;
+        // 还原会把表结构一起倒回旧版本，而调用方紧接着就刷路由缓存。缓存按当前代码的
+        // 列清单读 routes/platforms：旧结构缺列 → 每个代理的路由都读失败 → 全被当成
+        // "这个代理有问题"跳过 → 快照变空 → 转发侧一律 404「模型不存在」。
+        // 用户看到的是和自己操作完全对不上的错，而且不重启就一直错。
+        // 迁移按版本号跳过已完成步骤，所以补跑只会执行这份备份缺的那几步。
+        // 备份文件的结构与它的版本号是一致的（备份都取自迁移完的库），因此 ALTER 不会撞
+        // 已存在的列。真撞上了（比如手工改过版本号的库）就走下面这条：记一条 warn，
+        // needs_restart 保持原义，交给重启处理，绝不假装成功。
+        match crate::db::schema::run_migrations(&conn) {
+            Ok(()) => restored_version = Some(crate::db::schema::version(&conn)),
+            Err(e) => tracing::warn!(
+                "还原后补迁移失败（{}）；库结构停在 V{}，需重启继续。还原前的状态在 {}",
+                e,
+                backup_version.unwrap_or(0),
+                safety.name
+            ),
+        }
     }
 
     Ok(RestoreResult {
-        // 结构与本机程序不一致就要重启：迁移只在启动时跑，旧库得重启才会补到当前版本
-        needs_restart: backup_version != Some(supported),
+        // 结构已就地补齐就不必重启；只有迁移没补到当前版本（中途失败）才要提示。
+        needs_restart: restored_version != Some(supported),
         current_version: supported,
         backup_version,
         restored_from: name.to_string(),
@@ -340,7 +359,8 @@ mod tests {
         assert!(!result.needs_restart, "同版本还原不该提示重启");
         assert_eq!(count_proxies(&pool), 1, "还原要回到快照那一刻");
 
-        // 结构落后的快照：能还原，但必须说清要重启（迁移只在启动时跑）
+        // 结构落后的快照：能还原，还原后就地补迁移（迁移按版本号跳步，且加列走
+        // add_column_if_missing，已存在的列不会被重复添加）。
         let older = backups_dir(&path).join("aigw-older.db");
         std::fs::copy(backups_dir(&path).join(&info.name), &older).expect("copy snapshot");
         {
@@ -353,7 +373,16 @@ mod tests {
         }
         let back = restore(&pool, &path, "aigw-older.db").expect("旧结构的快照也要能还原");
         assert_eq!(back.backup_version, Some(supported - 1));
-        assert!(back.needs_restart, "结构落后本机要提示重启");
+        // 补迁移成功后 live 库已经回到当前版本，不需要重启；只有迁移中途失败才提示。
+        let live_version = {
+            let conn = pool.get().unwrap();
+            crate::db::schema::version(&conn)
+        };
+        assert_eq!(live_version, supported, "就地补迁移要把 live 库拉回当前版本");
+        assert!(
+            !back.needs_restart || back.backup_version != Some(live_version),
+            "结构已补齐就不该提示重启"
+        );
 
         // 这才是保险快照的意义：当前库已经被灌旧了，仍要能把新版本的原始快照倒回去
         let forward = restore(&pool, &path, &info.name)

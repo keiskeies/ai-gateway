@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ActionIcon, Button, Checkbox, Group, Modal, MultiSelect, PasswordInput, Select, Table, TextInput, Tooltip } from '@mantine/core'
+import { ActionIcon, Button, Checkbox, Group, Modal, MultiSelect, PasswordInput, Select, Table, TextInput, Textarea, Tooltip } from '@mantine/core'
 import { notifications } from '@mantine/notifications'
 import {
   IconArrowLeft,
@@ -32,6 +32,7 @@ import { formatCompact, formatCost, formatCostCoverage, formatDuration, formatLo
 import { PLATFORM_TYPE_LABELS, platformTypeLabel } from '../lib/platform'
 import type { PlatformCreditUsage, PlatformDetail, PlatformHealthRecord, PlatformStats, ProxyRow, RouteRow } from '../types/stats'
 import { Field } from '../components/Field'
+import { jsonText, parseOverrideText, sameOverrideText } from '../lib/overrides'
 
 interface LinkedModel {
   proxy: ProxyRow
@@ -224,9 +225,11 @@ interface PlatformDraft {
   organization: string
   credit_budget: string
   credit_window: string
+  // 平台级请求体覆盖：屏上就是一段 JSON 文本，空串 = 不注入任何字段
+  custom_body: string
 }
 
-const emptyDraft: PlatformDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '', credit_budget: '', credit_window: 'day' }
+const emptyDraft: PlatformDraft = { name: '', type: 'OpenAI', base_url: '', api_key: '', organization: '', credit_budget: '', credit_window: 'day', custom_body: '' }
 
 const draftFrom = (platform: PlatformDetail): PlatformDraft => ({
   name: platform.name,
@@ -236,6 +239,7 @@ const draftFrom = (platform: PlatformDetail): PlatformDraft => ({
   organization: platform.organization || '',
   credit_budget: platform.credit_budget == null ? '' : String(platform.credit_budget),
   credit_window: platform.credit_window || 'day',
+  custom_body: jsonText(platform.custom_body as Record<string, unknown> | undefined),
 })
 
 interface HeaderRow {
@@ -606,6 +610,14 @@ export default function ProviderDetail() {
   const dupHeader = headerNames.length !== new Set(headerNames).size
   const creditBudgetInvalid = draft.credit_budget.trim() !== ''
     && (!Number.isFinite(Number(draft.credit_budget)) || Number(draft.credit_budget) <= 0)
+  // 覆盖 JSON 在输入过程中必然有半截非法的时刻，所以只让"保存"按钮禁用，
+  // 不把它并进 invalid（那会让整页按钮统一变灰，看不出是哪一格的问题）
+  let bodyDraft: Record<string, unknown> | null = null
+  try {
+    bodyDraft = parseOverrideText(draft.custom_body)
+  } catch {
+    bodyDraft = null
+  }
   const dirty = Boolean(current) && (
     draft.name !== current!.name
     || draft.type !== current!.type
@@ -615,8 +627,9 @@ export default function ProviderDetail() {
     || draft.credit_budget !== (current!.credit_budget == null ? '' : String(current!.credit_budget))
     || (draft.credit_budget.trim() !== '' && draft.credit_window !== (current!.credit_window || 'day'))
     || !sameHeaders(headersDraft, headersToPayload(headerRowsFrom(current!)))
+    || !sameOverrideText(draft.custom_body, current!.custom_body)
   )
-  const invalid = !draft.name.trim() || !draft.base_url.trim() || dupHeader || creditBudgetInvalid
+  const invalid = !draft.name.trim() || !draft.base_url.trim() || dupHeader || creditBudgetInvalid || bodyDraft === null
   const creditWindowLabel = current?.credit_window === 'week'
     ? t(locale, 'creditWindowWeek')
     : current?.credit_window === 'month'
@@ -648,6 +661,7 @@ export default function ProviderDetail() {
         base_url: draft.base_url.trim(),
         organization: draft.organization.trim(),
         custom_headers: headersDraft,
+        custom_body: bodyDraft ?? {},
         // 空预算 = 关闭积分；窗口只在有预算时提交，避免留下“有窗口没预算”的半套配置
         credit_budget: draft.credit_budget.trim() === '' ? null : Number(draft.credit_budget),
         credit_window: draft.credit_budget.trim() === '' ? null : draft.credit_window,
@@ -900,6 +914,21 @@ export default function ProviderDetail() {
               </div>
               {dupHeader && <div className="console-note warn">{t(locale, 'headerDup')}</div>}
               <div className="console-note">{t(locale, 'customHeadersHint')}</div>
+            </div>
+            <div className="console-field console-form-full">
+              <label>{t(locale, 'customBody').toUpperCase()}</label>
+              <Textarea
+                size="xs"
+                autosize
+                minRows={2}
+                maxRows={8}
+                classNames={{ input: 'console-mono' }}
+                value={draft.custom_body}
+                onChange={event => setField('custom_body', event.currentTarget.value)}
+                placeholder='{"temperature": 0.2, "user": "acct-1"}'
+              />
+              {bodyDraft === null && <div className="console-note warn">{t(locale, 'paramOverridesInvalid')}</div>}
+              <div className="console-note">{t(locale, 'customBodyHint')}</div>
             </div>
             <div className="console-inspector-field"><span className="k">{t(locale, 'createdAt')}</span><span className="v mono">{new Date(platform.created_at).toLocaleString()}</span></div>
             <div className="console-route-actions">

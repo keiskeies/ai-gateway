@@ -50,7 +50,7 @@ fn backend_by_id(pool: &DbPool, id: &str) -> AppResult<Backend> {
 pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let result = conn.query_row(
-        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes WHERE proxy_id=?1",
+        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides FROM routes WHERE proxy_id=?1",
         [proxy_id],
         |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -59,6 +59,9 @@ pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
             request_nonce: row.get::<_, i64>(6)? != 0,
+            param_overrides: row.get::<_, Option<String>>(7)?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_else(default_param_overrides),
             backends: vec![],
         }),
     );
@@ -76,7 +79,7 @@ pub fn get_by_proxy(pool: &DbPool, proxy_id: &str) -> AppResult<Option<Route>> {
 pub fn get(pool: &DbPool, id: &str) -> AppResult<Route> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let mut route = conn.query_row(
-        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes WHERE id=?1",
+        "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides FROM routes WHERE id=?1",
         [id],
         |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -85,6 +88,9 @@ pub fn get(pool: &DbPool, id: &str) -> AppResult<Route> {
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
             request_nonce: row.get::<_, i64>(6)? != 0,
+            param_overrides: row.get::<_, Option<String>>(7)?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_else(default_param_overrides),
             backends: vec![],
         }),
     )?;
@@ -107,7 +113,7 @@ pub fn list_all(pool: &DbPool) -> AppResult<Vec<Route>> {
 
     let mut routes: Vec<Route> = {
         let mut stmt = conn.prepare(
-            "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce FROM routes",
+            "SELECT id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides FROM routes",
         )?;
         let rows = stmt.query_map([], |row| Ok(Route {
             id: row.get(0)?, proxy_id: row.get(1)?,
@@ -116,6 +122,9 @@ pub fn list_all(pool: &DbPool) -> AppResult<Vec<Route>> {
             fallback: row.get(4)?,
             default_max_tokens: row.get(5)?,
             request_nonce: row.get::<_, i64>(6)? != 0,
+            param_overrides: row.get::<_, Option<String>>(7)?
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_else(default_param_overrides),
             backends: vec![],
         }))?;
         rows.collect::<Result<Vec<_>, _>>()?
@@ -144,9 +153,10 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
     let route_id = uuid::Uuid::new_v4().to_string();
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         rusqlite::params![route_id, proxy_id, serde_json::to_string(&req.lb_strategy)?,
-            serde_json::to_string(&req.retry_policy)?, req.fallback, req.default_max_tokens, req.request_nonce],
+            serde_json::to_string(&req.retry_policy)?, req.fallback, req.default_max_tokens, req.request_nonce,
+            serde_json::to_string(&normalize_override_object(&req.param_overrides))?],
     )?;
     drop(conn);
 
@@ -155,7 +165,7 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
         let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
         conn.execute(
             "INSERT INTO backends (id, route_id, platform_id, model_id, weight, priority, max_concurrent, capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-            rusqlite::params![bid, route_id, breq.platform_id, breq.model_id, breq.weight, breq.priority, breq.max_concurrent, serde_json::to_string(&breq.capabilities)?, serde_json::to_string(&BackendStatus::Active)?, serde_json::to_string(&breq.param_overrides)?, serde_json::to_string(&breq.unknown_params)?, serde_json::to_string(&breq.reasoning_style)?, serde_json::to_string(&breq.reasoning_echo)?],
+            rusqlite::params![bid, route_id, breq.platform_id, breq.model_id, breq.weight, breq.priority, breq.max_concurrent, serde_json::to_string(&breq.capabilities)?, serde_json::to_string(&BackendStatus::Active)?, serde_json::to_string(&normalize_override_object(&breq.param_overrides))?, serde_json::to_string(&breq.unknown_params)?, serde_json::to_string(&breq.reasoning_style)?, serde_json::to_string(&breq.reasoning_echo)?],
         )?;
     }
     // 回读而不是用手写的结构体：单价只在带 LEFT JOIN models 的查询里才拿得到
@@ -165,6 +175,7 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
         lb_strategy: req.lb_strategy.clone(), retry_policy: req.retry_policy.clone(),
         fallback: req.fallback.clone(), backends, default_max_tokens: req.default_max_tokens,
         request_nonce: req.request_nonce,
+        param_overrides: normalize_override_object(&req.param_overrides),
     })
 }
 
@@ -175,11 +186,16 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateRouteRequest) -> AppResult<Ro
     if let Some(f) = &req.fallback { route.fallback = Some(f.clone()); }
     if let Some(m) = req.default_max_tokens { route.default_max_tokens = Some(m); }
     if let Some(n) = req.request_nonce { route.request_nonce = n; }
+    // 整份替换：屏上那段 JSON 就是全部，语义同 backend 级
+    if let Some(po) = &req.param_overrides {
+        route.param_overrides = normalize_override_object(po);
+    }
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5, request_nonce=?6 WHERE id=?1",
+        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5, request_nonce=?6, param_overrides=?7 WHERE id=?1",
         rusqlite::params![id, serde_json::to_string(&route.lb_strategy)?,
-            serde_json::to_string(&route.retry_policy)?, route.fallback, route.default_max_tokens, route.request_nonce],
+            serde_json::to_string(&route.retry_policy)?, route.fallback, route.default_max_tokens, route.request_nonce,
+            serde_json::to_string(&route.param_overrides)?],
     )?;
     Ok(route)
 }
@@ -207,7 +223,7 @@ pub fn add_backend(pool: &DbPool, route_id: &str, req: &CreateBackendRequest) ->
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
         "INSERT INTO backends (id, route_id, platform_id, model_id, weight, priority, max_concurrent, capabilities, status, param_overrides, unknown_params, reasoning_style, reasoning_echo) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-        rusqlite::params![id, route_id, req.platform_id, req.model_id, req.weight, req.priority, req.max_concurrent, serde_json::to_string(&req.capabilities)?, serde_json::to_string(&BackendStatus::Active)?, serde_json::to_string(&req.param_overrides)?, serde_json::to_string(&req.unknown_params)?, serde_json::to_string(&req.reasoning_style)?, serde_json::to_string(&req.reasoning_echo)?],
+        rusqlite::params![id, route_id, req.platform_id, req.model_id, req.weight, req.priority, req.max_concurrent, serde_json::to_string(&req.capabilities)?, serde_json::to_string(&BackendStatus::Active)?, serde_json::to_string(&normalize_override_object(&req.param_overrides))?, serde_json::to_string(&req.unknown_params)?, serde_json::to_string(&req.reasoning_style)?, serde_json::to_string(&req.reasoning_echo)?],
     )?;
     drop(conn);
     // 回读：单价只在带 LEFT JOIN 的查询里才有，手写结构体给不出真实价格
@@ -221,7 +237,7 @@ pub fn update_backend(pool: &DbPool, id: &str, req: &UpdateBackendRequest) -> Ap
     if let Some(m) = req.max_concurrent { b.max_concurrent = Some(m); }
     if let Some(c) = &req.capabilities { b.capabilities = c.clone(); }
     if let Some(s) = &req.status { b.status = s.clone(); }
-    if let Some(po) = &req.param_overrides { b.param_overrides = po.clone(); }
+    if let Some(po) = &req.param_overrides { b.param_overrides = normalize_override_object(po); }
     if let Some(up) = &req.unknown_params { b.unknown_params = up.clone(); }
     if let Some(rs) = &req.reasoning_style { b.reasoning_style = rs.clone(); }
     if let Some(re) = &req.reasoning_echo { b.reasoning_echo = re.clone(); }
@@ -303,6 +319,7 @@ mod tests {
             api_key: "sk-test".into(),
             organization: None,
             custom_headers: serde_json::Value::Null,
+            custom_body: serde_json::Value::Null,
             credit_budget: None,
             credit_window: None,
             credit_unit: None,
@@ -319,6 +336,7 @@ mod tests {
             fallback: None,
             default_max_tokens: None,
             request_nonce: false,
+            param_overrides: serde_json::json!({}),
             backends: vec![CreateBackendRequest {
                 platform_id: platform.id.clone(),
                 model_id: "gpt-test".into(),
@@ -364,7 +382,7 @@ mod tests {
         let other = crate::db::platform::create(&pool, &CreatePlatformRequest {
             name: "plat-2".into(), platform_type: PlatformType::OpenAI,
             base_url: "http://127.0.0.1:2/v1".into(), api_key: "sk-2".into(),
-            organization: None, custom_headers: serde_json::Value::Null,
+            organization: None, custom_headers: serde_json::Value::Null, custom_body: serde_json::Value::Null,
             credit_budget: None, credit_window: None,
             credit_unit: None,
             adapter: None,

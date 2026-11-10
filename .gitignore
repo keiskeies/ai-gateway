@@ -48,3 +48,6 @@ __pycache__/
 
 # 本机构建包装器（MSVC 环境 + TEMP + CARGO_TARGET_DIR，因人而异，不入库）
 /build.bat
+
+# 本地 Windows 交叉编译配置(不出现在 CI)
+Cross.toml

@@ -327,6 +327,8 @@ export interface PlatformDetail {
   api_key: string
   organization?: string | null
   custom_headers?: Record<string, unknown>
+  /** 平台级请求体覆盖：转发前 merge 进 body 顶层，优先级低于路由级与后端级 */
+  custom_body?: Record<string, unknown>
   status: string
   rate_limit?: { rpm?: number; tpm?: number } | null
   /** 上游积分预算；null/undefined = 不启用积分 */

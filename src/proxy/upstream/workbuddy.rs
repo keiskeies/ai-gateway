@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use super::{AdapterCredential, ForwardPlan};
 use crate::error::{AppError, AppResult};
-use crate::models::route::Backend;
+use crate::models::route::{merge_param_overrides, Backend};
 use crate::protocol::types::{Role, ToolChoice};
 use crate::protocol::UnifiedRequest;
 
@@ -171,13 +171,9 @@ fn build_body(
         }
     }
 
-    if let Some(overrides) = backend.param_overrides.as_object() {
-        if let Some(obj) = body.as_object_mut() {
-            for (k, v) in overrides {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
-    }
+    // 与标准路径同一份合并语义（`models::route::merge_param_overrides`）。
+    // 平台级/路由级两档由 handler 在最后统一补，那里是三条路径的汇合点。
+    merge_param_overrides(&mut body, &[&backend.param_overrides]);
     body
 }
 
