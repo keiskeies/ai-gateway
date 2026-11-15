@@ -40,8 +40,10 @@ pub fn apply(unified: &mut UnifiedRequest, surface: Surface) -> String {
             insert_leading_user(unified, nonce.clone());
         }
         Surface::Messages => {
-            if let Some(first) = unified.messages.first_mut() {
-                if first.role == Role::System && prefix_content(&mut first.content, &nonce) {
+            // 不要求 system 一定在 messages[0]：客户端把它插在中段时，
+            // openai::to_request 会合并并提到首位，nonce 跟着走才能仍在最前面。
+            if let Some(first) = unified.messages.iter_mut().find(|m| m.role == Role::System) {
+                if prefix_content(&mut first.content, &nonce) {
                     return nonce;
                 }
             }
@@ -70,7 +72,7 @@ fn insert_leading_user(unified: &mut UnifiedRequest, nonce: String) {
     });
 }
 
-/// 内容是字符串或内容块数组；数组时拼到第一个 text 块。返回是否真的写进去了。
+/// 内容是字符串或内容块数组；数组时拼到第一个 text 块，没有 text 块就插一个。返回是否真的写进去了。
 fn prefix_content(content: &mut Option<serde_json::Value>, nonce: &str) -> bool {
     let Some(value) = content.as_mut() else { return false };
     match value {
@@ -89,7 +91,9 @@ fn prefix_content(content: &mut Option<serde_json::Value>, nonce: &str) -> bool 
                 block["text"] = serde_json::Value::String(format!("{nonce}\n{text}"));
                 return true;
             }
-            false
+            // 只有图片之类的块：不插 text 块的话整段 nonce 都会丢
+            blocks.insert(0, serde_json::json!({"type": "text", "text": nonce}));
+            true
         }
         _ => false,
     }
@@ -207,6 +211,35 @@ mod tests {
         assert_eq!(u.messages.len(), 2);
         assert_eq!(u.messages[0].role, Role::User);
         assert_eq!(first_text(&u.messages[1]), "hi");
+    }
+
+    #[test]
+    fn messages_surface_prefixes_system_at_any_position() {
+        // 客户端把 system 插在中段：注入仍然要落在 system 上，由 to_request 提到首位
+        let mut u = request(None, serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "中段"}
+        ]));
+        apply(&mut u, Surface::Messages);
+        assert_eq!(u.messages.len(), 2, "不应插消息");
+        let text = first_text(&u.messages[1]);
+        let (nonce, rest) = text.split_once('\n').expect("应有换行分隔");
+        assert!((32..=128).contains(&nonce.len()));
+        assert_eq!(rest, "中段");
+    }
+
+    #[test]
+    fn messages_surface_prefixes_image_only_system() {
+        // 只有图片块时不插 text 块的话，整段 nonce 会静默丢失
+        let mut u = request(None, serde_json::json!([{
+            "role": "system",
+            "content": [{"type": "image_url", "image_url": {"url": "x"}}]
+        }]));
+        apply(&mut u, Surface::Messages);
+        let blocks = u.messages[0].content.as_ref().unwrap().as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert!(blocks[0]["text"].as_str().unwrap().chars().all(|c| c.is_ascii_alphanumeric()));
+        assert_eq!(blocks[1]["type"], "image_url");
     }
 
     #[test]

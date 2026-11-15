@@ -160,12 +160,17 @@ pub fn parse_request(raw: serde_json::Value) -> Result<UnifiedRequest, String> {
         .map_err(|e| format!("Invalid OpenAI request: {}", e))?;
 
     let mut messages = Vec::new();
-    let mut system = None;
+    let mut system: Option<String> = None;
+    // 多条 system 全部并入顶层字段：Anthropic 目标只认这一条，按「最后一条胜出」会把前面的整段丢掉
+    let mut system_parts: Vec<String> = Vec::new();
 
     for msg in req.messages {
         match msg.role.as_str() {
             "system" => {
-                system = msg.content.as_ref().map(content::extract_text);
+                if let Some(content) = msg.content.as_ref() {
+                    system_parts.push(content::extract_text(content));
+                    system = Some(system_parts.join("\n\n"));
+                }
                 // 也添加到 messages 中保留（content 原样保留，含多模态数组）
                 messages.push(UnifiedMessage {
                     role: Role::System,
@@ -270,6 +275,89 @@ fn value_text(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// 把散落在任意位置的 system 合并成一条，放到 messages[0]。
+///
+/// vLLM 一类上游（litellm 转发的 FundGPT 等）会直接 400 拒绝「System message must be at
+/// the beginning」，agent 类客户端把时间/环境信息作为 system 插在对话中段就会踩到。
+/// 合并而非丢弃：文本按出现顺序拼接，非文本块（图片）原样保留。
+fn merge_system_messages(messages: &mut Vec<OpenAIMessage>) {
+    let positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "system")
+        .map(|(i, _)| i)
+        .collect();
+
+    // 一条且在首位：本来就是规范形态，原样放过（同协议透传要求字节不变）
+    if positions.len() == 1 && positions[0] == 0 {
+        return;
+    }
+    if positions.is_empty() {
+        return;
+    }
+
+    let mut texts: Vec<String> = Vec::new();
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    let mut has_array = false;
+    let mut name: Option<String> = None;
+
+    // 倒序摘除（后面的下标不受前面删除影响），再还原成出现顺序处理
+    let mut removed: Vec<OpenAIMessage> = positions.iter().rev().map(|&i| messages.remove(i)).collect();
+    removed.reverse();
+
+    for msg in removed {
+        if name.is_none() {
+            name = msg.name.clone();
+        }
+        match msg.content {
+            None => {}
+            Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(text)) => {
+                if !text.is_empty() {
+                    texts.push(text);
+                }
+            }
+            Some(serde_json::Value::Array(items)) => {
+                has_array = true;
+                for item in items {
+                    if item.get("type").and_then(|t| t.as_str()) == Some("text")
+                        && item.get("text").and_then(|t| t.as_str()).unwrap_or("").is_empty()
+                    {
+                        continue;
+                    }
+                    blocks.push(item);
+                }
+            }
+            Some(other) => blocks.push(other),
+        }
+    }
+
+    let content = if !has_array {
+        serde_json::Value::String(texts.join("\n\n"))
+    } else {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for text in &texts {
+            out.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        out.append(&mut blocks);
+        serde_json::Value::Array(out)
+    };
+
+    messages.insert(
+        0,
+        OpenAIMessage {
+            role: "system".to_string(),
+            content: Some(content),
+            reasoning_content: None,
+            reasoning: None,
+            reasoning_details: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name,
+        },
+    );
+}
+
 /// 统一格式 → OpenAI 请求
 pub fn to_request(
     unified: &UnifiedRequest,
@@ -318,6 +406,7 @@ pub fn to_request(
             });
         }
     }
+    merge_system_messages(&mut messages);
 
     let mut req = serde_json::Map::new();
     req.insert("model".into(), serde_json::Value::String(target_model.to_string()));
@@ -736,5 +825,94 @@ mod system_bridge_tests {
         let systems = messages.iter().filter(|m| m["role"] == "system").count();
         assert_eq!(systems, 1, "system 重复了: {body}");
         assert_eq!(messages[0]["content"], "sys");
+    }
+
+    #[test]
+    fn mid_conversation_system_moves_to_front() {
+        // vLLM 类上游会 400 拒绝「System message must be at the beginning」
+        let unified = parse_request(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "你是助手"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "system", "content": "当前时间 12:00"},
+                {"role": "user", "content": "再来"}
+            ]
+        })).unwrap();
+        let body = to_request(&unified, "target", UnknownParams::Auto, &target());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.iter().filter(|m| m["role"] == "system").count(), 1, "{body}");
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "你是助手\n\n当前时间 12:00");
+        // 其余消息保持原有相对顺序
+        let roles: Vec<&str> = messages[1..].iter().map(|m| m["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "user"]);
+    }
+
+    #[test]
+    fn system_only_in_middle_is_promoted() {
+        let unified = parse_request(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "中段 system"},
+                {"role": "user", "content": "yo"}
+            ]
+        })).unwrap();
+        let body = to_request(&unified, "target", UnknownParams::Auto, &target());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "中段 system");
+        assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn merged_system_keeps_image_blocks() {
+        let unified = parse_request(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+                    {"type": "text", "text": "看图"}
+                ]}
+            ]
+        })).unwrap();
+        let body = to_request(&unified, "target", UnknownParams::Auto, &target());
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["role"], "system");
+        let blocks = messages[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "非文本块不能丢: {body}");
+        assert_eq!(blocks[0]["type"], "image_url");
+        assert_eq!(blocks[1]["text"], "看图");
+    }
+
+    #[test]
+    fn canonical_system_is_byte_identical() {
+        // 规范形态不重排，同协议透传的字节不能变
+        let raw = serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let body = to_request(&parse_request(raw.clone()).unwrap(), "t", UnknownParams::Auto, &target());
+        assert_eq!(body["messages"], raw["messages"]);
+    }
+
+    #[test]
+    fn multiple_systems_reach_anthropic_target_as_one_system_field() {
+        // Anthropic 目标只认顶层 system：多条必须在入口就并入，否则只剩最后一条
+        let unified = parse_request(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "A"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "B"}
+            ]
+        })).unwrap();
+        assert_eq!(unified.system.as_deref(), Some("A\n\nB"));
     }
 }
