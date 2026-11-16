@@ -445,9 +445,9 @@ pub async fn replay_request(
 /// 统计与轨迹不动——它们本来就不含正文，删掉它们只会让报表凭空缺一块。
 pub async fn delete_bodies(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
     let db = db.into_inner();
-    let deleted = web::block(move || crate::db::stats::delete_all_bodies(&db))
+    let result = web::block(move || crate::db::stats::delete_all_bodies(&db))
         .await.map_err(|e| crate::error::AppError::Internal(e.to_string()))??;
-    Ok(HttpResponse::Ok().json(serde_json::json!({ "deleted": deleted })))
+    Ok(HttpResponse::Ok().json(result))
 }
 
 #[cfg(test)]

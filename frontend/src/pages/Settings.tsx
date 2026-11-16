@@ -397,11 +397,20 @@ export default function Settings() {
   const onWipeBodies = async () => {
     setWiping(true)
     try {
-      const deleted: number = (await deleteRequestBodies())?.deleted ?? 0
+      const result = await deleteRequestBodies()
+      const deleted: number = result?.deleted ?? 0
+      const reclaimed: number = result?.reclaimed_bytes ?? 0
+      const compacted: boolean = result?.compacted ?? false
       notifications.show({
         title: t(locale, 'captureBodiesWipe'),
-        message: deleted > 0 ? t(locale, 'captureBodiesWipeDone', String(deleted)) : t(locale, 'captureBodiesNone'),
-        color: deleted > 0 ? 'green' : 'gray',
+        message: deleted === 0
+          ? t(locale, 'captureBodiesNone')
+          : !compacted
+            ? t(locale, 'captureBodiesWipeNotCompacted', String(deleted))
+            : reclaimed > 0
+              ? t(locale, 'captureBodiesWipeReclaimed', String(deleted), formatBytes(reclaimed))
+              : t(locale, 'captureBodiesWipeDone', String(deleted)),
+        color: deleted > 0 && compacted ? 'green' : deleted > 0 ? 'yellow' : 'gray',
         icon: <IconCheck size={18} />,
       })
       await queryClient.invalidateQueries({ queryKey: ['db-info'] })

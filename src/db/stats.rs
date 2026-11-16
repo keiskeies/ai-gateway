@@ -566,14 +566,62 @@ pub fn payload_for_stat(pool: &DbPool, stat_id: i64) -> AppResult<crate::models:
     })
 }
 
+/// 清空全部正文的结果。`deleted` 是行数，`reclaimed_bytes` 是 VACUUM 真正还给文件系统的字节数——
+/// 确认框承诺的是"删掉 N 条 · X MB"，删完就得让文件体积真的掉下来，否则用户看到"已删除"却
+/// 发现库文件一点没小，会合理地认为没生效。
+#[derive(serde::Serialize)]
+pub struct BodyWipeResult {
+    pub deleted: i64,
+    pub reclaimed_bytes: i64,
+    /// 有别的连接占着读锁时 VACUUM 会失败；行已经删了，但字节还在空闲页里，如实报出来。
+    pub compacted: bool,
+}
+
 /// 清空全部正文：关掉采集开关后把已经存进去的提示词/响应抹掉。
 /// 只删正文与请求头表，统计与轨迹留着——它们本来就不含正文。
-pub fn delete_all_bodies(pool: &DbPool) -> AppResult<i64> {
+///
+/// SQLite 的 DELETE 只把页标成空闲，既不缩文件，页里的提示词字节也还在：
+/// 拿到 .db 的人照样能从空闲页捞回正文。所以删完必须 VACUUM 重写库文件，
+/// 再 checkpoint(TRUNCATE) 把新页折回主文件（顺序见 schema.rs 的 V17 迁移）。
+pub fn delete_all_bodies(pool: &DbPool) -> AppResult<BodyWipeResult> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let size_before = std::fs::metadata(resolved_db_path_of(&conn))
+        .map(|m| m.len())
+        .unwrap_or(0);
+
     let mut deleted = conn.execute("DELETE FROM request_bodies", [])? as i64;
     deleted += conn.execute("DELETE FROM request_headers", [])? as i64;
     deleted += conn.execute("DELETE FROM response_bodies", [])? as i64;
-    Ok(deleted)
+
+    // 没有任何行可删时不必压实：空闲页可能是别的清理留下的，等有正文可抹时一起收。
+    let compacted = if deleted > 0 {
+        match conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);") {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("清空正文后 VACUUM 失败，提示词仍留在空闲页: {}", e);
+                false
+            }
+        }
+    } else {
+        true
+    };
+    let size_after = std::fs::metadata(resolved_db_path_of(&conn))
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    Ok(BodyWipeResult {
+        deleted,
+        reclaimed_bytes: size_before.saturating_sub(size_after) as i64,
+        compacted,
+    })
+}
+
+/// 连接自身知道打开的库文件路径（`PRAGMA database_list`），比从配置再传一条路径可靠：
+/// 清库动作拿到的连接池和设置页显示的路径本来就是同一个文件。
+fn resolved_db_path_of(conn: &rusqlite::Connection) -> std::path::PathBuf {
+    conn.query_row("SELECT file FROM pragma_database_list WHERE name = 'main'", [], |r| r.get::<_, String>(0))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// 一次尝试落一行（重试与 fallback 各一行）。轨迹与统计分开写：统计只在最终结果落一行避免重复计数，
@@ -2728,7 +2776,7 @@ mod tests {
 
         // 关掉开关后的"抹掉正文"：正文表清空，明细行一条不少——它们本来就不含正文，
         // 删掉它们只会让报表凭空缺一块
-        assert_eq!(delete_all_bodies(&pool).expect("delete bodies"), 1);
+        assert_eq!(delete_all_bodies(&pool).expect("delete bodies").deleted, 1);
         let after_wipe = db_info(&pool, &path).expect("db info after wipe");
         assert_eq!(after_wipe.body_rows, 0);
         assert_eq!(after_wipe.request_rows, 3, "清空正文不该连带删掉明细行");
@@ -2881,7 +2929,7 @@ mod tests {
         assert_eq!(payload.response.body.as_deref(), Some("{\"ok\":true}"));
 
         // 清空正文：三张表都算，统计行保留
-        assert_eq!(delete_all_bodies(&pool).unwrap(), 3);
+        assert_eq!(delete_all_bodies(&pool).unwrap().deleted, 3);
         let wiped = payload_for_stat(&pool, stat_id).expect("payload after wipe");
         assert!(!wiped.request.headers_captured && !wiped.request.body_captured && !wiped.response.captured);
 
@@ -2899,6 +2947,36 @@ mod tests {
         assert_eq!(purged.rows, 1);
         assert_eq!(purged.headers, 1);
         assert_eq!(purged.responses, 1);
+
+        cleanup_db(&path);
+    }
+
+    /// 「清空已存内容」必须让库文件真的变小：DELETE 只标空闲页，提示词字节还在盘上，
+    /// 用户看到体积不变就会认为没清掉。这条把"删完即压实"钉住。
+    #[test]
+    fn wiping_bodies_reclaims_disk_space() {
+        let (pool, path) = test_db();
+        let payload = "P".repeat(64 * 1024);
+        for i in 0..40 {
+            let request_id = format!("req-bulk-{i}");
+            record_body(&pool, &RequestBody {
+                request_id: request_id.clone(), protocol: "openai".into(),
+                body: payload.clone(), bytes: payload.len() as i64, truncated: false,
+                created_at: "2026-01-01T00:00:00+00:00".into(),
+            }).unwrap();
+        }
+        let conn = pool.get().unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(conn);
+        let size_before = std::fs::metadata(&path).unwrap().len();
+        assert!(size_before > 64 * 1024, "fixture 应该先写入可观的正文");
+
+        let result = delete_all_bodies(&pool).unwrap();
+        assert_eq!(result.deleted, 40);
+        assert!(result.compacted, "单连接测试库不该有读锁挡住 VACUUM");
+        let size_after = std::fs::metadata(&path).unwrap().len();
+        assert!(size_after < size_before / 2, "库文件应明显缩小: {size_before} -> {size_after}");
+        assert_eq!(result.reclaimed_bytes, (size_before - size_after) as i64);
 
         cleanup_db(&path);
     }
