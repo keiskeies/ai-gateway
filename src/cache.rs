@@ -36,6 +36,10 @@ pub struct ResolvedRoute {
     pub default_max_tokens: Option<u32>,
     /// 每次上游尝试前置 32~128 位随机字母数字串
     pub request_nonce: bool,
+    /// 路由级参数覆盖（= 虚拟模型级）：转发前 merge 进请求体，backend 级后 merge 覆盖优先
+    pub param_overrides: serde_json::Value,
+    /// 路由级请求头覆盖（= 虚拟模型级）：追加到上游请求头，可覆盖平台 custom_headers 与鉴权头
+    pub headers: serde_json::Value,
 }
 
 /// 请求热路径的只读快照。整份快照一次原子替换，绝不原地 clear：
@@ -98,6 +102,11 @@ impl RouteCache {
     pub fn set_encrypt_key(&self, key: String) {
         *self.inner.encrypt_key.write() = key;
         self.refresh();
+    }
+
+    /// 当前凭据加密密钥（api_key 明文加解密用，与平台凭据同一把）。
+    pub fn encrypt_key(&self) -> String {
+        self.inner.encrypt_key.read().clone()
     }
 
     /// 从 DB 重建整个路由表（在管理操作后调用）。
@@ -172,6 +181,8 @@ impl RouteCache {
                     fallback: route.fallback,
                     default_max_tokens: route.default_max_tokens,
                     request_nonce: route.request_nonce,
+                    param_overrides: route.param_overrides,
+                    headers: route.headers,
                 }),
             );
         }

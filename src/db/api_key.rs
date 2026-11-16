@@ -18,7 +18,7 @@ pub fn key_mask(plain: &str) -> String {
     crate::models::platform::mask_secret(plain)
 }
 
-const COLS: &str = "id, name, key_hash, key_mask, proxy_id, created_at, last_used, enabled, expires_at, quota_requests, quota_tokens, quota_cost, quota_window";
+const COLS: &str = "id, name, key_hash, key_mask, key_enc, proxy_id, created_at, last_used, enabled, expires_at, quota_requests, quota_tokens, quota_cost, quota_window";
 
 fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredApiKey> {
     Ok(StoredApiKey {
@@ -26,15 +26,16 @@ fn row_to_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredApiKey> {
         name: row.get(1)?,
         key_hash: row.get(2)?,
         key_mask: row.get(3)?,
-        proxy_id: row.get(4)?,
-        created_at: row.get(5)?,
-        last_used: row.get(6)?,
-        enabled: row.get::<_, i64>(7)? != 0,
-        expires_at: row.get(8)?,
-        quota_requests: row.get(9)?,
-        quota_tokens: row.get(10)?,
-        quota_cost: row.get(11)?,
-        quota_window: row.get(12)?,
+        key_enc: row.get(4)?,
+        proxy_id: row.get(5)?,
+        created_at: row.get(6)?,
+        last_used: row.get(7)?,
+        enabled: row.get::<_, i64>(8)? != 0,
+        expires_at: row.get(9)?,
+        quota_requests: row.get(10)?,
+        quota_tokens: row.get(11)?,
+        quota_cost: row.get(12)?,
+        quota_window: row.get(13)?,
     })
 }
 
@@ -92,15 +93,22 @@ pub fn validate_any(pool: &DbPool, key: &str) -> AppResult<bool> {
 
 /// 落库的是摘要与掩码，明文只活在这条语句返回之前的栈上。
 /// 调用方（`api/api_key.rs`）自己留着那份明文，用于一次性 `secret` 回显。
-pub fn create(pool: &DbPool, req: &CreateApiKeyRequest) -> AppResult<StoredApiKey> {
+pub fn create(pool: &DbPool, req: &CreateApiKeyRequest, encrypt_key: &str) -> AppResult<StoredApiKey> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let plain = req.key.clone().unwrap_or_default();
+    // 明文加密落库（与平台凭据同一套 AES-GCM）：用户之后还能在列表/详情看到并复制。
+    let key_enc = if plain.is_empty() {
+        None
+    } else {
+        Some(crate::crypto::encrypt(&plain, encrypt_key)?)
+    };
     let api_key = StoredApiKey {
         id,
         name: req.name.clone(),
         key_hash: hash_key(&plain),
         key_mask: key_mask(&plain),
+        key_enc,
         proxy_id: req.proxy_id.clone(),
         created_at: now,
         last_used: None,
@@ -113,12 +121,13 @@ pub fn create(pool: &DbPool, req: &CreateApiKeyRequest) -> AppResult<StoredApiKe
     };
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO api_keys (id, name, key_hash, key_mask, proxy_id, created_at, last_used, enabled, expires_at, quota_requests, quota_tokens, quota_cost, quota_window) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+        "INSERT INTO api_keys (id, name, key_hash, key_mask, key_enc, proxy_id, created_at, last_used, enabled, expires_at, quota_requests, quota_tokens, quota_cost, quota_window) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
         rusqlite::params![
             api_key.id,
             api_key.name,
             api_key.key_hash,
             api_key.key_mask,
+            api_key.key_enc,
             api_key.proxy_id,
             api_key.created_at,
             api_key.last_used,
@@ -310,11 +319,12 @@ pub fn set_enabled(pool: &DbPool, id: &str, enabled: bool) -> AppResult<()> {
     Ok(())
 }
 
-pub fn rotate(pool: &DbPool, id: &str, new_key: &str) -> AppResult<Option<StoredApiKey>> {
+pub fn rotate(pool: &DbPool, id: &str, new_key: &str, encrypt_key: &str) -> AppResult<Option<StoredApiKey>> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let key_enc = Some(crate::crypto::encrypt(new_key, encrypt_key)?);
     let changed = conn.execute(
-        "UPDATE api_keys SET key_hash=?1, key_mask=?2 WHERE id=?3",
-        rusqlite::params![hash_key(new_key), key_mask(new_key), id],
+        "UPDATE api_keys SET key_hash=?1, key_mask=?2, key_enc=?3 WHERE id=?4",
+        rusqlite::params![hash_key(new_key), key_mask(new_key), key_enc, id],
     )?;
     if changed == 0 {
         return Ok(None);
@@ -396,6 +406,8 @@ mod tests {
     use crate::models::api_key::CreateApiKeyRequest;
     use crate::models::proxy::CreateProxyRequest;
 
+    const TEST_ENC_KEY: &str = "api-key-unit-test-encrypt-key";
+
     fn test_db() -> (DbPool, std::path::PathBuf) {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target")
@@ -418,7 +430,7 @@ mod tests {
             key: Some(key.to_string()),
             proxy_id,
             ..Default::default()
-        }).expect("create key");
+        }, TEST_ENC_KEY).expect("create key");
     }
 
     /// 明文只进不出：库里只有摘要与掩码，掩码拿去鉴权必然失败。
@@ -431,7 +443,7 @@ mod tests {
             key: Some(plain.to_string()),
             proxy_id: None,
             ..Default::default()
-        }).expect("create key");
+        }, TEST_ENC_KEY).expect("create key");
 
         assert_eq!(stored.key_hash, hash_key(plain));
         assert_eq!(stored.key_mask, crate::models::platform::mask_secret(plain));
@@ -456,7 +468,7 @@ mod tests {
             key: Some(plain.to_string()),
             proxy_id: None,
             ..Default::default()
-        });
+        }, TEST_ENC_KEY);
         assert!(again.is_err());
 
         cleanup_db(&path);
@@ -473,16 +485,18 @@ mod tests {
             key: Some(first.to_string()),
             proxy_id: None,
             ..Default::default()
-        }).expect("create key");
+        }, TEST_ENC_KEY).expect("create key");
 
-        let rotated = rotate(&pool, &created.id, second).unwrap().expect("rotated");
+        let rotated = rotate(&pool, &created.id, second, TEST_ENC_KEY).unwrap().expect("rotated");
         assert_eq!(rotated.id, created.id);
         assert_eq!(rotated.name, created.name);
         assert_eq!(rotated.key_hash, hash_key(second));
+        assert!(rotated.key_enc.is_some(), "轮换后的明文也要加密落库");
+        assert_eq!(crate::crypto::decrypt(&rotated.key_enc.clone().unwrap(), TEST_ENC_KEY).unwrap(), second);
 
         assert!(get_by_key(&pool, first).unwrap().is_none(), "旧明文必须立刻失效");
         assert!(validate_any(&pool, second).unwrap());
-        assert!(rotate(&pool, "missing-id", second).unwrap().is_none());
+        assert!(rotate(&pool, "missing-id", second, TEST_ENC_KEY).unwrap().is_none());
 
         cleanup_db(&path);
     }
@@ -534,7 +548,7 @@ mod tests {
             quota_tokens: Some(0),
             quota_cost: Some(-1.0),
             quota_window: Some("lifetime".to_string()),
-        })
+        }, TEST_ENC_KEY)
         .expect("create metered key");
         assert_eq!(created.quota_requests, Some(2));
         assert_eq!(created.expires_at.as_deref(), Some("2999-01-01T00:00:00Z"));
@@ -599,7 +613,7 @@ mod tests {
             quota_tokens: None,
             quota_cost: None,
             quota_window: None,
-        })
+        }, TEST_ENC_KEY)
         .expect("create stale key");
         assert!(stale.is_expired(chrono::Utc::now()));
         assert!(stale.enabled);
@@ -657,7 +671,7 @@ mod tests {
             quota_tokens: None,
             quota_cost: Some(2.0),
             quota_window: Some("day".to_string()),
-        })
+        }, TEST_ENC_KEY)
         .expect("create daily key");
 
         record_stat(&pool, &key.id, 10, 10, Some(1.0));
@@ -718,21 +732,21 @@ mod tests {
             proxy_id: Some(proxy.id.clone()),
             quota_requests: Some(50),
             ..Default::default()
-        })
+        }, TEST_ENC_KEY)
         .expect("create bound key");
         let loose = create(&pool, &CreateApiKeyRequest {
             name: "loose".to_string(),
             key: Some("sk-aigw-batch-loose-loose-loose-02".to_string()),
             proxy_id: None,
             ..Default::default()
-        })
+        }, TEST_ENC_KEY)
         .expect("create loose key");
         let kept = create(&pool, &CreateApiKeyRequest {
             name: "kept".to_string(),
             key: Some("sk-aigw-batch-kept-kept-kept-03".to_string()),
             proxy_id: None,
             ..Default::default()
-        })
+        }, TEST_ENC_KEY)
         .expect("create kept key");
         record_stat(&pool, &loose.id, 10, 5, None);
 

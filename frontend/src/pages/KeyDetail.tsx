@@ -215,7 +215,7 @@ export default function KeyDetail() {
         kicker={<>{t(locale, 'kickerAccess')} <span className="console-kicker-sep" /> {t(locale, 'kickerApiKey')}</>}
         title={draft?.name || key.name}
         mono
-        subtitle={`${key.key} · ${binding || (orphan ? t(locale, 'orphanProxyBinding') : t(locale, 'apiKeyProxyAll'))}`}
+        subtitle={`${key.decrypted || key.key} · ${binding || (orphan ? t(locale, 'orphanProxyBinding') : t(locale, 'apiKeyProxyAll'))}`}
         actions={
           <>
             <Button size="xs" variant="default" onClick={() => navigate('/keys')}>
@@ -295,10 +295,29 @@ export default function KeyDetail() {
           </div>
           <div className="console-panel-body">
             <div className="ds-keybox">
-              <span className="ds-mono" style={{ color: 'var(--text-1)' }}>{key.key}</span>
-              <Tooltip label={t(locale, 'apiKeyMaskTip')}>
-                <span className="console-pill idle"><span className="console-dot idle" />{t(locale, 'masked')}</span>
-              </Tooltip>
+              {/* 有明文（decrypted）就直接展示可复制；迁移前的旧 Key 只有掩码，退化为掩码显示 */}
+              <span className="ds-mono" style={{ color: 'var(--text-1)', wordBreak: 'break-all' }}>
+                {key.decrypted || key.key}
+              </span>
+              {key.decrypted ? (
+                <CopyButton value={key.decrypted}>
+                  {({ copied, copy }) => (
+                    <Button
+                      size="xs"
+                      variant={copied ? 'filled' : 'light'}
+                      leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+                      onClick={copy}
+                      style={{ flexShrink: 0 }}
+                    >
+                      {copied ? t(locale, 'copyDone') : t(locale, 'copyKey')}
+                    </Button>
+                  )}
+                </CopyButton>
+              ) : (
+                <Tooltip label={t(locale, 'apiKeyMaskTip')}>
+                  <span className="console-pill idle"><span className="console-dot idle" />{t(locale, 'masked')}</span>
+                </Tooltip>
+              )}
             </div>
             {key.quota_requests != null || key.quota_tokens != null || key.quota_cost != null ? (
               <div className="console-note">

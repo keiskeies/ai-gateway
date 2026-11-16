@@ -180,15 +180,22 @@ pub struct ApiKey {
     /// 一次性明文：只出现在"创建"和"轮换"那一次响应里，其余接口不带。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<String>,
+    /// 完整明文：`key_enc` 存在且能解密时才有。列表/详情/更新都带，供前端展示与复制。
+    /// 迁移前的旧 Key 没有密文，这里为 NULL，前端照旧显示掩码而不是编造明文。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decrypted: Option<String>,
 }
 
-/// 落库形状：明文不落盘，只存 sha256 摘要与展示用掩码。
+/// 落库形状：明文不存盘，只存 sha256 摘要、展示用掩码，以及一条 AES-GCM 密文。
+/// `key_enc` 是"用户选择显示完整 Key"时的恢复通道：用 config.toml 的 encrypt_key 加密，
+/// 与平台凭据同一套加密。NULL = 没存明文（迁移前的旧 Key），界面只好退化成掩码。
 #[derive(Debug, Clone)]
 pub struct StoredApiKey {
     pub id: String,
     pub name: String,
     pub key_hash: String,
     pub key_mask: String,
+    pub key_enc: Option<String>,
     pub proxy_id: Option<String>,
     pub created_at: String,
     pub last_used: Option<String>,
@@ -216,7 +223,7 @@ impl StoredApiKey {
         self.quota_requests.is_some() || self.quota_tokens.is_some() || self.quota_cost.is_some()
     }
 
-    /// 转成对外形状（掩码），明文无从生成——到这里已经没有明文了。
+    /// 转成对外形状。`key` 是掩码；`decrypted` 由调用方解密后传入（拿不到密文/密钥时传 None）。
     /// `used` 由调用方从统计里查好后传入：这里拿不到数据库。
     pub fn to_public(&self, used: KeyUsage) -> ApiKey {
         ApiKey {
@@ -238,6 +245,7 @@ impl StoredApiKey {
             used_cost: used.cost,
             priced_requests: used.priced_requests,
             secret: None,
+            decrypted: None,
         }
     }
 }
@@ -352,6 +360,7 @@ mod tests {
             name: "k".into(),
             key_hash: "h".into(),
             key_mask: "m".into(),
+            key_enc: None,
             proxy_id: None,
             created_at: now.to_rfc3339(),
             last_used: None,

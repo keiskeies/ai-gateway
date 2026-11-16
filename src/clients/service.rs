@@ -342,6 +342,7 @@ pub fn apply(
     request: &ClientApplyRequest,
     admin_port: u16,
     backup_root: &Path,
+    encrypt_key: &str,
 ) -> AppResult<ApplyOutcome> {
     let adapter = adapter(id);
     let models = validate_models(pool, request)?;
@@ -385,6 +386,7 @@ pub fn apply(
                 quota_cost: None,
                 quota_window: None,
             },
+            encrypt_key,
         )?;
         (token, true, stored.id, name, stored.key_mask)
     };

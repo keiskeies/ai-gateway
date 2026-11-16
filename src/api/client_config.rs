@@ -60,7 +60,7 @@ pub async fn apply(
     let id = parse_id(path)?;
     let paths = client_paths()?;
     let request = body.into_inner();
-    let (admin_port, backup_root) = {
+    let (admin_port, backup_root, encrypt_key) = {
         let config = settings.read();
         (
             config.server.admin_port,
@@ -69,11 +69,12 @@ pub async fn apply(
                 .parent()
                 .unwrap_or(Path::new("."))
                 .join("client-backups"),
+            config.security.encrypt_key.clone(),
         )
     };
     let db = db.into_inner();
     let outcome = web::block(move || {
-        service::apply(&db, &paths, id, &request, admin_port, &backup_root)
+        service::apply(&db, &paths, id, &request, admin_port, &backup_root, &encrypt_key)
     })
     .await
     .map_err(|error| AppError::Internal(error.to_string()))??;

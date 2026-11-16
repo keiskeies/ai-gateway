@@ -72,6 +72,7 @@ fn apply_creates_key_backup_state_and_restore_disables_the_key() {
         &request(),
         1994,
         &backup_root,
+        "service-test-encrypt-key",
     )
     .expect("apply");
     assert!(outcome.result.created_key);
@@ -150,6 +151,7 @@ fn restore_backup_restores_the_original_bytes_and_disables_the_key() {
         &request(),
         1994,
         &backup_root,
+        "service-test-encrypt-key",
     )
     .expect("apply");
     assert!(applied.result.created_key);

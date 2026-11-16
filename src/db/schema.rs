@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 35;
+pub const CURRENT_SCHEMA_VERSION: i64 = 37;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -332,6 +332,28 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         )?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 35)", [])?;
         tracing::info!("Database migrated to V35 (concurrency indexes for stats/credit)");
+    }
+
+    if current_version < 36 {
+        // 路由级（= 虚拟模型级）请求覆盖：param_overrides 在转发前 merge 进请求体，
+        // headers 追加到上游请求头（可覆盖平台 custom_headers 与鉴权头）。
+        // routes 与 proxies 是 1:1，这两个字段就是「虚拟模型自己的」覆盖。
+        add_column_if_missing(conn, "routes", "param_overrides",
+            "ALTER TABLE routes ADD COLUMN param_overrides TEXT")?;
+        add_column_if_missing(conn, "routes", "headers",
+            "ALTER TABLE routes ADD COLUMN headers TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 36)", [])?;
+        tracing::info!("Database migrated to V36 (routes.param_overrides / routes.headers)");
+    }
+
+    if current_version < 37 {
+        // 网关 Key 明文加密落库（AES-GCM，与 platform_credentials 同一把 encrypt_key）：
+        // 用户之后能在列表/详情看到并复制完整 Key。旧行的 key_enc 是 NULL（没存明文），
+        // 列表/详情照旧显示掩码，等下次轮换才拿到明文——不凭空补造。
+        add_column_if_missing(conn, "api_keys", "key_enc",
+            "ALTER TABLE api_keys ADD COLUMN key_enc TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 37)", [])?;
+        tracing::info!("Database migrated to V37 (api_keys.key_enc encrypted plaintext)");
     }
 
     Ok(())

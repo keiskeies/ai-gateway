@@ -417,9 +417,7 @@ export default function ApiKeys() {
                 </Table.Th>
                 <Table.Th style={{ width: 180 }}>{t(locale, 'apiKeyName')}</Table.Th>
                 <Table.Th>
-                  <Tooltip label={t(locale, 'apiKeyMaskTip')}>
-                    <span>{t(locale, 'apiKeyKey')}</span>
-                  </Tooltip>
+                  <span>{t(locale, 'apiKeyKey')}</span>
                 </Table.Th>
                 <Table.Th style={{ width: 150 }}>{t(locale, 'apiKeyProxy')}</Table.Th>
                 <Table.Th style={{ width: 130 }}>{t(locale, 'status')}</Table.Th>
@@ -495,8 +493,25 @@ export default function ApiKeys() {
                     })()}
                   </Table.Td>
                   <Table.Td>
-                    {/* 服务端已经掩码，这里没有可复制的凭据——所以这一格不给复制按钮 */}
-                    <span className="ds-mono ds-dim" style={{ whiteSpace: 'nowrap' }}>{row.key}</span>
+                    {/* 服务端有明文（decrypted）就直接展示并可复制；迁移前的旧 Key 没有明文，退化成掩码 */}
+                    <span style={{ whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className="ds-mono ds-dim">{row.decrypted || row.key}</span>
+                      {row.decrypted && (
+                        <CopyButton value={row.decrypted}>
+                          {({ copied, copy }) => (
+                            <ActionIcon
+                              size="sm"
+                              variant="subtle"
+                              color={copied ? 'green' : 'gray'}
+                              aria-label={t(locale, 'copyKey')}
+                              onClick={copy}
+                            >
+                              {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                            </ActionIcon>
+                          )}
+                        </CopyButton>
+                      )}
+                    </span>
                   </Table.Td>
                   <Table.Td>
                     {(() => {

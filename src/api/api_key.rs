@@ -13,14 +13,30 @@ fn generate_key() -> String {
 /// 库里只有摘要，创建后谁也想不起原值，一个 6 字符的 Key 就只能靠猜——那不该发出去。
 const MIN_CUSTOM_KEY_LEN: usize = 20;
 
-pub async fn list(db: web::Data<DbPool>) -> AppResult<HttpResponse> {
+/// 完整明文只在响应里带：解密失败（encrypt_key 变更、密文损坏）就退化成掩码，
+/// 这是"看不到完整 Key"的账号级问题，不是 500——和 checkin_accounts 同一口径。
+fn decrypt_into(api_key: &mut ApiKey, stored: &StoredApiKey, encrypt_key: &str) {
+    if let Some(blob) = stored.key_enc.as_deref() {
+        if let Ok(plain) = crate::crypto::decrypt(blob, encrypt_key) {
+            api_key.decrypted = Some(plain);
+        }
+    }
+}
+
+pub async fn list(
+    db: web::Data<DbPool>,
+    cache: web::Data<Arc<RouteCache>>,
+) -> AppResult<HttpResponse> {
     let db = db.into_inner();
+    let encrypt_key = cache.encrypt_key();
     let (keys, usage) = web::block(move || -> AppResult<(Vec<StoredApiKey>, std::collections::HashMap<String, KeyUsage>)> {
         Ok((crate::db::api_key::list(&db)?, crate::db::api_key::usage_by_key(&db)?))
     })
         .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    // 一律是掩码：列表刷新后不可能再取回完整 Key
-    let public: Vec<ApiKey> = keys.iter().map(|key| key.to_public(usage.get(&key.id).copied().unwrap_or_default())).collect();
+    let mut public: Vec<ApiKey> = keys.iter().map(|key| key.to_public(usage.get(&key.id).copied().unwrap_or_default())).collect();
+    for (api_key, stored) in public.iter_mut().zip(keys.iter()) {
+        decrypt_into(api_key, stored, &encrypt_key);
+    }
     Ok(HttpResponse::Ok().json(public))
 }
 
@@ -75,7 +91,7 @@ pub async fn create(
             )));
         }
     }
-    // 明文只在这一次响应里回显一次（secret），库里落的是摘要 + 掩码。
+    // 明文在创建这一次响应里回显（secret），同时加密落库（key_enc），之后列表/详情还能读到。
     req.expires_at = normalize_expiry(req.expires_at.as_deref())?;
     for (name, value) in [
         ("quota_requests", req.quota_requests),
@@ -90,6 +106,7 @@ pub async fn create(
     }
     req.quota_window = normalize_window(req.quota_window.as_deref())?;
     let secret = req.key.clone().unwrap_or_default();
+    let encrypt_key = cache.encrypt_key();
     let db = db.into_inner();
     let stored = web::block(move || -> AppResult<StoredApiKey> {
         // proxy_id 不再有外键兜底：绑到不存在的模型只会得到一个永远无法鉴权的 Key，直接在入口拒掉
@@ -98,7 +115,7 @@ pub async fn create(
                 return Err(AppError::BadRequest("Bound virtual model does not exist".to_string()));
             }
         }
-        crate::db::api_key::create(&db, &req)
+        crate::db::api_key::create(&db, &req, &encrypt_key)
     })
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
     cache.refresh_api_keys_async().await?;
@@ -131,6 +148,7 @@ pub async fn update(
         other => other,
     };
     let db = db.into_inner();
+    let encrypt_key = cache.encrypt_key();
     let result = web::block(move || -> AppResult<Option<(StoredApiKey, KeyUsage)>> {
         // 改绑与新建同口径：绑到不存在的模型只会得到一把永远 401 的 Key
         if let NullableString::Set(proxy_id) = &req.proxy_id {
@@ -145,12 +163,14 @@ pub async fn update(
         Ok(Some((updated, usage)))
     })
     .await.map_err(|e| AppError::Internal(e.to_string()))??;
-    let Some((api_key, usage)) = result else {
+    let Some((stored, usage)) = result else {
         return Err(AppError::NotFound("API key not found".to_string()));
     };
     // 过期/配额都活在缓存里：改完不刷一次，旧限制还能继续放行到下一轮
     cache.refresh_api_keys_async().await?;
-    Ok(HttpResponse::Ok().json(api_key.to_public(usage)))
+    let mut api_key = stored.to_public(usage);
+    decrypt_into(&mut api_key, &stored, &encrypt_key);
+    Ok(HttpResponse::Ok().json(api_key))
 }
 
 /// 轮换密钥：路径里给 id，新值由后端生成并只在这一次响应里返回。
@@ -163,9 +183,10 @@ pub async fn rotate(
     let id = path.into_inner();
     let new_key = generate_key();
     let secret = new_key.clone();
+    let encrypt_key = cache.encrypt_key();
     let db = db.into_inner();
     let rotated = web::block(move || -> AppResult<Option<(StoredApiKey, KeyUsage)>> {
-        let Some(rotated) = crate::db::api_key::rotate(&db, &id, &new_key)? else {
+        let Some(rotated) = crate::db::api_key::rotate(&db, &id, &new_key, &encrypt_key)? else {
             return Ok(None);
         };
         let usage = crate::db::api_key::usage_for_key(&db, &rotated.id, rotated.quota_window.as_deref())?;
