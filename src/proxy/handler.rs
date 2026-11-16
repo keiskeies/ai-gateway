@@ -1012,7 +1012,7 @@ async fn handle_request(
         let (forward_body, forward_url_raw) = match &plan {
             Some(plan) => (plan.body.clone(), plan.url.clone()),
             None => {
-                let (body, url) = build_forward_request(unified_ref, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens);
+                let (body, url) = build_forward_request(unified_ref, &resolved.platform, &resolved.backend, resolved_route.default_max_tokens, &resolved_route.param_overrides);
                 (body, url)
             }
         };
@@ -1041,6 +1041,11 @@ async fn handle_request(
             }
         }
         if let Some(headers) = resolved.platform.custom_headers.as_object() {
+            for (k, v) in headers { if let Some(vs) = v.as_str() { req_builder = req_builder.header(k.as_str(), vs); } }
+        }
+        // 路由级（= 虚拟模型级）请求头覆盖：最后应用，同名可压过平台 custom_headers 与鉴权头。
+        // 与 param_overrides 不同，header 没有 backend 级的对应物，这里就是顶层。
+        if let Some(headers) = resolved_route.headers.as_object() {
             for (k, v) in headers { if let Some(vs) = v.as_str() { req_builder = req_builder.header(k.as_str(), vs); } }
         }
 
@@ -1386,6 +1391,7 @@ fn build_forward_request(
     platform: &crate::models::platform::Platform,
     backend: &crate::models::route::Backend,
     default_max_tokens: Option<u32>,
+    route_param_overrides: &serde_json::Value,
 ) -> (serde_json::Value, String) {
     use crate::protocol::reasoning::{resolve_style, ReasoningTarget};
     // 思考参数风格：Auto 按目标平台解析；客户端未传思考配置时不会主动开启
@@ -1414,6 +1420,15 @@ fn build_forward_request(
                 && !body_obj.contains_key("stream_options")
             {
                 body_obj.insert("stream_options".into(), serde_json::json!({ "include_usage": true }));
+            }
+        }
+    }
+    // 路由级（= 虚拟模型级）参数覆盖先 merge，backend 级后 merge 覆盖优先：
+    // 虚拟模型只提供"默认覆盖"，具体某个下游模型仍保留最终决定权。
+    if let Some(overrides) = route_param_overrides.as_object() {
+        if let Some(body_obj) = body.as_object_mut() {
+            for (k, v) in overrides {
+                body_obj.insert(k.clone(), v.clone());
             }
         }
     }
@@ -3238,5 +3253,88 @@ mod tests {
         assert!(out.trim_end().ends_with("event: message_stop\ndata: {\"type\":\"message_stop\"}"), "实际：{out}");
         // stop_reason 必须出现，否则 Anthropic 客户端 stopReason 停在 pending
         assert!(out.contains(r#""stop_reason":"end_turn""#), "实际：{out}");
+    }
+
+    // ============ 路由级（虚拟模型级）参数/请求头覆盖 ============
+
+    fn test_platform() -> crate::models::platform::Platform {
+        use crate::models::platform::PlatformStatus;
+        crate::models::platform::Platform {
+            id: "p1".into(),
+            name: "test".into(),
+            platform_type: crate::models::platform::PlatformType::OpenAI,
+            base_url: "https://upstream.test/v1".into(),
+            api_key: "sk-test".into(),
+            organization: None,
+            custom_headers: serde_json::json!({"X-Platform": "platform"}),
+            status: PlatformStatus::Active,
+            rate_limit: None,
+            credit_budget: None,
+            credit_window: None,
+            credit_unit: None,
+            adapter: None,
+            catalog_key: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    fn test_backend(param_overrides: serde_json::Value) -> crate::models::route::Backend {
+        use crate::models::route::{BackendStatus, ReasoningEcho, ReasoningStyle, UnknownParams};
+        crate::models::route::Backend {
+            id: "b1".into(),
+            route_id: "r1".into(),
+            platform_id: "p1".into(),
+            model_id: "upstream-model".into(),
+            weight: 1, priority: 0, max_concurrent: None, capabilities: vec![],
+            status: BackendStatus::Active,
+            param_overrides,
+            unknown_params: UnknownParams::Auto,
+            reasoning_style: ReasoningStyle::Auto,
+            reasoning_echo: ReasoningEcho::Drop,
+            input_price: None, output_price: None,
+            cache_read_price: None, cache_write_price: None,
+            peak_pricing: None,
+            credit_price: None, credit_multiplier: None,
+        }
+    }
+
+    fn test_unified() -> crate::protocol::types::UnifiedRequest {
+        use crate::protocol::types::{Role, UnifiedMessage};
+        let raw: serde_json::Value = serde_json::json!({
+            "model": "virtual",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.7,
+        });
+        serde_json::from_value(raw).unwrap_or_else(|_| crate::protocol::types::UnifiedRequest {
+            model: "virtual".into(),
+            messages: vec![UnifiedMessage { role: Role::User, content: Some(serde_json::json!("hi")), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None, reasoning_blocks: vec![], raw_blocks: vec![] }],
+            system: None, max_tokens: None, temperature: Some(0.7), top_p: None, stream: None,
+            stop: None, tools: None, tool_choice: None,
+            source_protocol: crate::models::proxy::Protocol::OpenAI,
+            reasoning: None, max_tokens_field: crate::protocol::reasoning::MaxTokensField::MaxTokens,
+            extra: Default::default(),
+        })
+    }
+
+    /// 路由级先 merge、后端级后 merge：同一字段后端级必须赢。
+    /// 虚拟模型只提供"默认覆盖"，具体下游模型保留最终决定权；
+    /// route 独有的字段（backend 没写）仍然生效。
+    #[test]
+    fn route_param_overrides_yield_to_backend_overrides() {
+        let platform = test_platform();
+        let backend = test_backend(serde_json::json!({"temperature": 0.2}));
+        let route_overrides = serde_json::json!({"temperature": 0.1, "frequency_penalty": 0.5});
+        let (body, _url) = super::build_forward_request(
+            &test_unified(),
+            &platform,
+            &backend,
+            None,
+            &route_overrides,
+        );
+        // 客户端 0.7 ← 路由 0.1 ← backend 0.2：backend 赢
+        assert_eq!(body["temperature"], 0.2);
+        // backend 没写的字段，route 覆盖生效
+        assert_eq!(body["frequency_penalty"], 0.5);
     }
 }

@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use super::model::{Capability, ModelStatus};
 use super::platform::{PlatformStatus, PlatformType};
 use super::route::{
-    BackendStatus, LBStrategy, ReasoningEcho, ReasoningStyle, RetryPolicy, UnknownParams,
+    default_param_overrides, BackendStatus, LBStrategy, ReasoningEcho, ReasoningStyle, RetryPolicy,
+    UnknownParams,
 };
 
 /// 导出文件的自我描述：靠这两字段认出"这是本程序的配置备份"，
@@ -130,6 +131,12 @@ pub struct RouteRow {
     /// 每次上游尝试前置随机串；旧导出文档没有这个字段时按关闭处理。
     #[serde(default)]
     pub request_nonce: bool,
+    /// 路由级参数覆盖；旧导出文档没有这个字段时按空覆盖处理。
+    #[serde(default = "default_param_overrides")]
+    pub param_overrides: serde_json::Value,
+    /// 路由级请求头覆盖；旧导出文档没有这个字段时按空覆盖处理。
+    #[serde(default = "default_param_overrides")]
+    pub headers: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +518,8 @@ mod tests {
             fallback: None,
             default_max_tokens: None,
             request_nonce: false,
+            param_overrides: serde_json::json!({}),
+            headers: serde_json::json!({}),
         });
         assert!(codes(&d.check()).contains(&"cfgMultipleRoutes"));
 

@@ -78,6 +78,8 @@ interface RouteInfo {
   fallback?: string | null
   default_max_tokens?: number | null
   request_nonce?: boolean | null
+  param_overrides?: Record<string, unknown> | null
+  headers?: Record<string, unknown> | null
   backends: BackendInfo[]
 }
 
@@ -295,6 +297,8 @@ export default function ModelDetail() {
     retries: 2,
     backoff: 500,
     maxTokens: 4096,
+    paramOverrides: '',
+    headers: '',
   })
 
   useEffect(() => {
@@ -318,12 +322,20 @@ export default function ModelDetail() {
         retries: firstRoute.retry_policy?.max_retries ?? 2,
         backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
         maxTokens: firstRoute.default_max_tokens ?? 4096,
+        paramOverrides: firstRoute.param_overrides && Object.keys(firstRoute.param_overrides).length
+          ? JSON.stringify(firstRoute.param_overrides, null, 2)
+          : '',
+        headers: firstRoute.headers && Object.keys(firstRoute.headers).length
+          ? JSON.stringify(firstRoute.headers, null, 2)
+          : '',
       } : {
         strategy: 'RoundRobin',
         nonce: false,
         retries: 2,
         backoff: 500,
         maxTokens: 4096,
+        paramOverrides: '',
+        headers: '',
       })
     }
     setSelectedBackendId(current => (
@@ -513,6 +525,27 @@ export default function ModelDetail() {
 
   const saveRoute = async () => {
     if (!route) return
+    const parseJsonField = (text: string): Record<string, unknown> | null => {
+      const trimmed = text.trim()
+      if (!trimmed) return {}
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) return null
+        return parsed
+      } catch {
+        return null
+      }
+    }
+    const paramOverrides = parseJsonField(routeDraft.paramOverrides)
+    if (paramOverrides === null) {
+      notifications.show({ message: t(locale, 'paramOverridesInvalid'), color: 'red' })
+      return
+    }
+    const headers = parseJsonField(routeDraft.headers)
+    if (headers === null) {
+      notifications.show({ message: t(locale, 'headersInvalid'), color: 'red' })
+      return
+    }
     setSaving(true)
     try {
       await updateRoute(route.id, {
@@ -524,6 +557,8 @@ export default function ModelDetail() {
         },
         default_max_tokens: routeDraft.maxTokens,
         request_nonce: routeDraft.nonce,
+        param_overrides: paramOverrides,
+        headers: headers,
       })
       // 存过之后草稿就是服务端值了，让回填重新接管（拿到后端归一化后的结果）
       routeDraftTouched.current = false
@@ -740,6 +775,12 @@ export default function ModelDetail() {
                           retries: route.retry_policy?.max_retries ?? 2,
                           backoff: route.retry_policy?.backoff_ms ?? 500,
                           maxTokens: route.default_max_tokens ?? 4096,
+                          paramOverrides: route.param_overrides && Object.keys(route.param_overrides).length
+                            ? JSON.stringify(route.param_overrides, null, 2)
+                            : '',
+                          headers: route.headers && Object.keys(route.headers).length
+                            ? JSON.stringify(route.headers, null, 2)
+                            : '',
                         })
                       }}>{t(locale, 'discardChanges')}</Button>
                     </div>
@@ -913,35 +954,95 @@ export default function ModelDetail() {
       )}
 
       {tab === 'settings' && (
-        <div className="console-settings-grid">
+        <div className="console-settings-grid-box">
+          <div className="console-settings-grid-col">
+            <section className="console-panel">
+              <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'modelIdentity')}</div><span className="console-panel-sub">{t(locale, 'publicId')}</span></div>
+              <div className="console-panel-body">
+                <Field label={t(locale, 'modelId')}>
+                  <TextInput
+                    size="xs"
+                    value={rename}
+                    onChange={event => setRename(event.currentTarget.value)}
+                    rightSection={<Button size="compact-sm" variant="default" loading={saving} onClick={() => void saveName()}>{t(locale, 'save')}</Button>}
+                  />
+                </Field>
+                <div className="console-note">
+                  {t(locale, 'renameModelHint')}
+                </div>
+              </div>
+            </section>
+            <section className="console-panel">
+              <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'dangerZone')}</div><span className="console-panel-sub">{t(locale, 'irreversible')}</span></div>
+              <div className="console-panel-body">
+                <div className="console-note warn">
+                  {t(locale, 'boundKeysNote', String(boundKeys.length))}
+                </div>
+                <div className="console-note warn">
+                  {t(locale, 'deleteHistoryLead')}
+                </div>
+                <div className="console-route-actions">
+                  <Button size="xs" color="red" leftSection={<IconTrash size={13} />} onClick={() => setDeleteModelOpen(true)}>{t(locale, 'deleteVirtualModel')}</Button>
+                </div>
+              </div>
+            </section>
+          </div>
           <section className="console-panel">
-            <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'modelIdentity')}</div><span className="console-panel-sub">{t(locale, 'publicId')}</span></div>
+            <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'forwardOverrides')}</div><span className="console-panel-sub">{t(locale, 'forwardOverridesSub')}</span></div>
             <div className="console-panel-body">
-              <Field label={t(locale, 'modelId')}>
-                <TextInput
-                  size="xs"
-                  value={rename}
-                  onChange={event => setRename(event.currentTarget.value)}
-                  rightSection={<Button size="compact-xs" variant="subtle" loading={saving} onClick={() => void saveName()}>{t(locale, 'save')}</Button>}
-                />
-              </Field>
-              <div className="console-note">
-                {t(locale, 'renameModelHint')}
-              </div>
-            </div>
-          </section>
-          <section className="console-panel">
-            <div className="console-panel-head"><div className="console-panel-title">{t(locale, 'dangerZone')}</div><span className="console-panel-sub">{t(locale, 'irreversible')}</span></div>
-            <div className="console-panel-body">
-              <div className="console-note warn">
-                {t(locale, 'boundKeysNote', String(boundKeys.length))}
-              </div>
-              <div className="console-note warn">
-                {t(locale, 'deleteHistoryLead')}
-              </div>
-              <div className="console-route-actions">
-                <Button size="xs" color="red" leftSection={<IconTrash size={13} />} onClick={() => setDeleteModelOpen(true)}>{t(locale, 'deleteVirtualModel')}</Button>
-              </div>
+              {route ? (
+                <>
+                  <div className="console-field console-form-full">
+                    <label>{t(locale, 'routeParamOverrides')}</label>
+                    <Textarea
+                      size="xs"
+                      autosize
+                      minRows={5}
+                      maxRows={12}
+                      value={routeDraft.paramOverrides}
+                      onChange={event => editRouteDraft({ paramOverrides: event.currentTarget.value })}
+                      placeholder='{"temperature": 0.2, "max_tokens": 8192}'
+                    />
+                    <div className="console-note">{t(locale, 'routeParamOverridesHint')}</div>
+                  </div>
+                  <div className="console-field console-form-full">
+                    <label>{t(locale, 'routeHeaders')}</label>
+                    <Textarea
+                      size="xs"
+                      autosize
+                      minRows={5}
+                      maxRows={10}
+                      value={routeDraft.headers}
+                      onChange={event => editRouteDraft({ headers: event.currentTarget.value })}
+                      placeholder='{"X-Trace": "abc", "Authorization": "Bearer sk-..."}'
+                    />
+                    <div className="console-note">{t(locale, 'routeHeadersHint')}</div>
+                  </div>
+                  <div className="console-route-actions">
+                    <Button size="xs" loading={saving} onClick={() => void saveRoute()}>{t(locale, 'saveRoute')}</Button>
+                    <Button size="xs" variant="default" onClick={() => {
+                      routeDraftTouched.current = false
+                      setRouteDraft({
+                        strategy: route.lb_strategy || 'RoundRobin',
+                        nonce: route.request_nonce ?? false,
+                        retries: route.retry_policy?.max_retries ?? 2,
+                        backoff: route.retry_policy?.backoff_ms ?? 500,
+                        maxTokens: route.default_max_tokens ?? 4096,
+                        paramOverrides: route.param_overrides && Object.keys(route.param_overrides).length
+                          ? JSON.stringify(route.param_overrides, null, 2)
+                          : '',
+                        headers: route.headers && Object.keys(route.headers).length
+                          ? JSON.stringify(route.headers, null, 2)
+                          : '',
+                      })
+                    }}>{t(locale, 'discardChanges')}</Button>
+                  </div>
+                </>
+              ) : (
+                <div className="console-note">
+                  {t(locale, 'forwardOverridesNoRoute')}
+                </div>
+              )}
             </div>
           </section>
         </div>

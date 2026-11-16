@@ -117,6 +117,14 @@ pub struct Route {
     /// 每次上游尝试在整段 prompt 最前面插入 32~128 位随机字母数字串（默认关）
     #[serde(default)]
     pub request_nonce: bool,
+    /// 路由级参数覆盖（= 虚拟模型级）：JSON object，转发前 merge 进请求体。
+    /// 与 backend 级 param_overrides 并存时，backend 级后 merge、覆盖优先。
+    #[serde(default = "default_param_overrides")]
+    pub param_overrides: serde_json::Value,
+    /// 路由级请求头覆盖（= 虚拟模型级）：JSON object，追加到上游请求头，
+    /// 在平台 custom_headers 之后应用，同名可覆盖平台级头（含鉴权头）。
+    #[serde(default = "default_param_overrides")]
+    pub headers: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,6 +261,10 @@ pub struct CreateRouteRequest {
     pub default_max_tokens: Option<u32>,
     #[serde(default)]
     pub request_nonce: bool,
+    #[serde(default = "default_param_overrides")]
+    pub param_overrides: serde_json::Value,
+    #[serde(default = "default_param_overrides")]
+    pub headers: serde_json::Value,
     pub backends: Vec<CreateBackendRequest>,
 }
 
@@ -263,6 +275,10 @@ pub struct UpdateRouteRequest {
     pub fallback: Option<String>,
     pub default_max_tokens: Option<u32>,
     pub request_nonce: Option<bool>,
+    #[serde(default)]
+    pub param_overrides: Option<serde_json::Value>,
+    #[serde(default)]
+    pub headers: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
