@@ -1,6 +1,6 @@
 [package]
 name = "ai-gateway-tauri"
-version = "1.4.7"
+version = "1.4.8"
 description = "AI Gateway Desktop App"
 authors = ["you"]
 license = ""
