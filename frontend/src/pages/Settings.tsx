@@ -460,7 +460,7 @@ export default function Settings() {
 
         <div className="console-settings-main">
           <form id="settings-form" onSubmit={form.onSubmit(onSave)}>
-            <div className="console-settings-grid">
+            <div className="console-settings-grid console-settings-grid-equal">
               <section className="console-panel console-anchor" id="set-server">
                 <div className="console-panel-head">
                   <div className="console-panel-title">{t(locale, 'serverSettings')}</div>

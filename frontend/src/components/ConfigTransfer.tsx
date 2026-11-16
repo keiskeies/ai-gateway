@@ -185,7 +185,7 @@ export function ConfigTransfer() {
   }
 
   return (
-    <div className="console-settings-grid" style={{ marginTop: 14 }}>
+    <div className="console-settings-grid console-settings-grid-equal" style={{ marginTop: 14 }}>
       <section className="console-panel">
         <div className="console-panel-head">
           <div className="console-panel-title">{t(locale, 'configExportTitle')}</div>

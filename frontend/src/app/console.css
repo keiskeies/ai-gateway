@@ -2725,6 +2725,32 @@ h4,
   align-items: start;
 }
 
+/* 成对面板等高：设置页的服务配置/请求策略、配置转移的导出/导入用。
+   矮的一边 body 撑满，底边与高的一边齐平 */
+.console-settings-grid-equal {
+  align-items: stretch;
+}
+
+.console-settings-grid-equal > .console-panel > .console-panel-body {
+  flex: 1 1 auto;
+}
+
+/* 模型详情设置 tab：左列（模型标识 + 危险区，纵向紧贴）+ 右列（请求转发覆盖）。
+   两列各自内部是 1fr 纵向 grid，危险区天然贴在模型标识正下方，不被右列高度撑开 */
+.console-settings-grid-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
+.console-settings-grid-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  align-items: start;
+}
+
 /* 设置页：左侧分组锚点 + 右侧面板。导航 sticky，滚到哪个分组就亮哪个 */
 .console-settings-layout {
   display: grid;
@@ -3174,6 +3200,8 @@ h4,
   }
 
   .console-settings-grid,
+  .console-settings-grid-box,
+  .console-settings-grid-col,
   .console-info-grid,
   .console-form-grid {
     grid-template-columns: 1fr;
