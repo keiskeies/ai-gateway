@@ -65,6 +65,7 @@ import type {
 } from '../types/stats'
 import { Field } from '../components/Field'
 import { RequestPayloadView, ResponsePayloadView } from '../components/PayloadViewer'
+import { CopyIconButton } from '../components/CopyIconButton'
 
 type StatusFilter = 'all' | 'success' | 'fail'
 
@@ -888,7 +889,10 @@ export default function Traffic() {
               <div className="console-inspector-head">
                 <div>
                   <div className="console-inspector-kicker">{t(locale, 'requestLabel')}</div>
-                  <div className="console-inspector-id">#{selected.id}</div>
+                  <div className="console-inspector-id">
+                    #{selected.id}
+                    <CopyIconButton value={String(selected.id)} label={t(locale, 'copyRequestId', String(selected.id))} size={12} />
+                  </div>
                 </div>
                 <StatusPill tone={httpTone(selected.status_code)}>{selected.status_code}</StatusPill>
               </div>
@@ -896,17 +900,17 @@ export default function Traffic() {
                 <div className="console-replayed-from">{t(locale, 'replayedFrom', String(selected.replayed_from))}</div>
               )}
               <div className="console-meta-grid">
-                <div><div className="console-meta-label">{t(locale, 'proxy')}</div><div className="console-meta-value">{selected.proxy_name}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'platform')}</div><div className="console-meta-value">{selected.platform_name}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'modelId')}</div><div className="console-meta-value mono">{selected.model_id}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'stream')}</div><div className="console-meta-value">{selected.is_stream ? 'stream' : 'non-stream'}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'apiKey')}</div><div className="console-meta-value">{selected.api_key_name || '—'}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'requestPath')}</div><div className="console-meta-value mono">{selected.path || '—'}</div></div>
+                <div><div className="console-meta-label">{t(locale, 'proxy')}</div><div className="console-meta-value">{selected.proxy_name}<CopyIconButton value={selected.proxy_name} label={`${t(locale, 'copy')} ${t(locale, 'proxy')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'platform')}</div><div className="console-meta-value">{selected.platform_name}<CopyIconButton value={selected.platform_name} label={`${t(locale, 'copy')} ${t(locale, 'platform')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'modelId')}</div><div className="console-meta-value mono">{selected.model_id}<CopyIconButton value={selected.model_id} label={`${t(locale, 'copy')} ${t(locale, 'modelId')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'stream')}</div><div className="console-meta-value">{selected.is_stream ? 'stream' : 'non-stream'}<CopyIconButton value={selected.is_stream ? 'stream' : 'non-stream'} label={`${t(locale, 'copy')} ${t(locale, 'stream')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'apiKey')}</div><div className="console-meta-value">{selected.api_key_name || '—'}{selected.api_key_name && <CopyIconButton value={selected.api_key_name} label={`${t(locale, 'copy')} ${t(locale, 'apiKey')}`} size={12} />}</div></div>
+                <div><div className="console-meta-label">{t(locale, 'requestPath')}</div><div className="console-meta-value mono">{selected.path || '—'}{selected.path && <CopyIconButton value={selected.path} label={`${t(locale, 'copy')} ${t(locale, 'requestPath')}`} size={12} />}</div></div>
                 <div>
                   <div className="console-meta-label">
                     <Tooltip label={t(locale, 'creditsHint')}><span>{t(locale, 'credits')}</span></Tooltip>
                   </div>
-                  <div className="console-meta-value mono">{selected.credits == null ? '—' : formatNumber(selected.credits)}</div>
+                  <div className="console-meta-value mono">{selected.credits == null ? '—' : formatNumber(selected.credits)}{selected.credits != null && <CopyIconButton value={String(selected.credits)} label={`${t(locale, 'copy')} ${t(locale, 'credits')}`} size={12} />}</div>
                 </div>
               </div>
               <div className="console-attempts">
@@ -932,16 +936,16 @@ export default function Traffic() {
                           {attempt.model_id ? ` · ${attempt.model_id}` : ''}
                         </span>
                         {attempt.forward_url && (
-                          <span className="console-attempt-url" title={attempt.forward_url}>{attempt.forward_url}</span>
+                          <span className="console-attempt-url" title={attempt.forward_url}>{attempt.forward_url}<CopyIconButton value={attempt.forward_url} label={`${t(locale, 'copy')} ${t(locale, 'requestPath')}`} size={12} /></span>
                         )}
                         <span className="console-attempt-status">{attempt.status_code ?? t(locale, 'errShort')}</span>
                         <span>{attempt.latency_ms == null ? '—' : formatDuration(attempt.latency_ms)}</span>
                         {attempt.error_message && (
-                          <span className="console-attempt-msg">{attempt.error_message}</span>
+                          <span className="console-attempt-msg">{attempt.error_message}<CopyIconButton value={attempt.error_message} label={`${t(locale, 'copy')} ${t(locale, 'error')}`} size={12} /></span>
                         )}
                         {attempt.nonce && (
                           <span className="console-attempt-nonce" title={t(locale, 'payloadNonceTitle')} data-e2e-attempt-nonce={attempt.nonce}>
-                            {t(locale, 'attemptNonce', attempt.nonce, String(attempt.nonce.length))}
+                            {t(locale, 'attemptNonce', attempt.nonce, String(attempt.nonce.length))}<CopyIconButton value={attempt.nonce} label={t(locale, 'payloadNonceTitle')} size={12} />
                           </span>
                         )}
                       </div>
@@ -964,7 +968,10 @@ export default function Traffic() {
                         {payload.request.headers_captured && payload.request.headers_truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
                       {payload.request.headers ? (
-                        <pre className="console-payload-body">{JSON.stringify(payload.request.headers, null, 2)}</pre>
+                        <>
+                          <pre className="console-payload-body">{JSON.stringify(payload.request.headers, null, 2)}</pre>
+                          <div className="console-copy-inline"><CopyIconButton value={JSON.stringify(payload.request.headers, null, 2)} label={`${t(locale, 'copy')} ${t(locale, 'requestHeaders')}`} /></div>
+                        </>
                       ) : (
                         <div className="console-note">{t(locale, 'payloadNotCaptured')}</div>
                       )}
@@ -977,7 +984,12 @@ export default function Traffic() {
                           ? ` · ${payload.request_capture_enabled ? t(locale, 'payloadNotRecordedShort') : t(locale, 'payloadCaptureOffShort')}`
                           : payload.request.body_truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
-                      <RequestPayloadView payload={payload} locale={locale} />
+                      <div className="console-payload-slot">
+                        <RequestPayloadView payload={payload} locale={locale} />
+                        {payload.request.body && (
+                          <div className="console-copy-inline"><CopyIconButton value={payload.request.body} label={`${t(locale, 'copy')} ${t(locale, 'requestBody')}`} /></div>
+                        )}
+                      </div>
                     </details>
                     <details className="console-payload-block" open>
                       <summary>
@@ -986,11 +998,16 @@ export default function Traffic() {
                           ? ` · ${payload.response_capture_enabled ? t(locale, 'payloadNotRecordedShort') : t(locale, 'payloadCaptureOffShort')}`
                           : payload.response.truncated ? ` · ${t(locale, 'payloadTruncatedShort')}` : ''}
                       </summary>
-                      <ResponsePayloadView
-                        response={payload.response}
-                        captureEnabled={payload.response_capture_enabled}
-                        locale={locale}
-                      />
+                      <div className="console-payload-slot">
+                        <ResponsePayloadView
+                          response={payload.response}
+                          captureEnabled={payload.response_capture_enabled}
+                          locale={locale}
+                        />
+                        {payload.response.body && (
+                          <div className="console-copy-inline"><CopyIconButton value={payload.response.body} label={`${t(locale, 'copy')} ${t(locale, 'responseBody')}`} /></div>
+                        )}
+                      </div>
                     </details>
                   </>
                 ) : null}
@@ -1002,42 +1019,42 @@ export default function Traffic() {
                     <div className="console-wf-row">
                       <span>{t(locale, 'ttftLabel')}</span>
                       <span className="console-wf-track"><span className="console-wf-bar" style={{ width: `${Math.min(100, (selected.ttft_ms / Math.max(1, selected.latency_ms)) * 100)}%` }} /></span>
-                      <span>{formatDuration(selected.ttft_ms)}</span>
+                      <span>{formatDuration(selected.ttft_ms)}<CopyIconButton value={String(selected.ttft_ms)} label={t(locale, 'copyTtft')} size={12} /></span>
                     </div>
                     <div className="console-wf-row">
                       <span>{t(locale, 'genLabel')}</span>
                       <span className="console-wf-track"><span className="console-wf-bar" style={{ width: `${Math.min(100, (Math.max(0, selected.latency_ms - selected.ttft_ms) / Math.max(1, selected.latency_ms)) * 100)}%` }} /></span>
-                      <span>{formatDuration(Math.max(0, selected.latency_ms - selected.ttft_ms))}</span>
+                      <span>{formatDuration(Math.max(0, selected.latency_ms - selected.ttft_ms))}<CopyIconButton value={String(Math.max(0, selected.latency_ms - selected.ttft_ms))} label={t(locale, 'copyGen')} size={12} /></span>
                     </div>
                   </>
                 ) : (
                   <div className="console-wf-row">
                     <span>{t(locale, 'upstreamLabel')}</span>
                     <span className="console-wf-track"><span className="console-wf-bar" style={{ width: '100%' }} /></span>
-                    <span>{formatDuration(selected.latency_ms)}</span>
+                    <span>{formatDuration(selected.latency_ms)}<CopyIconButton value={String(selected.latency_ms)} label={t(locale, 'copyLatency')} size={12} /></span>
                   </div>
                 )}
                 <div className="console-timing-total">
                   <span>{t(locale, 'latency')}</span>
-                  <strong>{formatDuration(selected.latency_ms)}</strong>
+                  <strong>{formatDuration(selected.latency_ms)}<CopyIconButton value={String(selected.latency_ms)} label={t(locale, 'copyLatency')} size={12} /></strong>
                 </div>
               </div>
               <div className="console-meta-grid">
-                <div><div className="console-meta-label">{t(locale, 'inputTokens')}</div><div className="console-meta-value mono">{formatNumber(selected.token_input ?? 0)}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'outputTokens')}</div><div className="console-meta-value mono">{formatNumber(selected.token_output ?? 0)}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'cacheRead')}</div><div className="console-meta-value mono">{formatNumber(selected.cache_read_tokens ?? 0)}</div></div>
-                <div><div className="console-meta-label">{t(locale, 'freshInput')}</div><div className="console-meta-value mono">{formatNumber(selected.fresh_input_tokens ?? 0)}</div></div>
+                <div><div className="console-meta-label">{t(locale, 'inputTokens')}</div><div className="console-meta-value mono">{formatNumber(selected.token_input ?? 0)}<CopyIconButton value={String(selected.token_input ?? 0)} label={`${t(locale, 'copy')} ${t(locale, 'inputTokens')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'outputTokens')}</div><div className="console-meta-value mono">{formatNumber(selected.token_output ?? 0)}<CopyIconButton value={String(selected.token_output ?? 0)} label={`${t(locale, 'copy')} ${t(locale, 'outputTokens')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'cacheRead')}</div><div className="console-meta-value mono">{formatNumber(selected.cache_read_tokens ?? 0)}<CopyIconButton value={String(selected.cache_read_tokens ?? 0)} label={`${t(locale, 'copy')} ${t(locale, 'cacheRead')}`} size={12} /></div></div>
+                <div><div className="console-meta-label">{t(locale, 'freshInput')}</div><div className="console-meta-value mono">{formatNumber(selected.fresh_input_tokens ?? 0)}<CopyIconButton value={String(selected.fresh_input_tokens ?? 0)} label={`${t(locale, 'copy')} ${t(locale, 'freshInput')}`} size={12} /></div></div>
                 <div style={{ gridColumn: '1 / -1' }}>
                   <div className="console-meta-label">
                     <Tooltip label={t(locale, 'costHint')}><span>{t(locale, 'costEstimate')}</span></Tooltip>
                   </div>
-                  <div className="console-meta-value mono">{selected.cost == null ? t(locale, 'costUnpriced') : formatCost(selected.cost)}</div>
+                  <div className="console-meta-value mono">{selected.cost == null ? t(locale, 'costUnpriced') : formatCost(selected.cost)}{selected.cost != null && <CopyIconButton value={String(selected.cost)} label={`${t(locale, 'copy')} ${t(locale, 'costEstimate')}`} size={12} />}</div>
                 </div>
               </div>
               {selected.error_type && (
                 <div className="console-inspector-error">
                   <span className="console-section-label">{t(locale, 'error')}</span>
-                  <span>{selected.error_type}</span>
+                  <span>{selected.error_type}<CopyIconButton value={selected.error_type} label={`${t(locale, 'copy')} ${t(locale, 'error')}`} size={12} /></span>
                 </div>
               )}
               <div className="console-inspector-actions">
@@ -1082,11 +1099,14 @@ export default function Traffic() {
                     <StatusPill tone={httpTone(replayResult.status)}>{replayResult.status}</StatusPill>
                   </div>
                   <div className="console-note">{t(locale, selected.is_stream ? 'replayStreamHint' : 'replayResultHint')}</div>
-                  <pre className="console-replay-body">
-                    {replayResult.body.length > REPLAY_CLIP
-                      ? `${replayResult.body.slice(0, REPLAY_CLIP)}${t(locale, 'replayTruncated', String(replayResult.body.length - REPLAY_CLIP))}`
-                      : replayResult.body}
-                  </pre>
+                  <div className="console-payload-slot">
+                    <pre className="console-replay-body">
+                      {replayResult.body.length > REPLAY_CLIP
+                        ? `${replayResult.body.slice(0, REPLAY_CLIP)}${t(locale, 'replayTruncated', String(replayResult.body.length - REPLAY_CLIP))}`
+                        : replayResult.body}
+                    </pre>
+                    <div className="console-copy-inline"><CopyIconButton value={replayResult.body} label={`${t(locale, 'copy')} ${t(locale, 'replayResultTitle')}`} /></div>
+                  </div>
                 </div>
               )}
             </>

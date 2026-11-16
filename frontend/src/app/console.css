@@ -1742,6 +1742,21 @@ h4,
   font-size: 10.5px;
 }
 
+/* 详情里的复制图标按钮：内联嵌在文本旁，不撑高行 */
+.console-copy-btn {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 2px;
+}
+
+/* 整行复制入口（正文/原始报文下方独立一行） */
+.console-copy-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
 .console-waterfall {
   padding: 13px 15px;
   border-bottom: 1px solid var(--line);
@@ -1757,7 +1772,7 @@ h4,
 
 .console-wf-row {
   display: grid;
-  grid-template-columns: 54px 1fr 54px;
+  grid-template-columns: 54px 1fr minmax(54px, auto);
   gap: 8px;
   align-items: center;
   margin-bottom: 6px;
@@ -2138,6 +2153,13 @@ h4,
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-1);
+}
+
+/* 带复制入口的正文插槽：view + 复制按钮垂直堆叠 */
+.console-payload-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
 }
 
 .console-replay-target {
