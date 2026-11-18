@@ -14,6 +14,7 @@ pub mod config_transfer;
 pub mod events;
 pub mod client_config;
 pub mod checkin;
+pub mod update;
 
 use actix_web::web;
 
@@ -160,6 +161,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                         .route("/tasks/{task_id}", web::put().to(checkin::update_task))
                         .route("/tasks/{task_id}", web::delete().to(checkin::delete_task))
                         .route("/tasks/{task_id}/run", web::post().to(checkin::run_task_now)),
+                )
+                // 检查更新：查询只读，但下载写本机磁盘，整段同样只允许本机控制台
+                .service(
+                    web::scope("/update")
+                        .wrap(actix_web::middleware::from_fn(local::require_local_console))
+                        .route("", web::get().to(update::check))
+                        .route("/download", web::post().to(update::download))
+                        .route("/progress", web::get().to(update::progress))
+                        .route("/reveal", web::post().to(update::reveal)),
                 )
         );
 }

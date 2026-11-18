@@ -2935,6 +2935,70 @@ h4,
   color: var(--warn);
 }
 
+/* 检查更新：只活在桌面端的关于面板里，样式跟着面板现有的行/注记走 */
+.console-update {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.console-update .console-route-actions {
+  margin-top: 2px;
+}
+
+.console-update-new {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.console-update-err {
+  color: var(--warn);
+}
+
+.console-update-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.console-update-progress .mantine-Progress-root {
+  flex: 1;
+  min-width: 0;
+}
+
+.console-update-progress-text {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.console-update-done {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--ok) 24%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--ok) 6%, var(--panel-bg));
+}
+
+.console-update-done-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.console-update-hint {
+  font-size: 11px;
+  line-height: 1.65;
+  color: var(--text-3);
+}
+
 /* 每日领取：平台行里的账号名与按钮 */
 .checkin-cell {
   display: flex;

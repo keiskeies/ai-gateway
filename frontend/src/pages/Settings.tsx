@@ -27,6 +27,7 @@ import { formatNumber } from '../lib/format'
 import { PageHeader } from '../components/ui/PageHeader'
 import { ConfigTransfer } from '../components/ConfigTransfer'
 import { DatabaseBackup } from '../components/DatabaseBackup'
+import { UpdateCheck } from '../components/UpdateCheck'
 import { ErrorState, PageSkeleton } from '../components/ui/States'
 import { Field } from '../components/Field'
 
@@ -700,6 +701,8 @@ export default function Settings() {
                 <span className="console-mono">{buildTime}</span>
               </div>
               <div className="console-note">{t(locale, 'aboutHint')}</div>
+              {/* 桌面端才有更新入口：独立服务器模式下 UpdateCheck 自己返回 null */}
+              <UpdateCheck />
               <div className="console-route-actions">
                 <Button
                   size="xs"

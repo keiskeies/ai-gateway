@@ -51,6 +51,8 @@ export interface AuthStatus {
   local_console?: boolean
   /** 本进程能否打开每日领取的登录窗口（桌面端为 true） */
   checkin_login?: boolean
+  /** 本进程能否检查并下载更新（桌面端为 true，web 端整块入口不渲染） */
+  desktop_update?: boolean
 }
 
 // Fetch auth status (public) to discover the configured port on startup
@@ -342,6 +344,40 @@ export const getApiKeyModelUsage = (id: string, opts?: RangeOpts) => api.get(`/s
 // Settings
 export const getSettings = () => api.get('/settings').then(r => r.data)
 export const updateSettings = (data: any) => api.put('/settings', data).then(r => r.data)
+
+// 检查更新：只有桌面端有入口，独立服务器模式下后端两个写接口都回 409
+export interface UpdateAsset {
+  name: string
+  size: number
+  current_platform: boolean
+}
+export interface UpdateInfo {
+  current: string
+  latest: string
+  has_update: boolean
+  release_url: string
+  published_at: string | null
+  assets: UpdateAsset[]
+}
+export interface UpdateProgress {
+  state: 'idle' | 'downloading' | 'done' | 'error'
+  name: string
+  received: number
+  total: number
+  /** 这次下载属于哪个版本：下完没装、之后又查到更新时，界面得说清手里那个是要旧的 */
+  version: string
+  path?: string
+  error?: string
+}
+/** `force` 跳过后端 10 分钟的缓存，真的打一次 GitHub */
+export const getLatestRelease = (force = false): Promise<UpdateInfo> =>
+  api.get('/update', { params: force ? { force: 1 } : undefined }).then(r => r.data)
+export const startUpdateDownload = (asset?: string): Promise<UpdateProgress> =>
+  api.post('/update/download', { asset: asset ?? null }).then(r => r.data)
+export const getUpdateProgress = (): Promise<UpdateProgress> => api.get('/update/progress').then(r => r.data)
+/** 在文件管理器里定位下载好的安装包（不代用户运行） */
+export const revealUpdateInstaller = (): Promise<void> =>
+  api.post('/update/reveal').then(() => undefined)
 
 // 配置迁移：导出是只读快照（默认不带上游密钥），导入先看预演再落库
 export interface TablePlan {

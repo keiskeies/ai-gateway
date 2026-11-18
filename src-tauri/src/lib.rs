@@ -189,6 +189,36 @@ fn resume_url(port: u16) -> Result<url::Url, url::ParseError> {
     Ok(origin)
 }
 
+/// 把下载好的安装包在文件管理器里选中（不代用户运行：装新版本要替换正在跑的
+/// 程序本身，双击这一下必须留在人手里）。
+///
+/// `spawn` 而不是 `output`：explorer 打开选中窗口后未必要立刻退出，等它就等于
+/// 把调用线程挂在这里。
+fn reveal_installer_file(path: String) -> Result<(), String> {
+    let target = std::path::Path::new(&path);
+    if !target.exists() {
+        return Err(format!("安装包不存在: {path}"));
+    }
+    let mut command = if cfg!(target_os = "windows") {
+        // Windows 的 /select 只认反斜杠，且整条要当一个参数传
+        let mut cmd = std::process::Command::new("explorer");
+        cmd.arg(format!("/select,{}", path.replace('/', "\\")));
+        cmd
+    } else if cfg!(target_os = "macos") {
+        let mut cmd = std::process::Command::new("open");
+        cmd.arg("-R").arg(&path);
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(target.parent().unwrap_or(target));
+        cmd
+    };
+    command
+        .spawn()
+        .map_err(|error| format!("无法打开文件管理器: {error}"))?;
+    Ok(())
+}
+
 /// 每日领取的登录窗口（必须在主线程调用）。
 ///
 /// 每个 attempt 用独立的 WebView2 配置目录：否则第一个账号的会话会被第二个账号的
@@ -444,6 +474,10 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
 
         let db_pool = ai_gateway::db::init_pool(&db_path)
             .expect("Failed to initialize database");
+
+        // 检查更新的安装包由 core 下到本机，定位动作留在桌面端：core 不 spawn 进程，
+        // 服务器模式下没有 opener，`/api/update/download` 与 `/reveal` 直接 409。
+        ai_gateway::update::register_reveal_opener(Box::new(reveal_installer_file));
 
         // 每日领取的登录窗口只有桌面端能开：core 通过这个 opener 请求 Tauri 建窗，
         // 抓到 cookie 后再回调 core 加密入库。服务器模式不注册，接口会明确返回 409。

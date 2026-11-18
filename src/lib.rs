@@ -13,4 +13,5 @@ pub mod proxy;
 pub mod api;
 pub mod clients;
 pub mod checkin;
+pub mod update;
 pub mod web_cache;

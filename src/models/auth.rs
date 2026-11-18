@@ -54,6 +54,9 @@ pub struct AuthStatusResponse {
     /// 本进程能否打开登录窗口（只有 Tauri 桌面端注册了 opener）。
     /// 独立服务器模式下前端据此说明「登录仅桌面端可用」。
     pub checkin_login: bool,
+    /// 本进程能不能检查并下载更新（同样只有桌面端注册了 opener）。
+    /// 前端据此决定「检查更新」入口出不出现：软件端有，web 端整块不渲染。
+    pub desktop_update: bool,
 }
 
 #[derive(Debug, Serialize)]
