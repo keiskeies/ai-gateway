@@ -37,7 +37,12 @@ impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             max_retries: 2,
-            retry_on_error: vec![ErrorType::RateLimit, ErrorType::ServerError, ErrorType::Timeout],
+            retry_on_error: vec![
+                ErrorType::RateLimit,
+                ErrorType::ServerError,
+                ErrorType::Timeout,
+                ErrorType::ConnectionError,
+            ],
             backoff_ms: 500,
         }
     }

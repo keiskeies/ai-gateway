@@ -66,6 +66,8 @@ pub struct DefaultsConfig {
     pub request_timeout_secs: u64,
     /// 流式请求的超时上限：长生成/推理模型常超过 request_timeout，单独放宽
     pub stream_timeout_secs: u64,
+    /// 流式 chunk 之间的空闲上限：超过这个时间没有新 chunk 就认为上游挂死
+    pub stream_idle_timeout_secs: u64,
     pub test_connection_timeout_secs: u64,
     /// 是否把入站请求正文存进 `request_bodies`。默认 false——正文里就是用户的提示词，
     /// 存不存是隐私决定，不是调试便利，所以只有显式开启才落库（见 §2 原则 10）。
@@ -336,6 +338,7 @@ impl Default for AppConfig {
                 retry_backoff_ms: 500,
                 request_timeout_secs: 120,
                 stream_timeout_secs: 1800,
+                stream_idle_timeout_secs: 90,
                 test_connection_timeout_secs: 10,
                 capture_request_bodies: false,
                 capture_response_bodies: false,
@@ -400,6 +403,9 @@ impl AppConfig {
                         }
                         if let Some(v) = def.get("stream_timeout_secs").and_then(|v| v.as_integer()) {
                             config.defaults.stream_timeout_secs = v as u64;
+                        }
+                        if let Some(v) = def.get("stream_idle_timeout_secs").and_then(|v| v.as_integer()) {
+                            config.defaults.stream_idle_timeout_secs = v.max(1) as u64;
                         }
                         if let Some(v) = def.get("test_connection_timeout_secs").and_then(|v| v.as_integer()) {
                             config.defaults.test_connection_timeout_secs = v as u64;
@@ -468,6 +474,7 @@ max_retries = {}
 retry_backoff_ms = {}
 request_timeout_secs = {}
 stream_timeout_secs = {}
+stream_idle_timeout_secs = {}
 test_connection_timeout_secs = {}
 capture_request_bodies = {}
 capture_response_bodies = {}
@@ -484,6 +491,7 @@ auto_purge_days = {}
             self.defaults.retry_backoff_ms,
             self.defaults.request_timeout_secs,
             self.defaults.stream_timeout_secs,
+            self.defaults.stream_idle_timeout_secs,
             self.defaults.test_connection_timeout_secs,
             self.defaults.capture_request_bodies,
             self.defaults.capture_response_bodies,

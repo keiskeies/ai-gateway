@@ -772,7 +772,7 @@ CREATE TABLE IF NOT EXISTS routes (
     id              TEXT PRIMARY KEY,
     proxy_id        TEXT NOT NULL UNIQUE REFERENCES proxies(id) ON DELETE CASCADE,
     lb_strategy     TEXT NOT NULL DEFAULT 'RoundRobin',
-    retry_policy    TEXT NOT NULL DEFAULT '{"max_retries":2,"retry_on_error":["RateLimit","ServerError","Timeout"],"backoff_ms":500}',
+    retry_policy    TEXT NOT NULL DEFAULT '{"max_retries":2,"retry_on_error":["RateLimit","ServerError","Timeout","ConnectionError"],"backoff_ms":500}',
     fallback        TEXT
 );
 
@@ -871,7 +871,7 @@ CREATE TABLE IF NOT EXISTS routes_new (
     id              TEXT PRIMARY KEY,
     proxy_id        TEXT NOT NULL UNIQUE REFERENCES proxies(id) ON DELETE CASCADE,
     lb_strategy     TEXT NOT NULL DEFAULT 'RoundRobin',
-    retry_policy    TEXT NOT NULL DEFAULT '{"max_retries":2,"retry_on_error":["RateLimit","ServerError","Timeout"],"backoff_ms":500}',
+    retry_policy    TEXT NOT NULL DEFAULT '{"max_retries":2,"retry_on_error":["RateLimit","ServerError","Timeout","ConnectionError"],"backoff_ms":500}',
     fallback        TEXT
 );
 

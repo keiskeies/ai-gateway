@@ -102,6 +102,8 @@ interface SettingsValues {
   max_retries: number
   retry_backoff_ms: number
   request_timeout_secs: number
+  stream_timeout_secs: number
+  stream_idle_timeout_secs: number
   test_connection_timeout_secs: number
   lb_strategy: string
 }
@@ -139,6 +141,8 @@ export default function Settings() {
       max_retries: 3,
       retry_backoff_ms: 1000,
       request_timeout_secs: 120,
+      stream_timeout_secs: 1800,
+      stream_idle_timeout_secs: 90,
       test_connection_timeout_secs: 10,
       lb_strategy: 'RoundRobin',
     },
@@ -164,6 +168,8 @@ export default function Settings() {
       max_retries: data.max_retries ?? 3,
       retry_backoff_ms: data.retry_backoff_ms ?? 1000,
       request_timeout_secs: data.request_timeout_secs ?? 120,
+      stream_timeout_secs: data.stream_timeout_secs ?? 1800,
+      stream_idle_timeout_secs: data.stream_idle_timeout_secs ?? 90,
       test_connection_timeout_secs: data.test_connection_timeout_secs ?? data.test_conn_timeout_secs ?? 10,
       lb_strategy: data.lb_strategy ?? data.default_lb_strategy ?? 'RoundRobin',
     }
@@ -514,6 +520,12 @@ export default function Settings() {
                     </Field>
                     <Field label={t(locale, 'requestTimeoutSecs')}>
                       <NumberInput size="xs" min={1} {...form.getInputProps('request_timeout_secs')} />
+                    </Field>
+                    <Field label={t(locale, 'streamTimeoutSecs')}>
+                      <NumberInput size="xs" min={1} {...form.getInputProps('stream_timeout_secs')} />
+                    </Field>
+                    <Field label={t(locale, 'streamIdleTimeoutSecs')}>
+                      <NumberInput size="xs" min={1} {...form.getInputProps('stream_idle_timeout_secs')} />
                     </Field>
                     <Field label={t(locale, 'testConnTimeoutSecs')}>
                       <NumberInput size="xs" min={1} max={120} {...form.getInputProps('test_connection_timeout_secs')} />

@@ -1,6 +1,7 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use bytes::Bytes;
 use futures::Stream;
+use futures_util::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -12,6 +13,20 @@ use crate::lb::BackendSelector;
 use crate::models::route::ErrorType;
 use crate::models::stats::{RequestAttempt, RequestStat};
 use crate::protocol::{openai, anthropic, types::UnifiedRequest};
+
+/// 上游流式响应体。首字探测用 `resp.chunk()` 预读第一块，
+/// 再把它接回流首；因此流处理器接收 boxed stream 而不是 `reqwest::Response`。
+type UpstreamByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static>>;
+
+/// 首次重试退避上限。指数退避不封顶时，20 次 × 5000ms 基准会等到以天计，
+/// 客户端早就超时；封顶后语义仍是「越重试越慢」，但不会荒谬到不可用。
+const MAX_RETRY_BACKOFF_MS: u64 = 60_000;
+
+fn retry_delay_ms(backoff_ms: u64, attempt: u32) -> u64 {
+    backoff_ms
+        .saturating_mul(1u64 << (attempt.min(20) as u32))
+        .min(MAX_RETRY_BACKOFF_MS)
+}
 
 /// 入站元数据：路径始终记录；请求头只在采集开启时带值。
 #[derive(Clone, Default)]
@@ -1057,11 +1072,68 @@ async fn handle_request(
         let latency_ms = start.elapsed().as_millis() as i64;
 
         match result {
-            Ok(resp) => {
+            Ok(mut resp) => {
                 let status = resp.status();
                 let content_type = resp.headers().get("content-type")
                     .and_then(|v| v.to_str().ok()).map(str::to_string);
                 if status.is_success() {
+                    // 流式首字探测：响应头 200 不代表数据可达。客户端还没收到任何字节时
+                    // 换后端重试是安全的；一旦把字节交给客户端就再也回退不了，只能发错误帧。
+                    // 非流式不探测——它本来就要把正文读完再一次性返回，中途失败由 Err 分支处理。
+                    let private_protocol = plan.as_ref().map(|p| p.always_sse).unwrap_or(false);
+                    let idle_timeout = std::time::Duration::from_secs(
+                        state.config.read().defaults.stream_idle_timeout_secs,
+                    );
+                    let mut first_chunk: Option<Bytes> = None;
+                    if is_stream || private_protocol {
+                        let first = tokio::time::timeout(idle_timeout, resp.chunk()).await;
+                        // `resp.chunk()` → Result<Option<Bytes>, reqwest::Error>，
+                        // timeout 再包一层 Result<_, Elapsed>。
+                        let failure = match first {
+                            Ok(Ok(Some(bytes))) => { first_chunk = Some(bytes); None }
+                            Ok(Ok(None)) => Some("upstream stream ended before first byte".to_string()),
+                            Ok(Err(e)) => Some(e.to_string()),
+                            Err(_) => Some(format!("first-byte idle timeout ({}s)", idle_timeout.as_secs())),
+                        };
+                        if let Some(reason) = failure {
+                            // reqwest 的错误文本可能带上游 URL（含密钥），落轨迹与回显前先脱敏，
+                            // 与下方连接错误分支的 clip_error 处理保持一致。
+                            let reason = clip_error(&reason, &resolved.platform.api_key);
+                            tracing::warn!("流式首字失败，准备换后端: {} attempt={}", reason, attempt_no);
+                            // 首字失败按连接错误处理：释放预留、记失败轨迹、按白名单重试。
+                            if let Some(r) = reservation.as_mut() {
+                                release_credit(state, r, &request_id, &backend.model_id).await;
+                            }
+                            state.stats_writer.record_attempt(make_attempt(
+                                &request_id,
+                                attempt_no,
+                                &backend,
+                                None,
+                                Some("ConnectionError"),
+                                Some(reason.clone()),
+                                start.elapsed().as_millis() as i64,
+                                started_at.clone(),
+                                Some(forward_url.clone()),
+                                injected_nonce.clone(),
+                            ));
+                            last_error = Some(format!("StreamPreFirstByte: {}", reason));
+                            if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error)
+                                && attempt < max_retries
+                            {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    retry_delay_ms(resolved_route.retry_policy.backoff_ms, attempt),
+                                )).await;
+                                continue;
+                            }
+                            state.stats_writer.record(make_stat(
+                                &resolved_route.proxy_id, &resolved_route.route_id, &backend.id,
+                                0, start.elapsed().as_millis() as i64, None, None,
+                                Some("StreamPreFirstByte".to_string()), is_stream,
+                                api_key_id.as_deref(), &request_id, replayed_from, path,
+                            ));
+                            return Err(AppError::Internal(format!("StreamPreFirstByte: {}", reason)));
+                        }
+                    }
                     // 拿到响应头即算本次尝试成功；积分预留到此确认，不再释放。
                     // 显式 confirm 解除 Drop 兜底，否则成功响应也会被退费。
                     if let Some(r) = reservation.as_mut() {
@@ -1081,7 +1153,6 @@ async fn handle_request(
                     ));
                     // 私有协议上游总是回 SSE：即便客户端要非流式，也要走流式路径再聚合，
                     // 否则会把 SSE 正文当 JSON 解析（得到空响应）。
-                    let private_protocol = plan.as_ref().map(|p| p.always_sse).unwrap_or(false);
                     if is_stream || private_protocol {
                         // 流式：统计由 handle_stream / handle_stream_convert 在流结束时记录一次（含 SSE usage token）
                         let mut base = make_stat(
@@ -1113,6 +1184,16 @@ async fn handle_request(
                         } else {
                             None
                         };
+                        // 首字探测预读的 chunk 必须接回流首，否则会丢掉第一条 SSE 事件。
+                        // 注意不要在这里手动 push 进 capture：接回的 chunk 会被下方流处理器
+                        // 当作正常 chunk 再次 push（见 StreamPassthroughBody::poll_next 等），
+                        // 手动 push 会让响应体采集里第一条事件重复出现。
+                        let upstream_body: UpstreamByteStream = if let Some(first) = first_chunk {
+                            Box::pin(futures_util::stream::iter(std::iter::once(Ok(first)))
+                                .chain(resp.bytes_stream()))
+                        } else {
+                            Box::pin(resp.bytes_stream())
+                        };
                         // 私有协议：先把上游 SSE 归一化成 OpenAI 形态，再决定透传还是转换
                         if let Some(kind) = private_protocol_kind(adapter) {
                             // 关键分支：客户端要非流式时，必须把整条 SSE 读完后聚合成 JSON，
@@ -1120,7 +1201,7 @@ async fn handle_request(
                             if !is_stream {
                                 tracing::info!("私有协议非流式聚合（流式路径内）：adapter={:?}", adapter);
                                 return Ok(handle_private_aggregate(
-                                    resp,
+                                    upstream_body,
                                     &state.stats_writer,
                                     base,
                                     backend.pricing_snapshot(),
@@ -1138,10 +1219,11 @@ async fn handle_request(
                                 if client_anthropic { "anthropic" } else { "openai" }
                             );
                             return Ok(handle_private_stream(
-                                resp,
+                                upstream_body,
                                 &state.stats_writer,
                                 base,
                                 backend.pricing_snapshot(),
+                                idle_timeout,
                                 kind,
                                 client_anthropic,
                                 &virtual_model,
@@ -1154,12 +1236,12 @@ async fn handle_request(
                             ));
                         }
                         if client_anthropic == upstream_anthropic {
-                            return Ok(handle_stream(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, start, pricing_at, capture, connection_guard.take()));
+                            return Ok(handle_stream(upstream_body, &state.stats_writer, base, backend.pricing_snapshot(), idle_timeout, client_anthropic, start, pricing_at, capture, connection_guard.take()));
                         }
                         tracing::info!("跨协议流式转换：客户端={} 上游={}",
                             if client_anthropic { "anthropic" } else { "openai" },
                             if upstream_anthropic { "anthropic" } else { "openai" });
-                        return Ok(handle_stream_convert(resp, &state.stats_writer, base, backend.pricing_snapshot(), client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture, connection_guard.take()));
+                        return Ok(handle_stream_convert(upstream_body, &state.stats_writer, base, backend.pricing_snapshot(), idle_timeout, client_anthropic, &virtual_model, &backend.id, &backend.model_id, start, pricing_at, capture, connection_guard.take()));
                     }
                     // 走到这里说明是标准协议（私有协议已在上面 `is_stream || private_protocol`
                     // 分支里全部处理完，因为它们的 always_sse 恒为 true）。
@@ -1314,7 +1396,9 @@ async fn handle_request(
                         && should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error)
                         && attempt < max_retries
                     {
-                        tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            retry_delay_ms(resolved_route.retry_policy.backoff_ms, attempt),
+                        )).await;
                         continue;
                     }
                     // 最终失败：记录一条统计，并对客户端回映射后的状态码。
@@ -1361,7 +1445,9 @@ async fn handle_request(
                     injected_nonce.clone(),
                 ));
                 if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error) && attempt < max_retries {
-                    tokio::time::sleep(std::time::Duration::from_millis(resolved_route.retry_policy.backoff_ms * 2u64.pow(attempt as u32))).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        retry_delay_ms(resolved_route.retry_policy.backoff_ms, attempt),
+                    )).await;
                     continue;
                 }
                 // 最终失败：记录一条连接错误统计（后端已在本次 attempt 中选定）
@@ -1752,9 +1838,8 @@ async fn read_bounded_body(
 /// 流式透传的残行缓冲上限：上游一直不发换行时，buffer 会随流生命周期无界增长。
 const MAX_STREAM_LINE_BUFFER_BYTES: usize = 1024 * 1024;
 
-/// 流式 chunk 之间的空闲上限：上游在这么长时间内一个字节都没给，就认为连接已经挂死。
-/// 与整条流的 stream_timeout_secs（默认 1800s）互补——后者管总时长，这个管「中途卡住」。
-const STREAM_IDLE_TIMEOUT_SECS: u64 = 90;
+/// 流式 chunk 之间的空闲上限。默认值见 DefaultsConfig::stream_idle_timeout_secs（90s），
+/// 实际值由调用方从配置传入；与整条流的 stream_timeout_secs（默认 1800s）互补。
 
 /// 流式「空闲超时」包装：只要两个 chunk 之间超过 `idle` 就结束流并报错。
 /// 上游总超时是 1800s（整条流），但没有 chunk 间空闲上限时，一个每秒滴一字节的
@@ -2125,10 +2210,11 @@ impl Stream for StreamPassthroughBody {
 /// 处理流式响应：透传 SSE 给客户端，同时旁路解析流内 usage 累积 token。
 /// 统计在流结束时恰好记录一次（不随重试路径重复计数）。
 fn handle_stream(
-    resp: reqwest::Response,
+    body: UpstreamByteStream,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
     pricing: Option<crate::models::pricing::Pricing>,
+    idle_timeout: std::time::Duration,
     // 客户端协议与上游相同，据此决定补发收尾帧的形态
     client_anthropic: bool,
     start: Instant,
@@ -2136,26 +2222,10 @@ fn handle_stream(
     capture: Option<StreamCapture>,
     conn_guard: Option<ConnectionGuard>,
 ) -> HttpResponse {
-    let s = resp.status();
-    if !s.is_success() {
-        // 早期失败：记一条失败统计并透传上游状态码
-        let mut st = stat_base;
-        st.status_code = s.as_u16() as i32;
-        st.error_type = Some("UpstreamError".to_string());
-        stats_writer.record(st);
-        return HttpResponse::build(
-            actix_web::http::StatusCode::from_u16(s.as_u16())
-                .unwrap_or(actix_web::http::StatusCode::BAD_GATEWAY),
-        )
-        .body("upstream stream error");
-    }
-
+    // 状态码已在调用方确认成功（首字探测也在那里完成），这里直接建流。
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, conn_guard));
     let body = StreamPassthroughBody {
-        inner: Box::pin(IdleTimeoutStream::new(
-            resp.bytes_stream(),
-            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
-        )),
+        inner: Box::pin(IdleTimeoutStream::new(body, idle_timeout)),
         buffer: Vec::new(),
         stats,
         capture,
@@ -2246,10 +2316,11 @@ impl Stream for StreamConvertBody {
 
 /// 处理跨协议流式响应：实时把上游 SSE 转换为客户端协议的事件流
 fn handle_stream_convert(
-    resp: reqwest::Response,
+    body: UpstreamByteStream,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
     pricing: Option<crate::models::pricing::Pricing>,
+    idle_timeout: std::time::Duration,
     client_anthropic: bool,
     model: &str,
     backend_id: &str,
@@ -2261,10 +2332,7 @@ fn handle_stream_convert(
 ) -> HttpResponse {
     let stats = Arc::new(StreamStatCtx::new(stat_base, stats_writer, start, pricing, pricing_at, conn_guard));
     let body = StreamConvertBody {
-        inner: Box::pin(IdleTimeoutStream::new(
-            resp.bytes_stream(),
-            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
-        )),
+        inner: Box::pin(IdleTimeoutStream::new(body, idle_timeout)),
         converter: crate::proxy::stream_convert::StreamConverter::new(
             client_anthropic,
             model,
@@ -2552,10 +2620,11 @@ impl PrivateStreamBody {
 /// 处理私有协议流式响应。
 #[allow(clippy::too_many_arguments)]
 fn handle_private_stream(
-    resp: reqwest::Response,
+    body: UpstreamByteStream,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
     pricing: Option<crate::models::pricing::Pricing>,
+    idle_timeout: std::time::Duration,
     kind: crate::proxy::upstream::private_sse::ProtocolKind,
     client_anthropic: bool,
     model: &str,
@@ -2578,10 +2647,7 @@ fn handle_private_stream(
         None
     };
     let body = PrivateStreamBody {
-        inner: Box::pin(IdleTimeoutStream::new(
-            resp.bytes_stream(),
-            std::time::Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
-        )),
+        inner: Box::pin(IdleTimeoutStream::new(body, idle_timeout)),
         normalizer: crate::proxy::upstream::private_sse::PrivateSseNormalizer::new(kind, model),
         converter,
         stats,
@@ -2603,7 +2669,7 @@ fn handle_private_stream(
 /// 直接把响应体当 JSON 解析会得到空对象（表现为「模型没返回内容」）。
 #[allow(clippy::too_many_arguments)]
 async fn handle_private_aggregate(
-    resp: reqwest::Response,
+    body: UpstreamByteStream,
     stats_writer: &StatsWriter,
     stat_base: RequestStat,
     pricing: Option<crate::models::pricing::Pricing>,
@@ -2616,7 +2682,7 @@ async fn handle_private_aggregate(
     use futures_util::StreamExt;
 
     let mut normalizer = crate::proxy::upstream::private_sse::PrivateSseNormalizer::new(kind, model);
-    let mut stream = resp.bytes_stream();
+    let mut stream = body;
     let mut failed = false;
     while let Some(chunk) = stream.next().await {
         match chunk {
@@ -2776,7 +2842,17 @@ fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> Http
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_forward_url, truncate_utf8, PassthroughTracker};
+    use super::{retry_delay_ms, sanitize_forward_url, truncate_utf8, PassthroughTracker, MAX_RETRY_BACKOFF_MS};
+
+    #[test]
+    fn retry_backoff_is_exponential_but_capped() {
+        assert_eq!(retry_delay_ms(500, 0), 500);
+        assert_eq!(retry_delay_ms(500, 1), 1000);
+        assert_eq!(retry_delay_ms(500, 2), 2000);
+        // 20 次重试 + 5000ms 基准：不封顶会到 5_242_880_000ms（约 60 天）
+        assert_eq!(retry_delay_ms(5000, 19), MAX_RETRY_BACKOFF_MS);
+        assert_eq!(retry_delay_ms(5000, u32::MAX), MAX_RETRY_BACKOFF_MS);
+    }
     use actix_web::web::Bytes;
 
     #[test]

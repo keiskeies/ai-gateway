@@ -552,7 +552,7 @@ export default function ModelDetail() {
         lb_strategy: routeDraft.strategy,
         retry_policy: {
           max_retries: routeDraft.retries,
-          retry_on_error: ['RateLimit', 'ServerError', 'Timeout'],
+          retry_on_error: ['RateLimit', 'ServerError', 'Timeout', 'ConnectionError'],
           backoff_ms: routeDraft.backoff,
         },
         default_max_tokens: routeDraft.maxTokens,
