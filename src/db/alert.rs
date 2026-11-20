@@ -406,75 +406,96 @@ pub fn collect_candidates(
 
 /// 把候选状态并进表里：新出现的插入、还在的只移动 `last_seen`、
 /// 扫不到的开放行标成已解决、已解决的保留期一到就删。
+///
+/// 整段写操作在一个事务里。实测（60 候选、每轮刷新半数，本机 WAL + synchronous=NORMAL）：
+/// 逐语句 autocommit 1.5 ms/轮 → 事务 0.27 ms/轮，约 5.6×。
+/// 收益是每条语句一次写锁获取 + WAL 帧收尾的固定开销（NORMAL 下并没有每语句 fsync，
+/// 别把这笔账记成 fsync）。顺带把语义变好：中途失败是「什么都没写」，而不是半个告警状态。
+///
+/// 事务行为的选型见函数体内注释：**必须 IMMEDIATE**，DEFERRED 会把这条路径变成可失败。
 pub fn sweep(pool: &DbPool, candidates: &[AlertCandidate]) -> AppResult<AlertSweep> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let now = now_iso();
     let mut opened = 0usize;
     let mut resolved = 0usize;
 
-    for c in candidates {
-        let existing: Option<(Option<String>, Option<String>)> = conn
-            .query_row(
-                "SELECT read_at, resolved_at FROM alerts WHERE dedupe_key = ?1",
-                rusqlite::params![c.dedupe_key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .ok();
-        let args = serde_json::to_string(&c.args)
-            .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-        match existing {
-            // 从没解决过：只是"还在"，移动 last_seen 并刷新参数（引用的名字可能被改掉）
-            Some((_, None)) => {
-                conn.execute(
-                    "UPDATE alerts SET severity = ?2, ref_type = ?3, ref_id = ?4, code = ?5, args = ?6, last_seen = ?7
-                     WHERE dedupe_key = ?1",
-                    rusqlite::params![c.dedupe_key, c.severity, c.ref_type, c.ref_id, c.code, args, now],
-                )?;
-            }
-            // 解决过又回来了：算新的一条，已读状态清零，否则用户永远看不到回归的故障
-            Some((_, Some(_))) => {
-                conn.execute(
-                    "UPDATE alerts SET severity = ?2, ref_type = ?3, ref_id = ?4, code = ?5, args = ?6,
-                            first_seen = ?7, last_seen = ?7, read_at = NULL, resolved_at = NULL
-                     WHERE dedupe_key = ?1",
-                    rusqlite::params![c.dedupe_key, c.severity, c.ref_type, c.ref_id, c.code, args, now],
-                )?;
-                opened += 1;
-            }
-            None => {
-                conn.execute(
-                    "INSERT INTO alerts (dedupe_key, kind, severity, ref_type, ref_id, code, args, first_seen, last_seen)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                    rusqlite::params![
-                        c.dedupe_key, c.kind, c.severity, c.ref_type, c.ref_id, c.code, args, now
-                    ],
-                )?;
-                opened += 1;
+    {
+        // IMMEDIATE，不是默认的 DEFERRED：sweep 第一条语句是读（候选循环里的 SELECT /
+        // 开放行 SELECT），DEFERRED 会先拿读快照、写的时候再升级——而 SQLite 在**升级**时
+        // 不查 busy handler。实测（本机 WAL，busy_timeout=5000）：并发写者一提交，
+        // DEFERRED 的升级 16µs 就返回 SQLITE_BUSY_SNAPSHOT(517)；IMMEDIATE 同样场景等 259ms 后成功。
+        // 逐语句 autocommit 的旧写法每次自己取写锁，走的是 busy_timeout，所以 5s 内一定会成功——
+        // 换成 DEFERRED 事务等于给 /api/alerts 新增了一个「并发写就 500」的失败模式。
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for c in candidates {
+            let existing: Option<(Option<String>, Option<String>)> = tx
+                .query_row(
+                    "SELECT read_at, resolved_at FROM alerts WHERE dedupe_key = ?1",
+                    rusqlite::params![c.dedupe_key],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            let args = serde_json::to_string(&c.args)
+                .map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+            match existing {
+                // 从没解决过：只是"还在"，移动 last_seen 并刷新参数（引用的名字可能被改掉）
+                Some((_, None)) => {
+                    tx.execute(
+                        "UPDATE alerts SET severity = ?2, ref_type = ?3, ref_id = ?4, code = ?5, args = ?6, last_seen = ?7
+                         WHERE dedupe_key = ?1",
+                        rusqlite::params![c.dedupe_key, c.severity, c.ref_type, c.ref_id, c.code, args, now],
+                    )?;
+                }
+                // 解决过又回来了：算新的一条，已读状态清零，否则用户永远看不到回归的故障
+                Some((_, Some(_))) => {
+                    tx.execute(
+                        "UPDATE alerts SET severity = ?2, ref_type = ?3, ref_id = ?4, code = ?5, args = ?6,
+                                first_seen = ?7, last_seen = ?7, read_at = NULL, resolved_at = NULL
+                         WHERE dedupe_key = ?1",
+                        rusqlite::params![c.dedupe_key, c.severity, c.ref_type, c.ref_id, c.code, args, now],
+                    )?;
+                    opened += 1;
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO alerts (dedupe_key, kind, severity, ref_type, ref_id, code, args, first_seen, last_seen)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                        rusqlite::params![
+                            c.dedupe_key, c.kind, c.severity, c.ref_type, c.ref_id, c.code, args, now
+                        ],
+                    )?;
+                    opened += 1;
+                }
             }
         }
-    }
 
-    // 条件不再成立 → 标记解决。用 NOT IN 而不是逐行判断，候选集本来就是内存里的十来个键。
-    let open_keys: Vec<String> = conn
-        .prepare("SELECT dedupe_key FROM alerts WHERE resolved_at IS NULL")?
-        .query_map([], |r| r.get(0))?
-        .filter_map(|x| x.ok())
-        .collect();
-    for key in open_keys {
-        if !candidates.iter().any(|c| c.dedupe_key == key) {
-            conn.execute(
-                "UPDATE alerts SET resolved_at = ?2 WHERE dedupe_key = ?1",
-                rusqlite::params![key, now],
-            )?;
-            resolved += 1;
+        // 条件不再成立 → 标记解决。用 NOT IN 而不是逐行判断，候选集本来就是内存里的十来个键。
+        // 读开放行必须留在事务内：判定依据要和写入处在同一份快照上。
+        let still_open: std::collections::HashSet<&str> =
+            candidates.iter().map(|c| c.dedupe_key.as_str()).collect();
+        let open_keys: Vec<String> = tx
+            .prepare("SELECT dedupe_key FROM alerts WHERE resolved_at IS NULL")?
+            .query_map([], |r| r.get(0))?
+            .filter_map(|x| x.ok())
+            .collect();
+        for key in open_keys {
+            if !still_open.contains(key.as_str()) {
+                tx.execute(
+                    "UPDATE alerts SET resolved_at = ?2 WHERE dedupe_key = ?1",
+                    rusqlite::params![key, now],
+                )?;
+                resolved += 1;
+            }
         }
-    }
 
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(RESOLVED_RETENTION_DAYS);
-    conn.execute(
-        "DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at <= ?1",
-        rusqlite::params![cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)],
-    )?;
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(RESOLVED_RETENTION_DAYS);
+        tx.execute(
+            "DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at <= ?1",
+            rusqlite::params![cutoff.to_rfc3339_opts(chrono::SecondsFormat::Secs, false)],
+        )?;
+
+        tx.commit()?;
+    }
 
     let unread: i64 = conn.query_row(
         "SELECT COUNT(*) FROM alerts WHERE read_at IS NULL AND resolved_at IS NULL",
@@ -540,6 +561,55 @@ pub fn mark_all_read(pool: &DbPool) -> AppResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 事务必须在**读之前**就拿到写锁（IMMEDIATE），不能靠 DEFERRED 的锁升级。
+    ///
+    /// 场景是真实的：`/api/alerts` 每 30 s 被大屏打一次，同一时刻 StatsWriter 正在批量落库。
+    /// DEFERRED 先读后写，升级写锁时 SQLite **不调用 busy handler**——实测 16µs 就返回
+    /// SQLITE_BUSY_SNAPSHOT（`busy_timeout=5000` 完全没用）；IMMEDIATE 同一场景会等锁然后成功。
+    /// 钉的是「等得到」而不是「跑得快」：立刻返回失败恰恰是 DEFERRED 的假象。
+    ///
+    /// 不用 sleep 猜"对方应该拿到锁了吧"：持锁线程写完第一笔后才发信号，主线程收到信号才开始
+    /// sweep；释放由一个定时线程做，所以 sweep 要么立刻失败（DEFERRED），要么必然等到 ≥250ms。
+    #[test]
+    fn sweep_waits_for_the_write_lock_instead_of_failing() {
+        let (pool, path) = temp_db("lock");
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let pool = pool.clone();
+            std::thread::spawn(move || {
+                let conn = pool.get().unwrap();
+                conn.execute_batch("BEGIN").unwrap();
+                conn.execute(
+                    "INSERT INTO alerts (dedupe_key, kind, severity, code, args, first_seen, last_seen)
+                     VALUES ('held','test','info','c','[]','2026-01-01T00:00:00','2026-01-01T00:00:00')",
+                    [],
+                )
+                .unwrap();
+                locked_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+                conn.execute_batch("COMMIT").unwrap();
+            })
+        };
+        locked_rx.recv().expect("持锁线程应先拿到写锁");
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let _ = release_tx.send(());
+        });
+
+        let started = std::time::Instant::now();
+        let swept = sweep(&pool, &[candidate("a", "alertPlatformStreak", vec!["A".into()], "error")]);
+        let took = started.elapsed();
+        holder.join().unwrap();
+
+        assert!(swept.is_ok(), "写锁被临时占用时 sweep 必须等，不能失败：{:?}", swept.err());
+        assert_eq!(swept.unwrap().opened, 1);
+        assert!(took > std::time::Duration::from_millis(100), "没等过锁：{took:?}");
+
+        drop(pool);
+        cleanup(&path);
+    }
 
     fn candidate(key: &str, code: &'static str, args: Vec<String>, severity: &'static str) -> AlertCandidate {
         AlertCandidate {
@@ -613,6 +683,42 @@ mod tests {
 
         // 未知 key：mark_read 返回 false（接口据此 404），而不是静默成功
         assert!(!mark_read(&pool, "nope").unwrap());
+
+        drop(pool);
+        cleanup(&path);
+    }
+
+    /// 中途失败必须什么都没写。用触发器在**第二条**写入上人为报错：
+    /// 有事务时第一条 INSERT 跟着回滚；谁日后把事务拆回逐语句 autocommit，
+    /// 第一条就会留在库里，这个断言立刻红。
+    #[test]
+    fn sweep_is_atomic_when_a_write_fails() {
+        let (pool, path) = temp_db("atomic");
+        {
+            let conn = pool.get().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER abort_second_insert BEFORE INSERT ON alerts
+                     WHEN (SELECT COUNT(*) FROM alerts) >= 1
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        }
+
+        let err = sweep(
+            &pool,
+            &[
+                candidate("a", "alertPlatformStreak", vec!["A".into()], "error"),
+                candidate("b", "alertPlatformStreak", vec!["B".into()], "error"),
+            ],
+        );
+        assert!(err.is_err(), "第二条写入报错必须让整轮失败");
+
+        let left: i64 = pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM alerts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "第一条 INSERT 必须一起回滚，不能留下半个告警状态");
 
         drop(pool);
         cleanup(&path);

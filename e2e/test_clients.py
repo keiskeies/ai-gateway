@@ -75,6 +75,22 @@ def _wait_diff_ready(card) -> str:
     return card.locator(".console-client-changes").inner_text()
 
 
+def _audit_settled(console, page) -> list[dict]:
+    """等「保存变更」从禁用回到启用、背景渐变跑完，再审计。
+
+    实测：apply 完成后按钮先禁用（bg #171b1b），解除禁用的一瞬间文字就跳成深墨
+    #04211f，但背景要渐变 150ms——axe 撞在中间帧上量到 #1c2e2e，报 1.19:1。
+    过渡结束后同一处 axe 零违规，所以这是审计时机的坑，不是配色缺陷。
+    """
+    page.wait_for_function(
+        "() => { const b = document.querySelector('.console-client-actions button');"
+        " return !!b && !b.disabled; }",
+        timeout=15000,
+    )
+    page.wait_for_timeout(500)
+    return console.audit(page)
+
+
 def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_factory):
     instance, home = clients_setup
     api = instance.api
@@ -234,15 +250,7 @@ def test_connect_and_disconnect_claude_code_from_page(clients_setup, browser_fac
     assert hand["maxTokens"] == 200000 and "permissions" not in hand
     page.screenshot(path=str(SHOTS / "clients-editor.png"), full_page=True)
 
-    # 撤销/保存后按钮会从禁用淡回启用，等过渡结束再审计，否则 axe 量到的是半透明中间态
-    # 差异算完后按钮会从禁用淡回启用；等它稳定再审计，否则 axe 量到的是过渡中间色
-    page.wait_for_function(
-        "() => { const b = document.querySelector('.console-client-actions button');"
-        " return !!b && !b.disabled; }",
-        timeout=15000,
-    )
-    page.wait_for_timeout(500)
-    violations = console.audit(page)
+    violations = _audit_settled(console, page)
     assert not violations, json.dumps(violations, ensure_ascii=False)[:1500]
     assert errors == [], errors
     page.close()
@@ -282,7 +290,7 @@ def test_codex_extras_render_from_the_server_field_table(clients_setup, browser_
     assert "[model_providers.ai-gateway]" in written
     page.screenshot(path=str(SHOTS / "clients-codex-extras.png"), full_page=True)
 
-    violations = console.audit(page)
+    violations = _audit_settled(console, page)
     assert not violations, json.dumps(violations, ensure_ascii=False)[:800]
     page.close()
 

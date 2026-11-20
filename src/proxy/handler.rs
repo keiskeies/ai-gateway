@@ -390,9 +390,12 @@ pub struct ProxyState {
     pub http_client: reqwest::Client,
     pub cache: RouteCache,
     pub stats_writer: StatsWriter,
-    /// 配额判定的短 TTL 用量缓存：设了配额的 Key 每请求都要一次全历史聚合，
-    /// 而统计本身是 500ms 批量落库的。用 2s 快照把「每请求一次扫描」降成
-    /// 「每 2s 一次扫描」，口径与界面仍然一致（统计本来就滞后）。
+    /// 配额判定的短 TTL 用量缓存。
+    /// 注意分子不是"全表扫"：`usage_for_key` 是 `WHERE api_key_id=?1 AND created_at>=?2`
+    /// （`db/api_key.rs:262`），走 `idx_stats_api_key_created`，成本是**这把 Key 自己的行数**
+    /// ——200k 行库里单 Key 40k 行实测 17 ms（窗口 `day` 2.8 ms）。
+    /// 但统计本身是 500ms 批量落库的，所以用 2s 快照把「每请求一次聚合」降成「每 2s 一次」，
+    /// 口径与界面仍然一致（统计本来就滞后）。
     pub quota_usage_cache: Arc<parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, crate::models::api_key::KeyUsage)>>>,
 }
 

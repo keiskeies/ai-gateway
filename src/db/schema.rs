@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 37;
+pub const CURRENT_SCHEMA_VERSION: i64 = 38;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -354,6 +354,19 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
             "ALTER TABLE api_keys ADD COLUMN key_enc TEXT")?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 37)", [])?;
         tracing::info!("Database migrated to V37 (api_keys.key_enc encrypted plaintext)");
+    }
+
+    if current_version < 38 {
+        // (api_key_id) 是 (api_key_id, created_at) 的前缀，(backend_id) 是 (backend_id, created_at) 的前缀。
+        // EXPLAIN QUERY PLAN 实测：优化器从来都选复合的那个，这两条单列索引只按行付写放大
+        // （30k 行批量提交实测慢 ~23%，见 docs/algorithm-optimization-plan.md §1.6）。
+        // 别"顺手加回来"：只按 created_at 筛的查询走 idx_stats_created，它不是任何索引的前缀。
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_stats_api_key;
+             DROP INDEX IF EXISTS idx_stats_backend;",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 38)", [])?;
+        tracing::info!("Database migrated to V38 (drop prefix-redundant request_stats indexes)");
     }
 
     Ok(())
@@ -1287,6 +1300,82 @@ mod tests {
                 [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
             assert_eq!(anchor, Some(366.0), "锚点取最近一次同步到的余额");
             assert_eq!(spent, 2.0, "只算快照之后的 3 - 1，快照前那笔不算");
+        }
+        cleanup_db(&path);
+    }
+
+    /// V38 删的是**前缀冗余**索引，不是"看起来没人用的索引"。
+    /// 所以断言分两半：冗余的两条必须消失，而真正被查询计划选中的那几条一条都不能少。
+    /// 同时把四条代表性查询的计划钉成字符串——计划变了就说明删错了东西。
+    #[test]
+    fn v38_drops_only_prefix_redundant_indexes() {
+        let (pool, path) = test_db("v38");
+        {
+            let conn = pool.get().expect("conn");
+            let names: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_index_list('request_stats')")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .filter_map(|x| x.ok())
+                .collect();
+
+            for gone in ["idx_stats_api_key", "idx_stats_backend"] {
+                assert!(
+                    !names.iter().any(|n| n == gone),
+                    "{gone} 是复合索引的前缀，V38 之后不该存在；实际索引：{names:?}"
+                );
+            }
+            for kept in [
+                "idx_stats_api_key_created",
+                "idx_stats_backend_created",
+                "idx_request_stats_api_key",
+                "idx_stats_created",
+                "idx_stats_proxy",
+                "idx_stats_route",
+            ] {
+                assert!(
+                    names.iter().any(|n| n == kept),
+                    "{kept} 仍被依赖（不是任何索引的前缀），不能被删；实际索引：{names:?}"
+                );
+            }
+
+            // 计划必须与删索引之前用同一批索引。只钉"选中了哪个索引"，不钉整条计划文本：
+            // 计划措辞随 SQLite 版本变，索引选择才是这次改动真正的不变量。
+            let plan = |sql: &str| -> String {
+                conn.query_row(
+                    &format!("EXPLAIN QUERY PLAN {sql}"),
+                    [],
+                    |r| r.get::<_, String>(3),
+                ).expect("plan")
+            };
+            for (sql, ok) in [
+                ("SELECT COUNT(*) FROM request_stats WHERE backend_id='b3'",
+                    ["idx_stats_backend_created"].as_slice()),
+                ("SELECT COUNT(*) FROM request_stats WHERE api_key_id='k3'",
+                    ["idx_stats_api_key_created", "idx_request_stats_api_key"].as_slice()),
+                ("SELECT COUNT(*) FROM request_stats WHERE backend_id='b3' AND created_at >= '2026-11-01T00:00:00+00:00'",
+                    ["idx_stats_backend_created"].as_slice()),
+            ] {
+                let got = plan(sql);
+                assert!(
+                    ok.iter().any(|name| got.contains(name)),
+                    "{sql}\n  计划 `{got}` 没有落在期望的复合索引 {ok:?} 上"
+                );
+            }
+            // 只按时间筛（热力图 / 分位数）：idx_stats_created 不是任何索引的前缀，删了会退化成全表扫
+            assert!(
+                plan("SELECT COUNT(*) FROM request_stats WHERE created_at >= '2026-11-01T00:00:00+00:00'")
+                    .contains("idx_stats_created"),
+                "只按时间筛必须仍走 idx_stats_created"
+            );
+
+            // 幂等：版本回卷后重放不能因为"索引已经没了"而报错
+            conn.execute("UPDATE _schema_version SET value = 37 WHERE id = 1", [])
+                .expect("rewind to 37");
+            run_migrations(&conn).expect("V38 runs alone");
+            assert_eq!(version(&conn), CURRENT_SCHEMA_VERSION);
+            run_migrations(&conn).expect("V38 is idempotent");
         }
         cleanup_db(&path);
     }

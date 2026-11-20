@@ -195,10 +195,11 @@ export function ModelTimeline({ stats, modelId, granularity, locale, colors, sum
 
   // 均值/成本在 0 请求桶里是 null：connectNulls=false 时孤立点既没有线段也没有点，
   // 图上看起来像"没有数据"。只在没有非空邻居时补一个点，既不跨缺口连线，也不给稠密序列添噪点。
+  // index 由 Recharts 在 dot 回调上给出（recharts/es6/cartesian/Line.js 的 dotProps.index），
+  // 且五张图都是 data={buckets}，points 与 buckets 逐下标对齐——不必拿 period 反查。
   const sparseDot = (key: keyof Bucket, color: string) => (props: any) => {
-    const { cx, cy, payload } = props
+    const { cx, cy, index, payload } = props
     if (!payload || payload[key] == null || cx == null || cy == null) return <g />
-    const index = buckets.findIndex((bucket) => bucket.period === payload.period)
     const prev = index > 0 ? buckets[index - 1][key] : null
     const next = index >= 0 && index < buckets.length - 1 ? buckets[index + 1][key] : null
     if (prev != null || next != null) return <g />

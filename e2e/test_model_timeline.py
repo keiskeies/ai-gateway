@@ -162,6 +162,41 @@ def _readout_chips(page) -> dict[str, str]:
     )
 
 
+def test_isolated_bucket_gets_a_dot(timeline_instance, browser_factory):
+    """0 请求桶夹在两个有数桶中间时不画点，孤立桶必须画点。
+
+    `connectNulls=false` 下，孤立的一个值既没有线段也没有点，屏上就是"没有数据"——
+    而它其实是真实的一笔请求。sparseDot 因此只在**没有非空邻居**时补一个点。
+    这条钉的是稀疏点这个分支本身：/wall 的像素基线里时间线面板默认不展开，
+    覆盖不到它，改坏 sparseDot（例如 dot 回调拿不到 index）以前不会有任何测试变红。
+    """
+    api = timeline_instance.api
+    console = browser_factory(api, init=INIT)
+    page = console.new_page()
+    _open_single(console, page, api)
+
+    dots = page.evaluate(
+        """() => [...document.querySelectorAll('.wall-timeline-lane')].map(lane => ({
+            title: lane.querySelector('.wall-timeline-lane-title')?.textContent.trim(),
+            // Recharts 对每个数据点都调一次 dot 渲染器；返回 <g/> 表示"这里不画"
+            drawn: lane.querySelectorAll('.recharts-line-dots circle').length,
+            skipped: lane.querySelectorAll('.recharts-line-dots g').length,
+        }))"""
+    )
+    by_title = {d["title"]: d for d in dots}
+    # 种子是小时对齐的（-3h 两笔、-2h 空、-1h 一笔、当前小时空），24h 窗口下每个非空桶
+    # 都被空桶隔开，所以"该画几个孤立点"是确定的：
+    #   失败率 0(-3h) / 100(-1h) → 2；延迟 -3h、-1h → 2，首字只有 -1h → 1，共 3；
+    #   输出速度 → 2；成本只有 -3h 那一笔定价 → 1。
+    # Token 构成是柱状（每桶都有值），一个补点都不该有。
+    assert by_title["流量与失败"]["drawn"] == 2, by_title
+    assert by_title["延迟与首字"]["drawn"] == 3, by_title
+    assert by_title["输出速度"]["drawn"] == 2, by_title
+    assert by_title["成本估算"]["drawn"] == 1, by_title
+    assert by_title["Token 构成"]["drawn"] == 0, f"稠密序列被加了噪点：{by_title}"
+    page.close()
+
+
 def test_single_model_view_buckets_gaps_and_model_switch(timeline_instance, browser_factory):
     api = timeline_instance.api
     console = browser_factory(api, init=INIT)

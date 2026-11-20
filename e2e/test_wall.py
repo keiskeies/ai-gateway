@@ -195,6 +195,58 @@ def test_wall_names_what_failed_and_recovers(api, mock_stack, browser_factory, s
     assert thrown == [], f"取数失败不该让页面抛错：{thrown}"
 
 
+def test_wall_batches_stats_and_names_the_batch_on_failure(api, mock_stack, browser_factory):
+    """大屏的用量统计必须一次批量取，取不到时点名「块」而不是逐个实体。
+
+    两条都是 2026-11 取数改造（docs/algorithm-optimization-plan.md §3.1）的钉子：
+    ① 网络日志里不许再出现 `/stats/proxy/{id}`、`/stats/platform/{id}`——
+       那是 N+1（每个实体 6-7 条 SQL），实体一多就是 P+Q 次往返；
+    ② 批量接口挂掉时读数是 `—` 且 failbar 点名「活跃代理」，
+       因为 `null`（没取到）与 `[]`（真的没流量）在大屏上不能长成一个样。
+    """
+    one_request(api, mock_stack)
+    console = browser_factory(api, init=INIT)
+    page = console.new_page()
+    thrown: list[str] = []
+    page.on("pageerror", lambda error: thrown.append(str(error)))
+
+    # 只数 XHR/fetch，忽略静态资源；hash 跳转会重新加载文档，所以监听器跨刷新有效
+    paths: list[str] = []
+    page.on(
+        "request",
+        lambda r: r.resource_type in ("xhr", "fetch") and paths.append(urlparse(r.url).path),
+    )
+    console.goto(page, "/wall", ".wall-root")
+    page.wait_for_selector(".wall-mx-model", timeout=15000)
+    single = [p for p in paths if p.startswith("/api/stats/proxy/") or p.startswith("/api/stats/platform/")]
+    assert single == [], f"大屏又逐个实体查统计了：{single}"
+    assert "/api/stats/proxies" in paths and "/api/stats/platforms" in paths, paths
+
+    page.route("**/api/stats/proxies*", lambda route: route.abort())
+    page.route("**/api/stats/platforms*", lambda route: route.abort())
+    console.goto(page, "/wall", ".wall-root")
+    page.wait_for_selector(".wall-failbar", timeout=15000)
+    bar = page.inner_text(".wall-failbar")
+    assert "活跃代理" in bar, f"批量统计失败没点名活跃代理：{bar!r}"
+
+    cards = page.evaluate(
+        """() => [...document.querySelectorAll('.wall-readouts .console-readout')].map(k => ({
+            label: k.querySelector('.console-readout-label')?.textContent.trim(),
+            value: k.querySelector('.console-readout-value')?.textContent.trim(),
+        }))"""
+    )
+    proxy_card = [c for c in cards if c["label"] == "活跃代理"]
+    assert proxy_card, f"找不到活跃代理读数：{cards}"
+    assert proxy_card[0]["value"] == "—", f"取不到却显示了具体数字：{proxy_card[0]}"
+
+    page.unroute("**/api/stats/proxies*")
+    page.unroute("**/api/stats/platforms*")
+    console.click(page, ".wall-failbar button")
+    page.wait_for_selector(".wall-failbar", state="detached", timeout=15000)
+    page.close()
+    assert thrown == [], f"取数失败不该让页面抛错：{thrown}"
+
+
 def test_logs_table_expands_without_inner_scroll(console, page, api, mock_stack):
     """请求明细不设内层滚动：整表撑开，滚动交给页面。"""
     one_request(api, mock_stack)

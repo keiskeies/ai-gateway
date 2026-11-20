@@ -2980,4 +2980,119 @@ mod tests {
 
         cleanup_db(&path);
     }
+
+    /// 大屏改用批量取数（2026-11）后的口径钉子：**批量与逐个必须逐字段相等**。
+    /// 两边是两条独立 SQL——批量从实体表 LEFT JOIN 事实表，逐个从事实表反查实体——
+    /// 任何口径漂移都会直接变成屏上数字变了，而且只会在使用者眼皮底下变。
+    /// 覆盖：同平台多后端、有/无定价、token 缺失、失败请求、零流量实体、
+    /// 悬挂 `backend_id`、以及 `proxy_id` 指向已删网关的悬挂行。
+    #[test]
+    fn bulk_stats_match_the_per_entity_queries_field_by_field() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id,name,type,base_url,api_key,created_at,updated_at)
+                 VALUES ('pl-a','平台A','openai','http://a','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                        ('pl-b','平台B','openai','http://b','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'),
+                        ('pl-idle','平台C','openai','http://c','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platforms");
+            conn.execute(
+                "INSERT INTO proxies (id,name,created_at) VALUES ('px-a','网关A','2026-01-01T00:00:00Z'),
+                                                 ('px-b','网关B','2026-01-01T00:00:00Z'),
+                                                 ('px-idle','网关C','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("proxies");
+            conn.execute("INSERT INTO routes (id,proxy_id) VALUES ('rt-a','px-a'),('rt-b','px-b')", []).expect("routes");
+            conn.execute(
+                "INSERT INTO backends (id,route_id,platform_id,model_id,weight,priority)
+                 VALUES ('b-a1','rt-a','pl-a','m',1,0),('b-a2','rt-a','pl-a','m',1,0),('b-b1','rt-b','pl-b','m',1,0)",
+                [],
+            ).expect("backends");
+        }
+
+        // (proxy, backend, status, latency, 输入, 输出, 成本)
+        let rows: Vec<(&str, &str, i32, i64, Option<i64>, Option<i64>, Option<f64>)> = vec![
+            ("px-a", "b-a1", 200, 100, Some(1000), Some(500), Some(0.02)),
+            ("px-a", "b-a1", 200, 300, Some(200), Some(100), None),
+            ("px-a", "b-a2", 500, 900, None, None, None),
+            ("px-b", "b-b1", 200, 50, Some(4000), Some(2000), Some(0.5)),
+            ("px-b", "b-b1", 429, 10, Some(10), Some(0), None),
+            // 悬挂 proxy_id：后端还在，网关已删 → 算平台的，不算任何网关
+            ("px-ghost", "b-a1", 200, 120, Some(7), Some(7), Some(0.01)),
+            // 悬挂 backend_id：网关还在，后端已删 → 算网关的，归 unknown 平台
+            ("px-a", "b-ghost", 200, 80, Some(9), Some(9), Some(0.03)),
+        ];
+        for (index, (proxy_id, backend_id, status, latency, tin, tout, cost)) in rows.into_iter().enumerate() {
+            let mut row = stat("k1", cost);
+            row.proxy_id = proxy_id.into();
+            row.route_id = if proxy_id == "px-b" { "rt-b".into() } else { "rt-a".into() };
+            row.backend_id = backend_id.into();
+            row.status_code = status;
+            row.latency_ms = latency;
+            row.token_input = tin;
+            row.token_output = tout;
+            row.created_at = format!("2026-01-01T{:02}:00:00Z", 10 + index);
+            record(&pool, &row).expect("stat row");
+        }
+
+        let from = "2026-01-01T00:00:00Z";
+        let to = "2026-02-01T00:00:00Z";
+
+        let bulk_proxy = proxy_stats_all(&pool, Some(from), Some(to)).expect("bulk proxy");
+        assert_eq!(bulk_proxy.len(), 3, "零流量的网关也要有自己的行，否则界面上是「没统计」而不是 0");
+        for bulk in &bulk_proxy {
+            let single = proxy_stats(&pool, &bulk.proxy_id, Some(from), Some(to)).expect("single proxy");
+            assert_eq!(bulk.proxy_name, single.proxy_name, "网关名");
+            assert_eq!(bulk.total_requests, single.total_requests, "{} 请求数", bulk.proxy_id);
+            assert_eq!(bulk.requests_today, single.requests_today, "{} 今日", bulk.proxy_id);
+            assert_eq!(bulk.total_token_input, single.total_token_input, "{} 输入", bulk.proxy_id);
+            assert_eq!(bulk.total_token_output, single.total_token_output, "{} 输出", bulk.proxy_id);
+            assert_eq!(bulk.priced_requests, single.priced_requests, "{} 已定价", bulk.proxy_id);
+            assert_eq!(bulk.total_cost, single.total_cost, "{} 成本", bulk.proxy_id);
+            assert!(
+                (bulk.success_rate - single.success_rate).abs() < 1e-9,
+                "{} 成功率 {:?} ≠ {:?}", bulk.proxy_id, bulk.success_rate, single.success_rate
+            );
+            assert!(
+                (bulk.avg_latency_ms - single.avg_latency_ms).abs() < 1e-9,
+                "{} 延迟 {:?} ≠ {:?}", bulk.proxy_id, bulk.avg_latency_ms, single.avg_latency_ms
+            );
+        }
+
+        let bulk_platform = platform_stats_all(&pool, Some(from), Some(to)).expect("bulk platform");
+        assert_eq!(bulk_platform.len(), 3, "零流量/没有后端的平台也要有自己的行");
+        for bulk in &bulk_platform {
+            let single = platform_stats(&pool, &bulk.platform_id, Some(from), Some(to)).expect("single platform");
+            assert_eq!(bulk.platform_name, single.platform_name, "平台名");
+            assert_eq!(bulk.total_requests, single.total_requests, "{} 请求数", bulk.platform_id);
+            assert_eq!(bulk.total_token_input, single.total_token_input, "{} 输入", bulk.platform_id);
+            assert_eq!(bulk.total_token_output, single.total_token_output, "{} 输出", bulk.platform_id);
+            assert_eq!(bulk.priced_requests, single.priced_requests, "{} 已定价", bulk.platform_id);
+            assert_eq!(bulk.total_cost, single.total_cost, "{} 成本", bulk.platform_id);
+            assert!(
+                (bulk.success_rate - single.success_rate).abs() < 1e-9,
+                "{} 成功率 {:?} ≠ {:?}", bulk.platform_id, bulk.success_rate, single.success_rate
+            );
+            assert!(
+                (bulk.avg_latency_ms - single.avg_latency_ms).abs() < 1e-9,
+                "{} 延迟 {:?} ≠ {:?}", bulk.platform_id, bulk.avg_latency_ms, single.avg_latency_ms
+            );
+        }
+
+        // 钉住这份数据自己的形状：否则上面的「相等」可能是两个 0 比出来的假绿
+        let px_a = bulk_proxy.iter().find(|p| p.proxy_id == "px-a").expect("px-a");
+        assert_eq!(px_a.total_requests, 4, "b-a1×2 + b-a2×1 + 悬挂后端×1");
+        assert_eq!(px_a.total_cost, Some(0.05), "两条已定价：0.02 + 0.03");
+        assert_eq!(px_a.priced_requests, 2);
+        let pl_a = bulk_platform.iter().find(|p| p.platform_id == "pl-a").expect("pl-a");
+        assert_eq!(pl_a.total_requests, 4, "b-a1×3（含 px-ghost 那笔）+ b-a2×1");
+        assert_eq!(pl_a.priced_requests, 2);
+        assert_eq!(pl_a.total_cost, Some(0.03), "0.02 + 0.01；b-ghost 那笔 0.03 归 unknown 平台，不进 pl-a");
+        let pl_idle = bulk_platform.iter().find(|p| p.platform_id == "pl-idle").expect("pl-idle");
+        assert_eq!((pl_idle.total_requests, pl_idle.total_cost, pl_idle.success_rate), (0, None, 0.0));
+
+        cleanup_db(&path);
+    }
 }

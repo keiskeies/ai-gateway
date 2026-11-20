@@ -47,11 +47,11 @@ import {
   IconAlertTriangle,
   IconX,
 } from '@tabler/icons-react'
-import { getOverview, listProxies, listPlatforms, getProxyStats, getPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs, listAlerts, type AlertItem } from '../api'
+import { getOverview, listProxies, listPlatforms, getAllProxyStats, getAllPlatformStats, getModelTimeSeries, getErrorStats, getHeatmap, getLatencyPercentiles, getModelSummaries, getRequestLogs, listAlerts, type AlertItem } from '../api'
 import { ModelTimeline } from '../components/ModelTimeline'
 import { ChartAltTable, peakOf } from '../components/ui/ChartAlt'
 import { Readout } from '../components/ui/Readout'
-import type { ModelSummaryRow, ModelTimeSeriesPoint, ModelTimeSeriesStats } from '../types/stats'
+import type { ModelSummaryRow, ModelTimeSeriesPoint, ModelTimeSeriesStats, PlatformRow, PlatformStats, ProxyRow, ProxyStats } from '../types/stats'
 import { useAppContext } from '../ThemeContext'
 import { t, type Locale, type TranslationKey } from '../i18n'
 import { getPresetName, platformPresets } from '../presets'
@@ -115,8 +115,6 @@ interface ProxyWithStats {
 interface PlatformWithStats {
   id: string
   name: string
-  platform_type: string
-  base_url: string
   stats?: {
     total_requests: number
     success_rate: number
@@ -587,7 +585,7 @@ export default function Dashboard() {
       if (!missing.includes(block)) missing.push(block)
     }
     try {
-      const [overview, proxyList, platformList, errs, pct, summaries, alertList] = await Promise.all([
+      const [overview, proxyList, platformList, errs, pct, summaries, alertList, proxyStatsRows, platformStatsRows] = await Promise.all([
         getOverview(range).catch(() => { note('wallBlockKpi'); return {} }),
         listProxies().catch(() => { note('healthBoard'); return [] }),
         listPlatforms().catch(() => { note('platformShare'); return [] }),
@@ -595,6 +593,9 @@ export default function Dashboard() {
         getLatencyPercentiles(range).catch(() => { note('wallBlockKpi'); return null }),
         getModelSummaries(range).catch(() => { note('modelMatrix'); return [] }),
         listAlerts().catch(() => { note('budgetAlertsBlock'); return null }),
+        // null = 这块没取到，[] = 取到了但确实没有：大屏上这两件事不能长成一个样子
+        getAllProxyStats(range).catch(() => { note('healthBoard'); return null }),
+        getAllPlatformStats(range).catch(() => { note('platformShare'); return null }),
       ])
       setStats(overview as OverviewStats)
       setErrorStats(errs as ErrorStats | null)
@@ -605,23 +606,19 @@ export default function Dashboard() {
       // 明细筛选下拉：从本次时段实际出现过的模型集合生成
       setModelOptions(Array.from(new Set(sum.map((s) => s.model_id))).sort())
 
-      const proxiesWithStats: ProxyWithStats[] = await Promise.all(
-        proxyList.map(async (p: any) => {
-          // 单个网关的统计取不到时也要点名：否则健康看板会把失败显示成 0 流量
-          const pStats = await getProxyStats(p.id, range).catch(() => { note('healthBoard'); return null })
-          return { ...p, stats: pStats || undefined }
-        })
-      )
-      setProxies(proxiesWithStats)
+      // 一次批量取全部虚拟模型/平台的时段用量，替代逐个查询
+      // （每个实体原本 6–7 条 SQL，且 platform 那条走不到索引，见 db/stats.rs）
+      const statsByProxy = new Map<string, ProxyStats>()
+      for (const row of proxyStatsRows ?? []) {
+        if (row.proxy_id) statsByProxy.set(row.proxy_id, row)
+      }
+      setProxies((proxyList as ProxyRow[]).map((p) => ({ ...p, stats: statsByProxy.get(p.id) })))
 
-      const platformsWithStats: PlatformWithStats[] = await Promise.all(
-        platformList.map(async (p: any) => {
-          // 同理：漏一个平台的统计会让请求/成本占比静默少一块
-          const pStats = await getPlatformStats(p.id, range).catch(() => { note('platformShare'); return null })
-          return { ...p, stats: pStats || undefined }
-        })
-      )
-      setPlatforms(platformsWithStats)
+      const statsByPlatform = new Map<string, PlatformStats>()
+      for (const row of platformStatsRows ?? []) {
+        if (row.platform_id) statsByPlatform.set(row.platform_id, row)
+      }
+      setPlatforms((platformList as PlatformRow[]).map((p) => ({ ...p, stats: statsByPlatform.get(p.id) })))
     } catch {
       // 每个接口自己已经记下失败；走到这里只能是意外，不再吞掉状态
     } finally {
