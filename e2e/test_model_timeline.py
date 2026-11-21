@@ -120,10 +120,10 @@ def _select_timeline_model(page, model: str) -> None:
     """时间线模型 Select 与请求明细的模型筛选同时在 DOM 里，必须只点可见下拉选项。"""
     selector = ".wall-trend-panel .mantine-Select-input"
     page.wait_for_selector(selector, timeout=10000)
-    page.evaluate("(sel) => document.querySelector(sel).focus()", selector)
-    page.keyboard.press("Control+A")
+    # 必须 element.click()：合成 focus() 不开这个下拉（和 test_clients.py 里那发一样），
+    # 于是键入落进关着的框里，选项全在 DOM 但宽高为 0，下面只能超时。
+    page.evaluate("(sel) => document.querySelector(sel).click()", selector)
     page.keyboard.type(model, delay=25)
-    page.keyboard.press("ArrowDown")
     page.wait_for_function(
         """(model) => [...document.querySelectorAll('[role=option]')].some(el => {
             const r = el.getBoundingClientRect();
