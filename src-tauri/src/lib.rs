@@ -455,7 +455,6 @@ fn build_tray_menu_items(
 fn start_backend_server(app_handle: tauri::AppHandle) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.block_on(async {
-        use actix_cors::Cors;
         use actix_web::{web, App, HttpServer, HttpResponse, middleware};
         use actix_files as actix_files;
 
@@ -551,13 +550,15 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
         tracing::info!("Will serve frontend + API on port {}", admin_port);
 
         let server = HttpServer::new(move || {
-            let cors = Cors::permissive();
-
             App::new()
-                .wrap(cors)
+                // 与独立服务模式同源：只放行回环/Tauri origin（桌面端 webview 导航到
+                // http://127.0.0.1:{port}，属同源请求，这里只兜端口发现的跨源探测）
+                .wrap(ai_gateway::cors::console_cors())
                 .wrap(middleware::Logger::default())
                 // 静态资源缓存策略：index.html 必须回源校验，/assets/* 强缓存
                 .wrap(middleware::from_fn(ai_gateway::web_cache::cache_headers))
+                // 安全响应头：/v1 原样放过，只给控制台与 /api 加
+                .wrap(middleware::from_fn(ai_gateway::security_headers::security_headers))
                 .app_data(web::Data::new(db_pool.clone()))
                 .app_data(web::Data::new(proxy_state.clone()))
                 .app_data(web::Data::new(shared_config.clone()))

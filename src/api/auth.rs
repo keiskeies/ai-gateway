@@ -27,12 +27,40 @@ use crate::models::auth::{
 
 pub const SESSION_COOKIE: &str = "aigw_session";
 const SESSION_TTL_DAYS: i64 = 7;
+/// 「同一来源 + 同一用户名」连续失败多少次上锁，以及锁多久。
 const MAX_LOGIN_FAILURES: u32 = 5;
 const LOGIN_LOCK_SECS: u64 = 300;
+/// 全站令牌桶的容量与每秒回填量。
+///
+/// 这一层的用途不是挡爆破（局域网内爆破者本来就在你信任边界里），而是**挡 CPU**：
+/// 一次登录尝试 = 一次 19 MiB 内存的 Argon2id，绑 `0.0.0.0` 时任何同网段设备
+/// 都能拿它当免费矿机。20 突发 + 每秒 2 次对真人毫无影响（每人每 7 天才登一次），
+/// 但把"一键打满 CPU"变成"最多占用 10 秒"。
+const GLOBAL_BURST: f64 = 20.0;
+const GLOBAL_REFILL_PER_SEC: f64 = 2.0;
 
-/// 登录失败节流：按来源 IP 统计，5 次失败锁定 5 分钟
+/// 登录失败节流，两层。
+///
+/// **刻意没有"纯按 IP 上锁"这一层。** 网关默认绑 `0.0.0.0` 给局域网用，README 还教人
+/// 挂反向代理——那时所有用户的 `peer_addr` 都是 127.0.0.1。纯 IP 锁意味着任何一台
+/// 设备连错 5 次密码，就能把全家/全组人锁在控制台外面。所以：
+///
+/// 1. **来源 IP + 用户名**：5 次失败锁 5 分钟。用户名转小写入键，
+///    免得用 `Admin` / `ADMIN` 轮换大小写重置自己的计数。锁只落在"这个来源试这个账号"
+///    上，别人不受影响。
+/// 2. **全站令牌桶**：见上面常量注释。
+///
+/// 状态只在内存里，重启即清零——没有落库，每次失败写一行 SQLite 不值。
 pub struct LoginLimiter {
-    attempts: Mutex<HashMap<String, LoginAttempt>>,
+    attempts: Mutex<LoginAttempts>,
+}
+
+struct LoginAttempts {
+    /// 「ip|小写用户名」→ 失败计数
+    entries: HashMap<String, LoginAttempt>,
+    /// 全站令牌桶
+    tokens: f64,
+    last_refill: Instant,
 }
 
 struct LoginAttempt {
@@ -44,36 +72,66 @@ struct LoginAttempt {
 impl LoginLimiter {
     pub fn new() -> Self {
         Self {
-            attempts: Mutex::new(HashMap::new()),
+            attempts: Mutex::new(LoginAttempts {
+                entries: HashMap::new(),
+                tokens: GLOBAL_BURST,
+                last_refill: Instant::now(),
+            }),
         }
     }
 
-    fn check(&self, key: &str) -> Result<(), u64> {
-        let mut attempts = self.attempts.lock();
-        if let Some(attempt) = attempts.get_mut(key) {
+    /// 进入登录处理前调用；返回 `Err(秒数)` 表示还要等多久才允许再试。
+    ///
+    /// 令牌桶在这里就扣，所以被用户名锁挡下的请求**也**消耗配额——
+    /// 有意的：正在被锁的来源不该再免费重试别的用户名。
+    fn check(&self, ip: &str, username: &str) -> Result<(), u64> {
+        let now = Instant::now();
+        let mut state = self.attempts.lock();
+        refill(&mut state, now);
+
+        let mut wait = 0u64;
+        if let Some(attempt) = state.entries.get(&pair_key(ip, username)) {
             if let Some(until) = attempt.locked_until {
-                let now = Instant::now();
                 if until > now {
-                    return Err(until.duration_since(now).as_secs().max(1));
+                    wait = until.duration_since(now).as_secs().max(1);
                 }
-                attempt.locked_until = None;
-                attempt.failures = 0;
             }
         }
+        if wait == 0 && state.tokens < 1.0 {
+            let secs = ((1.0 - state.tokens) / GLOBAL_REFILL_PER_SEC).ceil() as u64;
+            wait = secs.max(1);
+        }
+        if wait > 0 {
+            return Err(wait);
+        }
+
+        state.tokens -= 1.0;
         Ok(())
     }
 
-    fn record_failure(&self, key: &str) {
+    fn record_failure(&self, ip: &str, username: &str) {
         let now = Instant::now();
-        let mut attempts = self.attempts.lock();
-        if attempts.len() > 1024 {
-            attempts.retain(|_, a| now.duration_since(a.last_failure).as_secs() < 3600);
+        let mut state = self.attempts.lock();
+        refill(&mut state, now);
+        // 防着有人拿海量用户名把这张表撑爆：清掉一小时没动静的键
+        if state.entries.len() > 1024 {
+            state
+                .entries
+                .retain(|_, a| now.duration_since(a.last_failure).as_secs() < 3600);
         }
-        let attempt = attempts.entry(key.to_string()).or_insert_with(|| LoginAttempt {
-            failures: 0,
-            locked_until: None,
-            last_failure: now,
-        });
+        let attempt = state
+            .entries
+            .entry(pair_key(ip, username))
+            .or_insert_with(|| LoginAttempt {
+                failures: 0,
+                locked_until: None,
+                last_failure: now,
+            });
+        // 锁已到期：重新起算，而不是把旧计数接着往上加
+        if attempt.locked_until.map(|until| until <= now).unwrap_or(false) {
+            attempt.locked_until = None;
+            attempt.failures = 0;
+        }
         attempt.failures += 1;
         attempt.last_failure = now;
         if attempt.failures >= MAX_LOGIN_FAILURES {
@@ -81,8 +139,21 @@ impl LoginLimiter {
         }
     }
 
-    fn reset(&self, key: &str) {
-        self.attempts.lock().remove(key);
+    /// 登录成功后清掉这个来源在这个用户名上的计数。
+    fn reset(&self, ip: &str, username: &str) {
+        self.attempts.lock().entries.remove(&pair_key(ip, username));
+    }
+}
+
+fn pair_key(ip: &str, username: &str) -> String {
+    format!("{}|{}", ip, username.trim().to_ascii_lowercase())
+}
+
+fn refill(state: &mut LoginAttempts, now: Instant) {
+    let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+    if elapsed > 0.0 {
+        state.tokens = (state.tokens + elapsed * GLOBAL_REFILL_PER_SEC).min(GLOBAL_BURST);
+        state.last_refill = now;
     }
 }
 
@@ -92,7 +163,7 @@ impl Default for LoginLimiter {
     }
 }
 
-fn client_key(req: &HttpRequest) -> String {
+fn client_ip(req: &HttpRequest) -> String {
     req.peer_addr()
         .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|| "unknown".to_string())
@@ -309,12 +380,12 @@ pub async fn setup(
     db: web::Data<DbPool>,
     body: web::Json<SetupRequest>,
 ) -> AppResult<HttpResponse> {
-    // 首次初始化只允许本机操作，避免服务暴露到局域网时被他人抢先注册管理员
-    let from_loopback = req
-        .peer_addr()
-        .map(|addr| addr.ip().is_loopback())
-        .unwrap_or(false);
-    if !from_loopback {
+    // 首次初始化只允许本机操作，避免服务暴露到局域网时被他人抢先注册管理员。
+    //
+    // 用 is_local_console 而不是裸 peer_addr：只看 peer 的话，挂反向代理（或有人拿
+    // `ssh -R`/socat 把端口转回来）时 peer 恒为 127.0.0.1，这条守卫就形同虚设。
+    // 反代场景要初始化请直接在网关那台机器上做，或按 local.rs 的注释让代理写转发头。
+    if !crate::api::local::is_local_console(&req) {
         return Err(AppError::Unauthorized(
             "Initial setup is only allowed from localhost".to_string(),
         ));
@@ -357,18 +428,21 @@ pub async fn login(
     limiter: web::Data<LoginLimiter>,
     body: web::Json<LoginRequest>,
 ) -> AppResult<HttpResponse> {
-    let key = client_key(&req);
-    if let Err(retry_after) = limiter.check(&key) {
+    let ip = client_ip(&req);
+    // 用户名先 trim 再进键：与下面 find_user_by_username 用的是同一个 trim 后的值，
+    // 否则「admin 」「admin\t」在库里是同一个账号、在限流器里却是四个计数。
+    let tried_username = body.username.trim().to_string();
+    if let Err(retry_after) = limiter.check(&ip, &tried_username) {
         return Err(AppError::TooManyRequests(format!(
             "Too many failed login attempts, try again in {} seconds",
             retry_after
         )));
     }
 
-    let username = body.username.trim().to_string();
+    let username = tried_username;
     let password = body.password.clone();
     if username.is_empty() || password.is_empty() {
-        limiter.record_failure(&key);
+        limiter.record_failure(&ip, &username);
         return Err(AppError::Unauthorized(
             "Invalid username or password".to_string(),
         ));
@@ -376,6 +450,8 @@ pub async fn login(
 
     let pool = db.get_ref().clone();
     let lookup_pool = pool.clone();
+    // username 会被下面的闭包 move 走，限流器要用的那份先留下
+    let limiter_user = username.clone();
     let (user, valid) = web::block(move || -> AppResult<(Option<crate::models::auth::User>, bool)> {
         let user = crate::db::auth::find_user_by_username(&lookup_pool, &username)?;
         let valid = match &user {
@@ -391,13 +467,13 @@ pub async fn login(
     .map_err(|e| AppError::Internal(e.to_string()))??;
 
     let Some(user) = user.filter(|_| valid) else {
-        limiter.record_failure(&key);
+        limiter.record_failure(&ip, &limiter_user);
         return Err(AppError::Unauthorized(
             "Invalid username or password".to_string(),
         ));
     };
 
-    limiter.reset(&key);
+    limiter.reset(&ip, &limiter_user);
     let token = create_session(&pool, &user.id).await?;
     Ok(no_store(
         HttpResponse::Ok()
@@ -525,6 +601,127 @@ mod tests {
         assert!(validate_password("12345678").is_ok());
     }
 
+    /// 键必须大小写无关：库里 `admin` 只有一个账号，若键按原样大小写分桶，
+    /// 爆破者轮换 `Admin` / `ADMIN` 就永远撞不到 5 次阈值。
+    #[test]
+    fn limiter_lock_key_is_case_insensitive_and_trimmed() {
+        assert_eq!(pair_key("::1", "Admin"), pair_key("::1", "  ADMIN "));
+        assert_ne!(pair_key("::1", "admin"), pair_key("::1", "root"));
+    }
+
+    /// 锁只落在「这个来源试这个账号」上。局域网是这项目的一等使用场景：
+    /// 手机输错 5 次密码，不能把电脑上正想登录的人也挡在外面。
+    #[test]
+    fn lock_is_scoped_to_ip_and_username() {
+        let limiter = LoginLimiter::new();
+        let phone = "192.168.1.23";
+        let laptop = "192.168.1.24";
+
+        for _ in 0..MAX_LOGIN_FAILURES {
+            limiter.record_failure(phone, "admin");
+        }
+        assert!(limiter.check(phone, "admin").is_err(), "同来源同账号应已上锁");
+        // 同来源换账号：没锁（全站令牌桶另有约束，20 突发下不该被扣到）
+        assert!(limiter.check(phone, "other").is_ok());
+        // 同账号换来源：没锁
+        assert!(limiter.check(laptop, "admin").is_ok());
+        // 大小写不同也算同一个账号
+        assert!(limiter.check(phone, "ADMIN").is_err());
+
+        limiter.reset(phone, "admin");
+        assert!(limiter.check(phone, "admin").is_ok());
+    }
+
+    /// 全站令牌桶：挡的是"一键打满 CPU"（每次登录 = 19 MiB 的 Argon2id），
+    /// 不是挡爆破。所以容量必须大到正常家用/办公绝不触发——20 次突发就是为此。
+    #[test]
+    fn global_bucket_absorbs_real_usage_then_throttles() {
+        let limiter = LoginLimiter::new();
+        // 突发容量内绝不拦截，即使全来自同一个来源
+        for i in 0..GLOBAL_BURST as u32 {
+            assert!(
+                limiter.check("10.0.0.9", &format!("user{i}")).is_ok(),
+                "第 {i} 次不应被令牌桶挡住"
+            );
+        }
+        // 容量见底后，下一次才拒绝，且提示的等待秒数与回填速度一致（2 次/秒 → 1 秒）
+        let wait = limiter.check("10.0.0.9", "overflow").unwrap_err();
+        assert_eq!(wait, 1, "应提示 1 秒左右回填一次");
+    }
+
+    /// 锁到期后计数重新起算，而不是接着往上加（否则第 6 次失败就永久锁死）。
+    #[test]
+    fn expired_lock_resets_the_counter() {
+        let limiter = LoginLimiter::new();
+        for _ in 0..MAX_LOGIN_FAILURES {
+            limiter.record_failure("10.0.0.7", "admin");
+        }
+        assert!(limiter.check("10.0.0.7", "admin").is_err());
+        // 手动把锁推到过去，模拟 5 分钟已过
+        {
+            let mut state = limiter.attempts.lock();
+            let attempt = state
+                .entries
+                .get_mut(&pair_key("10.0.0.7", "admin"))
+                .expect("锁记录应存在");
+            attempt.locked_until = Some(Instant::now() - StdDuration::from_secs(1));
+        }
+        assert!(limiter.check("10.0.0.7", "admin").is_ok(), "锁到期后应放行");
+        // 到期后再错一次，只算 1 次，不该立刻又锁上
+        limiter.record_failure("10.0.0.7", "admin");
+        assert!(limiter.check("10.0.0.7", "admin").is_ok());
+    }
+
+    /// 反向代理 / 端口转发场景：peer 是 127.0.0.1，但 Host 或转发头暴露了外部来源，
+    /// 初始化必须拒掉。只看 peer_addr 的老写法在这里会放行。
+    #[actix_web::test]
+    async fn setup_rejects_proxied_request_that_looks_loopback() {
+        let (pool, path) = test_db();
+        let app = aw_test::init_service(
+            App::new()
+                .app_data(web::Data::new(pool.clone()))
+                .app_data(web::Data::new(LoginLimiter::new()))
+                .app_data(web::Data::new(
+                    Arc::new(parking_lot::RwLock::new(crate::config::AppConfig::default()))
+                        as SharedAppConfig,
+                ))
+                .configure(crate::api::configure),
+        )
+        .await;
+
+        for (label, req) in [
+            (
+                "Host 是外部域名",
+                aw_test::TestRequest::post()
+                    .uri("/api/auth/setup")
+                    .peer_addr("127.0.0.1:54321".parse().unwrap())
+                    .insert_header(("Host", "gw.example.com"))
+                    .set_json(serde_json::json!({"username": "attacker", "password": "secret123"}))
+                    .to_request(),
+            ),
+            (
+                "带了 X-Forwarded-For",
+                aw_test::TestRequest::post()
+                    .uri("/api/auth/setup")
+                    .peer_addr("127.0.0.1:54321".parse().unwrap())
+                    .insert_header(("X-Forwarded-For", "203.0.113.9"))
+                    .set_json(serde_json::json!({"username": "attacker", "password": "secret123"}))
+                    .to_request(),
+            ),
+        ] {
+            let status = call_status!(&app, req);
+            assert_eq!(status, 401, "{label} 的请求不该能初始化管理员");
+        }
+
+        // 库里确实没被建出账号
+        let count = crate::db::auth::user_count(&pool).unwrap();
+        assert_eq!(count, 0);
+
+        drop(app);
+        drop(pool);
+        cleanup_db(&path);
+    }
+
     #[actix_web::test]
     async fn admin_api_requires_login_and_supports_setup() {
         let (pool, path) = test_db();
@@ -569,11 +766,13 @@ mod tests {
         assert_eq!(status, 401);
 
         // 首次初始化并自动登录（仅本机）
+        // 带 Host 头：is_local_console 会看 Host（真浏览器一定带），缺它等于"Host 不是回环"
         let resp = aw_test::call_service(
             &app,
             aw_test::TestRequest::post()
                 .uri("/api/auth/setup")
                 .peer_addr("127.0.0.1:54321".parse().unwrap())
+                .insert_header(("Host", "127.0.0.1:1994"))
                 .set_json(serde_json::json!({"username": "admin", "password": "secret123"}))
                 .to_request(),
         )
@@ -587,6 +786,7 @@ mod tests {
             aw_test::TestRequest::post()
                 .uri("/api/auth/setup")
                 .peer_addr("127.0.0.1:54321".parse().unwrap())
+                .insert_header(("Host", "127.0.0.1:1994"))
                 .set_json(serde_json::json!({"username": "other", "password": "secret123"}))
                 .to_request()
         );

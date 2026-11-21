@@ -297,7 +297,32 @@ O painel (tráfego e estatísticas, modelos virtuais, plataformas, chaves de API
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Público (`setup` é, na prática, restrito à máquina local) |
 | Todos os outros `/api/*` (plataformas / modelos / modelos virtuais / chaves de API / acesso de clientes / configurações / estatísticas / backups) | Sessão de administrador |
 
-> Sem nenhuma chave de API configurada, o gateway não valida o valor, mas as requisições ainda precisam levar um cabeçalho `Authorization` ou `x-api-key` (o valor não é validado); assim que uma chave existe, uma chave válida é exigida. As credenciais ficam no SQLite (hashes Argon2id); `admin_token` em `config.toml` é um campo histórico reservado.
+> Sem nenhuma chave de API configurada, o gateway não valida o valor, mas as requisições ainda precisam levar um cabeçalho `Authorization` ou `x-api-key` (o valor não é validado); assim que uma chave existe, uma chave válida é exigida. As credenciais ficam no SQLite (hashes Argon2id).
+
+### Uso na rede local
+
+O gateway escuta em `0.0.0.0:1994` por padrão, então celulares, TVs e máquinas de colegas na mesma rede abrem o painel diretamente — **esse é um uso suportado**. Antes de expô-lo além de uma rede confiável:
+
+- **O gateway não encerra TLS.** Use HTTPS entre máquinas:
+  ```bash
+  # Opção 1: Caddy emite e renova certificados (o mais simples)
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # Opção 2: nginx (preserve Host e escreva os cabeçalhos de encaminhamento — veja abaixo)
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # obrigatório para SSE
+      proxy_buffering off;                          # senão o streaming trava
+  }
+  ```
+- **Um proxy reverso precisa escrever `X-Forwarded-For` (ou `X-Real-IP`).** «Acesso de clientes» e «inicialização do administrador» são restritos ao console local, decididos por «peer de loopback **e** nenhum cabeçalho de encaminhamento **e** Host de loopback». Um proxy que mantém o Host como `127.0.0.1` sem escrever cabeçalho algum impede o gateway de distinguir usuário local de remoto.
+- **O acesso cross-origin a `/api/*` é desligado por padrão.** Todas as requisições do painel usam caminhos relativos à mesma origem, inclusive quando aberto pela LAN, então isso não afeta nenhum uso normal; o que se bloqueia é *outra página web* chamar `/api` com o seu cookie de sessão de 7 dias. Se você precisa mesmo de cross-origin, use `/v1` (autenticado por chave de API, não por sessão).
+- **Limitação de login**: 5 falhas seguidas de um usuário a partir de uma origem bloqueiam esse par por 5 minutos. A contagem é por «origem + usuário», então um dispositivo que digite errado não deixa ninguém de fora. Há também um balde de tokens global cujo único propósito é impedir que o endpoint de login seja usado para saturar a CPU.
+- A implantação mais simples expõe apenas `/v1` e mantém `/api`, `/` e `/health` na rede local ou em loopback.
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # altere
-admin_token = ""                                  # campo histórico reservado
 
 [defaults]
 lb_strategy = "RoundRobin"

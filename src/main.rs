@@ -1,4 +1,3 @@
-use actix_cors::Cors;
 use actix_web::{web, App, HttpServer, HttpResponse, middleware};
 use actix_files as actix_files;
 use std::sync::Arc;
@@ -78,13 +77,16 @@ async fn main() -> std::io::Result<()> {
     let login_limiter = web::Data::new(ai_gateway::api::auth::LoginLimiter::new());
 
     HttpServer::new(move || {
-        let cors = Cors::permissive();
-
         App::new()
-            .wrap(cors)
+            // 只放行回环/Tauri origin：permissive 会连 supports_credentials 一起打开，
+            // 等于允许任意外站带着 7 天会话 cookie 读 /api。同源请求（局域网打开控制台）
+            // 不走 CORS，所以局域网使用不受影响。详见 cors.rs 模块注释。
+            .wrap(ai_gateway::cors::console_cors())
             .wrap(middleware::Logger::default())
             // 静态资源缓存策略：index.html 必须回源校验，/assets/* 强缓存
             .wrap(middleware::from_fn(ai_gateway::web_cache::cache_headers))
+            // 安全响应头：/v1 原样放过，只给控制台与 /api 加
+            .wrap(middleware::from_fn(ai_gateway::security_headers::security_headers))
             .app_data(web::Data::new(db_pool.clone()))
             .app_data(web::Data::new(proxy_state.clone()))
             .app_data(web::Data::new(shared_config.clone()))

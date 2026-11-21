@@ -297,7 +297,32 @@ El panel (tráfico y estadísticas, modelos virtuales, plataformas, claves API, 
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Pública (`setup` queda de hecho limitado a la máquina local) |
 | El resto de `/api/*` (plataformas / modelos / modelos virtuales / claves API / acceso de clientes / ajustes / estadísticas / copias) | Sesión de administrador |
 
-> Sin ninguna clave API configurada, la pasarela no valida el valor, pero las peticiones deben llevar igualmente una cabecera `Authorization` o `x-api-key` (el valor no se valida); en cuanto existe una clave, se exige una clave válida. Las credenciales se guardan en SQLite (hashes Argon2id); `admin_token` en `config.toml` es un campo histórico reservado.
+> Sin ninguna clave API configurada, la pasarela no valida el valor, pero las peticiones deben llevar igualmente una cabecera `Authorization` o `x-api-key` (el valor no se valida); en cuanto existe una clave, se exige una clave válida. Las credenciales se guardan en SQLite (hashes Argon2id).
+
+### Uso en red local
+
+La pasarela escucha por defecto en `0.0.0.0:1994`, así que móviles, televisores y equipos de compañeros en la misma red pueden abrir el panel directamente — **es un uso admitido**. Antes de exponerla más allá de una red de confianza:
+
+- **La pasarela no termina TLS.** Usa HTTPS entre máquinas:
+  ```bash
+  # Opción 1: Caddy emite y renueva certificados (lo más sencillo)
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # Opción 2: nginx (conserva Host y escribe las cabeceras de reenvío — ver abajo)
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # necesario para SSE
+      proxy_buffering off;                          # si no, el streaming se atasca
+  }
+  ```
+- **Un proxy inverso debe escribir `X-Forwarded-For` (o `X-Real-IP`).** «Acceso de clientes» e «inicialización del administrador» están restringidos a la consola local, decidida por «peer de bucle invertido **y** sin cabeceras de reenvío **y** Host de bucle invertido». Un proxy que conserve el Host como `127.0.0.1` sin escribir ninguna cabecera de reenvío deja a la pasarela sin poder distinguir usuario local de remoto.
+- **El acceso cross-origin a `/api/*` está cerrado por defecto.** Todas las peticiones del panel son rutas relativas al mismo origen, también al abrirlo desde la LAN, así que esto no afecta a ningún uso normal; lo que bloquea es *otra página web* llamando a `/api` con tu cookie de sesión de 7 días. Si necesitas acceso cross-origin de verdad, usa `/v1` (se autentica con clave API, no con sesión).
+- **Limitación de inicio de sesión**: 5 fallos consecutivos de un usuario desde un origen bloquean ese par durante 5 minutos. Los bloqueos se cuentan por «origen + usuario», así que un dispositivo que se equivoque deja fuera a nadie más. Hay además un cubo de fichas global cuyo único fin es evitar que el endpoint de login se use para saturar la CPU.
+- Exponer solo `/v1` a internet público y dejar `/api`, `/` y `/health` en la red local o en bucle invertido es el despliegue más sencillo.
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # cámbiala
-admin_token = ""                                  # campo histórico reservado
 
 [defaults]
 lb_strategy = "RoundRobin"

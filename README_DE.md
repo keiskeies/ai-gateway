@@ -297,7 +297,32 @@ Das Dashboard (Traffic und Statistiken, virtuelle Modelle, Plattformen, API-Schl
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Öffentlich (`setup` ist faktisch nur lokal möglich) |
 | Alle übrigen `/api/*` (Plattformen / Modelle / virtuelle Modelle / API-Schlüssel / Client-Zugriff / Einstellungen / Statistiken / Backups) | Admin-Sitzung |
 
-> Ohne konfigurierte API-Schlüssel prüft das Gateway den Wert nicht, aber Anfragen müssen trotzdem einen `Authorization`- oder `x-api-key`-Header tragen (der Wert wird nicht geprüft); sobald ein Schlüssel existiert, ist ein gültiger Schlüssel erforderlich. Zugangsdaten liegen in SQLite (Argon2id-Hashes); `admin_token` in `config.toml` ist ein historisches reserviertes Feld.
+> Ohne konfigurierte API-Schlüssel prüft das Gateway den Wert nicht, aber Anfragen müssen trotzdem einen `Authorization`- oder `x-api-key`-Header tragen (der Wert wird nicht geprüft); sobald ein Schlüssel existiert, ist ein gültiger Schlüssel erforderlich. Zugangsdaten liegen in SQLite (Argon2id-Hashes).
+
+### Nutzung im LAN
+
+Das Gateway lauscht standardmäßig auf `0.0.0.0:1994`; Handys, TVs und Rechner von Kollegen im selben Netz können den Dashboard-Client direkt öffnen — **das ist ausdrücklich unterstützt**. Bevor du es über ein unvertrauenswürdiges Netz hinaus öffnest:
+
+- **Das Gateway beendet kein TLS.** Zwischen Maschinen HTTPS verwenden:
+  ```bash
+  # Variante 1: Caddy stellt Zertifikate aus und erneuert sie (am einfachsten)
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # Variante 2: nginx (Host beibehalten und Forwarding-Header setzen — siehe unten)
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # für SSE zwingend
+      proxy_buffering off;                          # sonst stockt das Streaming
+  }
+  ```
+- **Ein Reverse Proxy muss `X-Forwarded-For` (oder `X-Real-IP`) setzen.** „Client-Zugriff“ und „Administratoreinrichtung“ sind nur für die lokale Konsole möglich; entschieden wird das über „Loopback-Peer **und** keine Forwarding-Header **und** Loopback-Host“. Ein Proxy, der den Host als `127.0.0.1` lässt und gar keine Forwarding-Header schreibt, nimmt dem Gateway jede Unterscheidung zwischen lokalem und fernem Benutzer.
+- **Cross-Origin-Zugriff auf `/api/*` ist standardmäßig zu.** Alle Anfragen des Dashboards sind relative Pfade zum eigenen Ursprung — auch beim Öffnen über das LAN —, daher betrifft das keinen normalen Gebrauch; blockiert wird nur, dass *eine andere Webseite* `/api` mit deinem 7-Tage-Sitzungs-Cookie aufruft. Für echten Cross-Origin-Bedarf nutze `/v1` (authentifiziert über API-Schlüssel statt Sitzung).
+- **Anmelde-Drosselung**: 5 Fehlschläge hintereinander für einen Benutzernamen von einer Quelle sperren dieses Paar für 5 Minuten. Gezählt wird je „Quelle + Benutzername“, ein vertipptes Gerät sperrt also niemand anderen aus. Ein globaler Token-Eimer verhindert lediglich, dass der Anmelde-Endpunkt die CPU auslastet.
+- Einfacher ist die Deployment-Variante, die nur `/v1` öffentlich macht und `/api`, `/` und `/health` im LAN bzw. auf Loopback belässt.
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # bitte ändern
-admin_token = ""                                  # historisches reserviertes Feld
 
 [defaults]
 lb_strategy = "RoundRobin"

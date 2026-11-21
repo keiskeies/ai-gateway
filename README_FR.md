@@ -297,7 +297,32 @@ Le tableau de bord (trafic et statistiques, modèles virtuels, plateformes, clé
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Public (`setup` de fait limité à la machine locale) |
 | Tous les autres `/api/*` (plateformes / modèles / modèles virtuels / clés API / accès clients / réglages / statistiques / sauvegardes) | Session administrateur |
 
-> Sans aucune clé API configurée, la passerelle ne valide pas la valeur, mais les requêtes doivent tout de même porter un en-tête `Authorization` ou `x-api-key` (la valeur n'est pas validée) ; dès qu'une clé existe, une clé valide est requise. Les identifiants sont stockés dans SQLite (hachages Argon2id) ; `admin_token` dans `config.toml` est un champ historique réservé.
+> Sans aucune clé API configurée, la passerelle ne valide pas la valeur, mais les requêtes doivent tout de même porter un en-tête `Authorization` ou `x-api-key` (la valeur n'est pas validée) ; dès qu'une clé existe, une clé valide est requise. Les identifiants sont stockés dans SQLite (hachages Argon2id).
+
+### Utilisation en réseau local
+
+La passerelle écoute par défaut sur `0.0.0.0:1994` : téléphones, télévisions et postes des collègues du même réseau peuvent ouvrir le tableau de bord directement — **c'est un usage pris en charge**. Avant de l'exposer au-delà d'un réseau de confiance :
+
+- **La passerelle ne termine pas le TLS.** Utilisez HTTPS entre machines :
+  ```bash
+  # Option 1 : Caddy émet et renouvelle les certificats (le plus simple)
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # Option 2 : nginx (conserver Host et écrire les en-têtes de transfert — voir ci-dessous)
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # indispensable pour SSE
+      proxy_buffering off;                          # sinon le streaming saccade
+  }
+  ```
+- **Un reverse proxy doit écrire `X-Forwarded-For` (ou `X-Real-IP`).** « Accès clients » et « initialisation de l'administrateur » sont réservés à la console locale, décidés par « pair loopback **et** aucun en-tête de transfert **et** Host loopback ». Un proxy qui laisse Host à `127.0.0.1` sans écrire le moindre en-tête de transfert empêche la passerelle de distinguer un utilisateur local d'un utilisateur distant.
+- **Le cross-origin sur `/api/*` est fermé par défaut.** Toutes les requêtes du tableau de bord sont des chemins relatifs vers la même origine, y compris ouvertes depuis le LAN, cela ne gêne donc aucun usage normal ; ce qui est bloqué, c'est *une autre page web* appelant `/api` avec votre cookie de session de 7 jours. Pour un vrai besoin cross-origin, passez par `/v1` (authentifié par clé API, pas par session).
+- **Limitation de connexion** : 5 échecs consécutifs pour un même nom d'utilisateur depuis une même source verrouillent ce couple pendant 5 minutes. Le décompte se fait par « source + utilisateur », une appareil qui se trompe n'exclut donc personne d'autre. Un seau à jetons global existe uniquement pour empêcher que le point de connexion serve à saturer le CPU.
+- L'exposition la plus simple consiste à ne publier que `/v1` et à garder `/api`, `/` et `/health` sur le réseau local ou en loopback.
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # à modifier
-admin_token = ""                                  # champ historique réservé
 
 [defaults]
 lb_strategy = "RoundRobin"

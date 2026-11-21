@@ -64,7 +64,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "e2e-only-key-not-for-production"
-admin_token = ""
 
 [defaults]
 lb_strategy = "RoundRobin"

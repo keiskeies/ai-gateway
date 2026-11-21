@@ -36,7 +36,7 @@ pub async fn export(
     let mut doc = web::block(move || db::config_transfer::export(&db, include_secrets))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))??;
-    // config.toml 快照只作参考：encrypt_key / admin_token 不在 ConfigResponse 里，
+    // config.toml 快照只作参考：encrypt_key 不在 ConfigResponse 里，
     // 所以这一段天然没有口令，导出的就是设置页能改的那些值。
     let cfg = config.read();
     doc.settings = serde_json::to_value(ConfigResponse::from(&*cfg)).ok();

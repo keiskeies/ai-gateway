@@ -26,7 +26,7 @@ cargo tauri build                  # installers in src-tauri/target/release/bund
 ### Tests
 
 ```bash
-cargo test                         # ~360 lib tests, in #[cfg(test)] modules next to the code
+cargo test                         # 376 lib tests, in #[cfg(test)] modules next to the code
 cargo test <name>                  # single test
 cargo test --test <name>           # integration (none today)
 cd src-tauri && cargo test         # MUST run from src-tauri/ — see below
@@ -40,7 +40,7 @@ There is no clippy, rustfmt, eslint, or prettier configured. CI (`release.yml`) 
 
 ```bash
 cargo build && npm --prefix frontend run build   # fixtures do NOT build these; they fail with which one is missing
-python -m pytest e2e -q                          # 61 specs, ~4 min
+python -m pytest e2e -q                          # 66 specs, ~4 min
 python -m pytest e2e/test_wall.py -q             # one file
 UPDATE_BASELINES=1 python -m pytest e2e/test_visual.py   # regenerate pixel baselines
 ```
@@ -94,7 +94,7 @@ UPDATE_BASELINES=1 python -m pytest e2e/test_visual.py   # regenerate pixel base
 
 **Reasoning is client-driven.** Inbound OpenAI/OpenRouter/vendor shapes normalize into `protocol/reasoning.rs`; outbound format is chosen by `backend.reasoning_style` (`Auto` → Anthropic upstream gets `thinking`, everything else `reasoning_effort`), and `param_overrides` merges last and wins. Anthropic thinking signatures replay unchanged; cross-protocol tool loops use `proxy/reasoning_cache.rs` (30 min, keyed by `tool_use.id`, fail-open by disabling thinking). Thinking content is never logged.
 
-**Auth is split in two.** `/api/*` is behind session middleware (Argon2id `users`, `sessions` rows + HttpOnly `aigw_session` cookie, 7d); only `/api/auth/status|login|setup` are public and `setup` is loopback-only. `/v1/*` uses gateway API keys instead (`/v1/models` and `/health` public). `/api/clients/*` additionally requires the local-console guard.
+**Auth is split in two.** `/api/*` is behind session middleware (Argon2id `users`, `sessions` rows + HttpOnly `aigw_session` cookie, 7d); only `/api/auth/status|login|setup` are public, and `setup` requires the local-console guard (not merely a loopback peer — behind a reverse proxy the peer is always `127.0.0.1`). `/v1/*` uses gateway API keys instead (`/v1/models` and `/health` public). `/api/clients/*` additionally requires the local-console guard. Login is throttled per `ip|username` plus a global token bucket, deliberately with **no IP-only lockout** (the gateway binds `0.0.0.0` for LAN use). CORS (`cors::console_cors()`, wrapped in both crates) allows only loopback/Tauri origins and never sets `credentials`; `security_headers::security_headers` adds CSP with `frame-ancestors 'self'` and skips `/v1` entirely — both must stay compatible with LAN use and with framing `/wall`.
 
 **Data model.** Platform → many Models; Proxy (virtual model) → one Route (1:1 via `proxy_id UNIQUE`) → many Backends. `Backend.model_id` is a plain string, not an FK. Models belong to a *shared catalog*, not a platform: reach models through `p.catalog_key`, never `b.platform_id` (AGENTS.md, "shared catalog").
 
@@ -123,6 +123,7 @@ Front-end rules that tooling enforces: every user-facing string goes through `t(
 - DB is SQLite WAL with `foreign_keys=ON`, `busy_timeout=5000`, `synchronous=NORMAL`, pool `max_size=8`, 5s connection timeout.
 - **If no API keys exist, requests are still required to carry `Authorization` or `x-api-key`** — the value is just not checked.
 - `reasoning_content` (NVIDIA NIM and similar) is handled in `extract_message_content()`; Anthropic extended thinking requires `budget_tokens >= 1024` and `max_tokens > budget_tokens` and rejects `temperature`/`top_p`/`top_k` — `anthropic::to_request` clamps the budget downward and strips those params.
-- `encrypt_key` and `admin_token` in `config.toml` are security-sensitive; never commit real values. No `data/` or `*.db` files in git.
+- `encrypt_key` in `config.toml` is security-sensitive; never commit real values. No `data/` or `*.db` files in git.
+- **Don't `git stash` while another session may be editing this same checkout** — it sweeps their unstaged work too, and `pop` then aborts or misplaces it. Recover with `git checkout stash@{0} -- <only your paths>`.
 - Windows config resolution can pick `C:\Users\<user>\AppData\Local\AI Gateway\config.toml` over the project-local one when running as a Tauri app; a loose `src-tauri/target/release/ai-gateway-tauri.exe` resolves its app dir to `target/release/_up_/` and therefore reads the *project* `config.toml`.
 - Dev profile has `opt-level = 2` for all dependencies — faster runtime, slower first compile.

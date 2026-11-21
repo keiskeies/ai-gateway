@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod catalog;
 pub mod config;
+pub mod cors;
 pub mod crypto;
 pub mod error;
 pub mod models;
@@ -15,3 +16,4 @@ pub mod clients;
 pub mod checkin;
 pub mod update;
 pub mod web_cache;
+pub mod security_headers;

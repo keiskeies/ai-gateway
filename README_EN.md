@@ -297,7 +297,32 @@ The dashboard (traffic and stats, virtual models, platforms, API keys, Playgroun
 | `/api/auth/status`, `/api/auth/login`, `/api/auth/setup` | Public (`setup` is effectively local-only) |
 | All other `/api/*` (platforms / models / virtual models / API keys / client access / settings / stats / backups) | Admin session |
 
-> With no API keys configured, the gateway does not validate the key value, but requests must still carry an `Authorization` or `x-api-key` header (the value is not validated); once a key exists, a valid key is required. Credentials live in SQLite (Argon2id hashes); `admin_token` in `config.toml` is a legacy reserved field.
+> With no API keys configured, the gateway does not validate the key value, but requests must still carry an `Authorization` or `x-api-key` header (the value is not validated); once a key exists, a valid key is required. Credentials live in SQLite (Argon2id hashes).
+
+### Use over the LAN
+
+The gateway listens on `0.0.0.0:1994` by default, so phones, TVs and colleagues' machines on the same network can open the dashboard directly — **this is a supported use case**. Before exposing it beyond a network you trust:
+
+- **The gateway does not terminate TLS.** Use HTTPS between machines:
+  ```bash
+  # Option 1: Caddy issues and renews certificates for you (least effort)
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # Option 2: nginx (keep Host and set the forwarding headers — see below)
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # required for SSE streaming
+      proxy_buffering off;                          # otherwise streaming stalls
+  }
+  ```
+- **A reverse proxy must set `X-Forwarded-For` (or `X-Real-IP`).** "Client access" and "initial admin setup" are local-console only, decided by "loopback peer **and** no forwarding headers **and** a loopback Host". A proxy that rewrites the peer to 127.0.0.1 while keeping Host as `127.0.0.1` and sending no forwarding headers leaves the gateway unable to tell local from remote users.
+- **Cross-origin `/api/*` is off by default.** Every request the dashboard makes is a same-origin relative path, including when opened over the LAN, so this affects no normal usage; what it blocks is *some other web page* calling `/api` with your 7-day session cookie. If you genuinely need cross-origin access, use `/v1` instead (authenticated by API key, not by session).
+- **Login throttling**: 5 consecutive failures for one username from one source locks that pair out for 5 minutes. Locks are tracked per "source + username", so one mistyped device cannot lock everyone else out. A site-wide token bucket exists only to stop the login endpoint from being used to saturate the CPU.
+- Exposing only `/v1` to the public internet, and keeping `/api`, `/` and `/health` on the LAN or loopback, is the simpler deployment.
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # change this
-admin_token = ""                                  # legacy reserved field
 
 [defaults]
 lb_strategy = "RoundRobin"

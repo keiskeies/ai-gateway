@@ -298,7 +298,32 @@ Anthropic SDK ─────────────────→ POST /v1/me
 | `/api/auth/status`、`/api/auth/login`、`/api/auth/setup` | 公开（`setup` 实际仅限本机） |
 | 其余 `/api/*`（平台 / 模型 / 虚拟模型 / API Key / 客户端接入 / 设置 / 统计 / 备份） | 管理员登录会话 |
 
-> 尚未创建任何 API Key 时，网关不校验 Key 的内容，但请求仍必须携带 `Authorization` 或 `x-api-key` 请求头（内容不校验）；创建 Key 之后必须使用有效 Key。账号密码保存在 SQLite 中（Argon2id 哈希），`config.toml` 的 `admin_token` 是历史保留字段。
+> 尚未创建任何 API Key 时，网关不校验 Key 的内容，但请求仍必须携带 `Authorization` 或 `x-api-key` 请求头（内容不校验）；创建 Key 之后必须使用有效 Key。账号密码保存在 SQLite 中（Argon2id 哈希）。
+
+### 局域网使用
+
+网关默认监听 `0.0.0.0:1994`，同一网段的手机、电视、同事的电脑都能直接打开控制台——**这是有意支持的用法**。要把它用到公网或不受信的网段，请注意：
+
+- **网关自己不发 TLS**。跨机器请使用 HTTPS，两种做法：
+  ```bash
+  # 方式一：Caddy 自动签发/续期证书（最省事）
+  caddy reverse-proxy --from https://gw.example.com --to localhost:1994
+  ```
+  ```nginx
+  # 方式二：nginx（需保留 Host 并写转发头，见下）
+  location / {
+      proxy_pass http://127.0.0.1:1994;
+      proxy_set_header Host $host;
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Forwarded-Proto $scheme;
+      proxy_http_version 1.1;                      # SSE 流式必须
+      proxy_buffering off;                          # 关掉缓冲，否则流式会卡顿
+  }
+  ```
+- **反代必须写 `X-Forwarded-For`（或 `X-Real-IP`）**。「客户端接入」与「初始化管理员」这两项能力只允许本机控制台，判定依据是「peer 是回环 **且** 没有转发头 **且** Host 是回环」。代理若把 Host 原样保留成 `127.0.0.1` 又不写任何转发头，网关就无法区分本机与远程用户。
+- **`/api/*` 的跨源访问默认关闭**。控制台的所有请求都是同源相对路径，从局域网打开也一样，所以这条不影响任何正常使用；它挡的是「别处的网页带着你的 7 天会话 Cookie 来读 `/api`」。确有跨源需求，请改走 `/v1`（用 API Key 而非会话鉴权）。
+- **登录节流**：同一来源对同一用户名连续失败 5 次锁 5 分钟；锁按「来源 + 用户名」分别计算，一台设备输错密码不会把其他人挡在门外。另有一个全站令牌桶只用来防止有人拿登录接口打满 CPU。
+- 只在公网暴露 `/v1`，把 `/api`、`/`、`/health` 留在内网或回环，是更省心的部署。
 
 ---
 
@@ -445,7 +470,6 @@ path = "data/ai-gateway.db"
 
 [security]
 encrypt_key = "ai-gateway-default-key-change-me"  # 请修改
-admin_token = ""                                  # 历史保留字段
 
 [defaults]
 lb_strategy = "RoundRobin"

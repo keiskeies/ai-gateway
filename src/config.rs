@@ -55,7 +55,6 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     pub encrypt_key: String,
-    pub admin_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -330,7 +329,6 @@ impl Default for AppConfig {
             },
             security: SecurityConfig {
                 encrypt_key: "ai-gateway-default-key-change-me".to_string(),
-                admin_token: String::new(),
             },
             defaults: DefaultsConfig {
                 lb_strategy: "RoundRobin".to_string(),
@@ -384,9 +382,8 @@ impl AppConfig {
                         if let Some(v) = sec.get("encrypt_key").and_then(|v| v.as_str()) {
                             config.security.encrypt_key = v.to_string();
                         }
-                        if let Some(v) = sec.get("admin_token").and_then(|v| v.as_str()) {
-                            config.security.admin_token = v.to_string();
-                        }
+                        // admin_token 已删除（曾经解析后无人读取）。这里不再读它：
+                        // 老 config.toml 里留着这一行会被当作未知键忽略，不会报错。
                     }
                     if let Some(def) = value.get("defaults") {
                         if let Some(v) = def.get("lb_strategy").and_then(|v| v.as_str()) {
@@ -466,7 +463,6 @@ path = "{}"
 
 [security]
 encrypt_key = "{}"
-admin_token = "{}"
 
 [defaults]
 lb_strategy = "{}"
@@ -485,7 +481,6 @@ auto_purge_days = {}
             self.server.log_level,
             self.database.path.display(),
             self.security.encrypt_key,
-            self.security.admin_token,
             self.defaults.lb_strategy,
             self.defaults.max_retries,
             self.defaults.retry_backoff_ms,
