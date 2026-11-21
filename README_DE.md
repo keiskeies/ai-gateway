@@ -164,7 +164,7 @@ Nicht-streamende Antworten im selben Protokoll werden unverändert durchgereicht
 
 ### 🧠 Reasoning: der Client entscheidet
 
-Welche Reasoning-Parameter der Client auch sendet, das Gateway übersetzt sie in das Format, das der Upstream versteht. Sendet der Client keine, schaltet das Gateway Reasoning nicht selbst ein.
+Welche Reasoning-Parameter der Client auch sendet, das Gateway übersetzt sie in das Format, das der Upstream versteht. Sendet der Client keine, schaltet das Gateway Reasoning nicht selbst ein — außer für das virtuelle Modell ist eine **Standard-Stufe** konfiguriert (siehe unten).
 
 | Client sendet | Upstream ist Claude | Upstream ist ein OpenAI-kompatibles Reasoning-Modell |
 |---|---|---|
@@ -175,6 +175,7 @@ Welche Reasoning-Parameter der Client auch sendet, das Gateway übersetzt sie in
 - `Auto` löst nach Upstream-Typ auf: `thinking` für Anthropic, sonst `reasoning_effort`; `param_overrides` wird zuletzt zusammengeführt und gewinnt
 - Anthropic-Thinking-Signaturen werden unverändert wiedergegeben; protokollübergreifende Tool-Schleifen nutzen einen In-Memory-Signatur-Cache (30 Minuten, nach `tool_use.id`). Bei einem Cache-Miss wird Reasoning deaktiviert, statt eine Signatur zu erfinden
 - `/v1/models` liefert für Reasoning-Modelle `capabilities` / `supported_parameters` / `reasoning`; ob ein Client eine Reasoning-Steuerung anzeigt, hängt weiterhin von seiner eigenen Modellfähigkeitstabelle ab
+- **Reasoning-Stufen sind pro virtuellem Modell konfigurierbar** (virtuelles Modell → Routing-Konfiguration): Stelle die freigegebenen Stufen ein (eigene Werte wie `max` sind erlaubt), `/v1/models` meldet genau diese Liste unter `reasoning.efforts`; zusätzlich lässt sich eine **Standard-Stufe** wählen, die das Gateway einsetzt, wenn eine Anfrage gar keinen Reasoning-Parameter enthält. Leer lassen erhält das bisherige Verhalten: die festen fünf Stufen `minimal/low/medium/high/xhigh` und keine Ergänzung. Ein Client, der eine Stufe sendet oder Reasoning ausdrücklich abschaltet (`reasoning_effort: "none"` / `thinking: {type: "disabled"}`), gewinnt immer — das Gateway prüft und begrenzt Client-Werte nicht. Ein eigener Stufenname wird bei Anthropic-Thinking-Upstreams mit dem tatsächlichen Budget von `medium` weitergereicht; für ein exaktes Budget `param_overrides` verwenden
 
 ### 🛡️ Wiederholungen und Backend-Wechsel
 

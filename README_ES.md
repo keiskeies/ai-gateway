@@ -164,7 +164,7 @@ Las respuestas sin streaming del mismo protocolo se reenvían tal cual (solo se 
 
 ### 🧠 Razonamiento: decide el cliente
 
-Sean cuales sean los parámetros de razonamiento que envíe el cliente, la pasarela los traduce al formato que entiende el upstream. Si el cliente no envía ninguno, la pasarela no activa el razonamiento por sí sola.
+Sean cuales sean los parámetros de razonamiento que envíe el cliente, la pasarela los traduce al formato que entiende el upstream. Si el cliente no envía ninguno, la pasarela no activa el razonamiento por sí sola, salvo que el modelo virtual tenga un **nivel de razonamiento por defecto** configurado (ver abajo).
 
 | El cliente envía | El upstream es Claude | El upstream es un modelo de razonamiento compatible con OpenAI |
 |---|---|---|
@@ -175,6 +175,7 @@ Sean cuales sean los parámetros de razonamiento que envíe el cliente, la pasar
 - `Auto` resuelve según el tipo de upstream: `thinking` para Anthropic, `reasoning_effort` en el resto; `param_overrides` se fusiona al final y prevalece
 - Las firmas de Anthropic se reproducen sin cambios; los bucles de herramientas entre protocolos usan una caché de firmas en memoria (30 minutos, indexada por `tool_use.id`), y el razonamiento se desactiva en vez de fabricar una firma cuando no hay coincidencia
 - `/v1/models` expone `capabilities` / `supported_parameters` / `reasoning` para modelos de razonamiento; que un cliente muestre un control de razonamiento sigue dependiendo de su propia tabla de capacidades
+- **Los niveles de razonamiento se configuran por modelo virtual** (modelo virtual → configuración de enrutamiento): marca los niveles que se exponen (se admiten valores propios como `max`) y `/v1/models` informa de esa lista en `reasoning.efforts`; además puedes elegir un **nivel por defecto** que la pasarela aplica cuando una petición no lleva ningún parámetro de razonamiento. Dejarlo vacío mantiene el comportamiento actual: los cinco fijos `minimal/low/medium/high/xhigh` y ninguna inyección. Si el cliente envía un nivel o apaga el razonamiento explícitamente (`reasoning_effort: "none"` / `thinking: {type: "disabled"}`), el cliente siempre gana; la pasarela no valida ni recorta los valores del cliente. Un nombre de nivel propio se reenvía a los upstreams con Anthropic thinking con el presupuesto real de `medium`; usa `param_overrides` si necesitas un presupuesto exacto
 
 ### 🛡️ Reintentos y cambio de backend
 

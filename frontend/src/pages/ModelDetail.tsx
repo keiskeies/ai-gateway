@@ -80,6 +80,9 @@ interface RouteInfo {
   request_nonce?: boolean | null
   param_overrides?: Record<string, unknown> | null
   headers?: Record<string, unknown> | null
+  // 空数组 = 未设置：/v1/models 继续报固定五档，也不往请求里补默认等级
+  reasoning_efforts?: string[] | null
+  default_effort?: string | null
   backends: BackendInfo[]
 }
 
@@ -176,6 +179,61 @@ const UNKNOWN_LABEL_KEYS: Record<string, TranslationKey> = {
   Auto: 'autoValue',
   Drop: 'dropValue',
   Passthrough: 'passthroughValue',
+}
+
+// 思考等级的常用候选。后端接受任意自定义值（有的模型到 `max`、有的只到 `high`），
+// 所以这只是 chip，输入框可以再追加自定义档位。
+const EFFORT_CANDIDATES = ['minimal', 'low', 'medium', 'high', 'xhigh']
+
+// 按候选顺序归一，自定义值排在后面并字典序：否则同一份配置点两次保存会在库里抖一次顺序。
+function normalizeEfforts(values: string[]): string[] {
+  const unique = Array.from(new Set(values.map(v => v.trim().toLowerCase()).filter(Boolean)))
+  const known = EFFORT_CANDIDATES.filter(v => unique.includes(v))
+  const custom = unique.filter(v => !EFFORT_CANDIDATES.includes(v)).sort()
+  return [...known, ...custom]
+}
+
+// Mantine 7 的 MultiSelect 没有 creatable（那是 6/8 的写法），所以自定义档位这样给：
+// 搜索框里的原文（转小写）自己作为一条候选出现，回车即加入 —— 有 Max 的模型填得进来。
+// `filter` 原样返回候选、关掉内置过滤：候选列表由 effortOptions 全权决定，
+// 省得内置过滤把这条自定义候选滤掉，导致敲了 max 却按回车加不进来。
+function effortOptions(search: string): string[] {
+  const raw = search.trim().toLowerCase()
+  const base = raw ? EFFORT_CANDIDATES.filter(v => v.includes(raw)) : EFFORT_CANDIDATES
+  return raw && !base.includes(raw) ? [...base, raw] : base
+}
+
+// 路由配置草稿的初值。回填 effect 和两处「放弃修改」按钮共用这一份 ——
+// 这个对象曾经被手抄三遍，加字段必漏一处。
+function routeDraftFrom(r?: RouteInfo | null) {
+  if (!r) {
+    return {
+      strategy: 'RoundRobin',
+      nonce: false,
+      retries: 2,
+      backoff: 500,
+      maxTokens: 4096,
+      paramOverrides: '',
+      headers: '',
+      efforts: [] as string[],
+      defaultEffort: '',
+    }
+  }
+  return {
+    strategy: r.lb_strategy || 'RoundRobin',
+    nonce: r.request_nonce ?? false,
+    retries: r.retry_policy?.max_retries ?? 2,
+    backoff: r.retry_policy?.backoff_ms ?? 500,
+    maxTokens: r.default_max_tokens ?? 4096,
+    paramOverrides: r.param_overrides && Object.keys(r.param_overrides).length
+      ? JSON.stringify(r.param_overrides, null, 2)
+      : '',
+    headers: r.headers && Object.keys(r.headers).length
+      ? JSON.stringify(r.headers, null, 2)
+      : '',
+    efforts: normalizeEfforts(r.reasoning_efforts ?? []),
+    defaultEffort: r.default_effort ?? '',
+  }
 }
 
 function optionLabel(keys: Record<string, TranslationKey>, value: string, locale: Locale): string {
@@ -291,15 +349,9 @@ export default function ModelDetail() {
   const impact = impactQuery.data
   const adminPort = settingsQuery.data?.admin_port ?? 1994
 
-  const [routeDraft, setRouteDraft] = useState({
-    strategy: 'RoundRobin',
-    nonce: false,
-    retries: 2,
-    backoff: 500,
-    maxTokens: 4096,
-    paramOverrides: '',
-    headers: '',
-  })
+  const [routeDraft, setRouteDraft] = useState(routeDraftFrom(null))
+  // 思考等级多选框的搜索原文：非空时它自己会作为一条候选出现（自定义档位入口）
+  const [effortSearch, setEffortSearch] = useState('')
 
   useEffect(() => {
     setTab('routing')
@@ -316,27 +368,7 @@ export default function ModelDetail() {
     // 拖拽/增删后端都会触发 refetch：直接回填会把没保存的路由配置悄悄冲掉，
     // 所以只在用户没动过表单时用服务端值初始化。
     if (!routeDraftTouched.current) {
-      setRouteDraft(firstRoute ? {
-        strategy: firstRoute.lb_strategy || 'RoundRobin',
-        nonce: firstRoute.request_nonce ?? false,
-        retries: firstRoute.retry_policy?.max_retries ?? 2,
-        backoff: firstRoute.retry_policy?.backoff_ms ?? 500,
-        maxTokens: firstRoute.default_max_tokens ?? 4096,
-        paramOverrides: firstRoute.param_overrides && Object.keys(firstRoute.param_overrides).length
-          ? JSON.stringify(firstRoute.param_overrides, null, 2)
-          : '',
-        headers: firstRoute.headers && Object.keys(firstRoute.headers).length
-          ? JSON.stringify(firstRoute.headers, null, 2)
-          : '',
-      } : {
-        strategy: 'RoundRobin',
-        nonce: false,
-        retries: 2,
-        backoff: 500,
-        maxTokens: 4096,
-        paramOverrides: '',
-        headers: '',
-      })
+      setRouteDraft(routeDraftFrom(firstRoute))
     }
     setSelectedBackendId(current => (
       current && firstRoute?.backends?.some(backend => backend.id === current)
@@ -559,6 +591,9 @@ export default function ModelDetail() {
         request_nonce: routeDraft.nonce,
         param_overrides: paramOverrides,
         headers: headers,
+        reasoning_efforts: normalizeEfforts(routeDraft.efforts),
+        // 空串是后端「清空默认等级」的显式信号（不传 = 这次没动这个字段）
+        default_effort: routeDraft.defaultEffort,
       })
       // 存过之后草稿就是服务端值了，让回填重新接管（拿到后端归一化后的结果）
       routeDraftTouched.current = false
@@ -756,6 +791,44 @@ export default function ModelDetail() {
                       />
                       <div className="console-note">{t(locale, 'nonceToggleHint')}</div>
                     </div>
+                    <Field full label={t(locale, 'reasoningEffortsLabel')}>
+                      <MultiSelect
+                        size="xs"
+                        searchable
+                        searchValue={effortSearch}
+                        onSearchChange={setEffortSearch}
+                        onDropdownClose={() => setEffortSearch('')}
+                        filter={({ options }) => options}
+                        data={effortOptions(effortSearch)}
+                        value={routeDraft.efforts}
+                        onChange={value => {
+                          const next = normalizeEfforts(value)
+                          setEffortSearch('')
+                          // 把被挤出去的默认等级一起清掉，免得存一个后端会拒的组合
+                          editRouteDraft({
+                            efforts: next,
+                            defaultEffort: next.includes(routeDraft.defaultEffort) ? routeDraft.defaultEffort : '',
+                          })
+                        }}
+                        placeholder={t(locale, 'reasoningEffortsPlaceholder')}
+                      />
+                    </Field>
+                    <Field label={t(locale, 'defaultEffortLabel')}>
+                      <Select
+                        size="xs"
+                        clearable
+                        searchable
+                        disabled={!routeDraft.efforts.length}
+                        data={routeDraft.efforts.filter(e => e !== 'none' && e !== 'disabled')}
+                        value={routeDraft.defaultEffort || null}
+                        onChange={value => editRouteDraft({ defaultEffort: value || '' })}
+                        placeholder={routeDraft.efforts.length
+                          ? t(locale, 'defaultEffortPlaceholder')
+                          : t(locale, 'defaultEffortNeedsList')}
+                      />
+                    </Field>
+                    <div className="console-note">{t(locale, 'reasoningEffortsHint')}</div>
+                    <div className="console-note">{t(locale, 'defaultEffortHint')}</div>
                     <div className="console-field">
                       <label>{t(locale, 'weightDistribution')}</label>
                       <div className="console-weight-preview">
@@ -769,19 +842,7 @@ export default function ModelDetail() {
                       <Button size="xs" loading={saving} onClick={() => void saveRoute()}>{t(locale, 'saveRoute')}</Button>
                       <Button size="xs" variant="default" onClick={() => {
                         routeDraftTouched.current = false
-                        setRouteDraft({
-                          strategy: route.lb_strategy || 'RoundRobin',
-                          nonce: route.request_nonce ?? false,
-                          retries: route.retry_policy?.max_retries ?? 2,
-                          backoff: route.retry_policy?.backoff_ms ?? 500,
-                          maxTokens: route.default_max_tokens ?? 4096,
-                          paramOverrides: route.param_overrides && Object.keys(route.param_overrides).length
-                            ? JSON.stringify(route.param_overrides, null, 2)
-                            : '',
-                          headers: route.headers && Object.keys(route.headers).length
-                            ? JSON.stringify(route.headers, null, 2)
-                            : '',
-                        })
+                        setRouteDraft(routeDraftFrom(route))
                       }}>{t(locale, 'discardChanges')}</Button>
                     </div>
                   </>
@@ -1022,19 +1083,7 @@ export default function ModelDetail() {
                     <Button size="xs" loading={saving} onClick={() => void saveRoute()}>{t(locale, 'saveRoute')}</Button>
                     <Button size="xs" variant="default" onClick={() => {
                       routeDraftTouched.current = false
-                      setRouteDraft({
-                        strategy: route.lb_strategy || 'RoundRobin',
-                        nonce: route.request_nonce ?? false,
-                        retries: route.retry_policy?.max_retries ?? 2,
-                        backoff: route.retry_policy?.backoff_ms ?? 500,
-                        maxTokens: route.default_max_tokens ?? 4096,
-                        paramOverrides: route.param_overrides && Object.keys(route.param_overrides).length
-                          ? JSON.stringify(route.param_overrides, null, 2)
-                          : '',
-                        headers: route.headers && Object.keys(route.headers).length
-                          ? JSON.stringify(route.headers, null, 2)
-                          : '',
-                      })
+                      setRouteDraft(routeDraftFrom(route))
                     }}>{t(locale, 'discardChanges')}</Button>
                   </div>
                 </>

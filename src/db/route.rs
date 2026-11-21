@@ -46,7 +46,7 @@ fn backend_by_id(pool: &DbPool, id: &str) -> AppResult<Backend> {
     .map_err(Into::into)
 }
 
-const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides, headers";
+const ROUTE_COLS: &str = "id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides, headers, reasoning_efforts, default_effort";
 
 fn map_route(row: &rusqlite::Row) -> rusqlite::Result<Route> {
     Ok(Route {
@@ -62,6 +62,11 @@ fn map_route(row: &rusqlite::Row) -> rusqlite::Result<Route> {
         headers: row.get::<_, Option<String>>(8)?
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_else(default_param_overrides),
+        // 老库（V39 之前）这一列可能是 NULL（DEFAULT '[]' 只影响新行），统一按「未设置」读
+        reasoning_efforts: row.get::<_, Option<String>>(9)?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        default_effort: row.get(10)?,
         backends: vec![],
     })
 }
@@ -138,10 +143,11 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
     let route_id = uuid::Uuid::new_v4().to_string();
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides, headers) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        "INSERT INTO routes (id, proxy_id, lb_strategy, retry_policy, fallback, default_max_tokens, request_nonce, param_overrides, headers, reasoning_efforts, default_effort) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
         rusqlite::params![route_id, proxy_id, serde_json::to_string(&req.lb_strategy)?,
             serde_json::to_string(&req.retry_policy)?, req.fallback, req.default_max_tokens, req.request_nonce,
-            serde_json::to_string(&req.param_overrides)?, serde_json::to_string(&req.headers)?],
+            serde_json::to_string(&req.param_overrides)?, serde_json::to_string(&req.headers)?,
+            serde_json::to_string(&req.reasoning_efforts)?, req.default_effort],
     )?;
     drop(conn);
 
@@ -162,6 +168,8 @@ pub fn create(pool: &DbPool, proxy_id: &str, req: &CreateRouteRequest) -> AppRes
         request_nonce: req.request_nonce,
         param_overrides: req.param_overrides.clone(),
         headers: req.headers.clone(),
+        reasoning_efforts: req.reasoning_efforts.clone(),
+        default_effort: req.default_effort.clone(),
     })
 }
 
@@ -174,12 +182,19 @@ pub fn update(pool: &DbPool, id: &str, req: &UpdateRouteRequest) -> AppResult<Ro
     if let Some(n) = req.request_nonce { route.request_nonce = n; }
     if let Some(po) = &req.param_overrides { route.param_overrides = po.clone(); }
     if let Some(h) = &req.headers { route.headers = h.clone(); }
+    if let Some(e) = &req.reasoning_efforts { route.reasoning_efforts = e.clone(); }
+    // 空串是「清空」的显式信号：前端「默认等级」留空时传 ""，落库为 NULL（= 不注入）。
+    // 不能靠 None 表达清空，None 在本接口的语义是「这次没动这个字段」。
+    if let Some(d) = &req.default_effort {
+        route.default_effort = if d.trim().is_empty() { None } else { Some(d.trim().to_string()) };
+    }
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     conn.execute(
-        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5, request_nonce=?6, param_overrides=?7, headers=?8 WHERE id=?1",
+        "UPDATE routes SET lb_strategy=?2, retry_policy=?3, fallback=?4, default_max_tokens=?5, request_nonce=?6, param_overrides=?7, headers=?8, reasoning_efforts=?9, default_effort=?10 WHERE id=?1",
         rusqlite::params![id, serde_json::to_string(&route.lb_strategy)?,
             serde_json::to_string(&route.retry_policy)?, route.fallback, route.default_max_tokens, route.request_nonce,
-            serde_json::to_string(&route.param_overrides)?, serde_json::to_string(&route.headers)?],
+            serde_json::to_string(&route.param_overrides)?, serde_json::to_string(&route.headers)?,
+            serde_json::to_string(&route.reasoning_efforts)?, route.default_effort],
     )?;
     Ok(route)
 }
@@ -321,6 +336,8 @@ mod tests {
             request_nonce: false,
             param_overrides: serde_json::json!({}),
             headers: serde_json::json!({}),
+            reasoning_efforts: vec![],
+            default_effort: None,
             backends: vec![CreateBackendRequest {
                 platform_id: platform.id.clone(),
                 model_id: "gpt-test".into(),
@@ -377,6 +394,68 @@ mod tests {
             rusqlite::params![other.id]).unwrap();
         drop(conn);
         assert_eq!(backend_by_id(&pool, &backend_id).expect("recheck").price_pair(), Some((2.5, 4.0)));
+
+        cleanup_db(&path);
+    }
+
+    /// V39 两列的完整往返：create 落库 → get 读回 → update 改 → 再读回 → 清空默认值。
+    /// 「空列表 = 未设置」和「空串 = 清空默认值」这两条协议都靠这里兜住。
+    #[test]
+    fn reasoning_efforts_round_trip_and_clear() {
+        let (pool, path) = test_db();
+        let proxy = crate::db::proxy::create(&pool, &CreateProxyRequest { name: "efforts-model".into() })
+            .expect("create proxy");
+
+        // 没配置过的路由（与全部存量数据同形态）：空列表 + 无默认值
+        let plain = crate::db::route::create(&pool, &proxy.id, &CreateRouteRequest {
+            lb_strategy: LBStrategy::RoundRobin,
+            retry_policy: RetryPolicy::default(),
+            fallback: None,
+            default_max_tokens: None,
+            request_nonce: false,
+            param_overrides: serde_json::json!({}),
+            headers: serde_json::json!({}),
+            reasoning_efforts: vec![],
+            default_effort: None,
+            backends: vec![],
+        })
+        .expect("create route");
+        assert!(plain.reasoning_efforts.is_empty());
+        assert_eq!(plain.default_effort, None);
+
+        let route_id = plain.id.clone();
+        let read = get(&pool, &route_id).expect("get");
+        assert!(read.reasoning_efforts.is_empty());
+        assert_eq!(read.default_effort, None);
+
+        // 配置一份带自定义档位（max）的列表 + 默认值
+        update(&pool, &route_id, &UpdateRouteRequest {
+            reasoning_efforts: Some(vec!["low".into(), "high".into(), "max".into()]),
+            default_effort: Some("high".into()),
+            ..Default::default()
+        })
+        .expect("update efforts");
+        let read = get(&pool, &route_id).expect("re-read");
+        assert_eq!(read.reasoning_efforts, vec!["low", "high", "max"]);
+        assert_eq!(read.default_effort.as_deref(), Some("high"));
+
+        // get_by_proxy（缓存刷新读的就是它）必须带出同一份值
+        let by_proxy = get_by_proxy(&pool, &proxy.id)
+            .expect("get by proxy")
+            .expect("route exists");
+        assert_eq!(by_proxy.reasoning_efforts, vec!["low", "high", "max"]);
+        assert_eq!(by_proxy.default_effort.as_deref(), Some("high"));
+
+        // 空串 = 清空默认值（None 在这套接口里是「这次没动」，不能拿来表达清空）；
+        // 同时列表不动
+        update(&pool, &route_id, &UpdateRouteRequest {
+            default_effort: Some(String::new()),
+            ..Default::default()
+        })
+        .expect("clear default");
+        let read = get(&pool, &route_id).expect("after clear");
+        assert_eq!(read.default_effort, None);
+        assert_eq!(read.reasoning_efforts, vec!["low", "high", "max"]);
 
         cleanup_db(&path);
     }

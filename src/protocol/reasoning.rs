@@ -104,6 +104,9 @@ pub enum ReasoningSource {
     OpenAiReasoning,
     AnthropicThinking,
     Vendor,
+    /// 请求没带任何思考参数，由虚拟模型级 `default_effort` 补进来的。
+    /// 只为观测存在：让「网关注入的默认」和「客户端自己传的」在映射日志里分得开。
+    GatewayDefault,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -141,6 +144,26 @@ impl ReasoningConfig {
         self.effort
             .clone()
             .or_else(|| self.budget_tokens.map(ReasoningEffort::from_budget_tokens))
+    }
+
+    /// 由虚拟模型级 `default_effort` 造一份「网关自己决定要思考」的配置。
+    ///
+    /// 调用方保证 label 非空且不是 `"none"`（"none" 的语义是「关」，与「默认开一个等级」相反，
+    /// 在 `api/route.rs` 保存时已被拒掉）。`raw` 留空：不是客户端传来的，
+    /// 没有「同风格时原样回放客户端字段」这回事。
+    ///
+    /// **自定义档位名（`max` / `auto` …）在两类上游上的实际效果不同**，改这里前先确认：
+    /// - OpenAI 兼容上游：`ReasoningEffort::Custom` 原样转发，正是要的效果。
+    /// - Anthropic thinking 上游：`Custom` 的 `budget_tokens()` 是 None →
+    ///   `anthropic::to_request` 落到 8192 兜底，等于 medium 的实际开销。
+    ///   要给 Claude 后端精确预算，用 backend/route 级的 `param_overrides`，不要在这里加映射表。
+    pub fn from_effort_label(label: &str) -> Self {
+        Self {
+            enabled: Some(true),
+            effort: Some(ReasoningEffort::parse(label).unwrap_or(ReasoningEffort::Medium)),
+            source: ReasoningSource::GatewayDefault,
+            ..Default::default()
+        }
     }
 }
 
@@ -543,6 +566,24 @@ mod tests {
         assert_eq!(cfg.enabled, Some(true));
         assert_eq!(cfg.budget_tokens, Some(10000));
         assert_eq!(cfg.source, ReasoningSource::AnthropicThinking);
+    }
+
+    #[test]
+    fn from_effort_label_keeps_custom_labels_and_counts_as_enabled() {
+        let standard = ReasoningConfig::from_effort_label("high");
+        assert_eq!(standard.effort, Some(ReasoningEffort::High));
+        assert!(standard.is_enabled());
+        assert_eq!(standard.source, ReasoningSource::GatewayDefault);
+        assert_eq!(standard.effective_budget_tokens(), Some(16384));
+        // 不是客户端传来的，没有「同风格原样回放」这回事
+        assert!(standard.raw.is_empty());
+
+        // 自定义档位名（max）：算「开启」，但没有预算映射 —— OpenAI 兼容上游原样转发，
+        // Anthropic thinking 上游落到 anthropic::to_request 的 8192 兜底（见函数文档）
+        let custom = ReasoningConfig::from_effort_label("max");
+        assert_eq!(custom.effort, Some(ReasoningEffort::Custom("max".into())));
+        assert!(custom.is_enabled());
+        assert_eq!(custom.effective_budget_tokens(), None);
     }
 
     #[test]

@@ -652,6 +652,10 @@ pub fn to_response(unified: &UnifiedResponse) -> serde_json::Value {
     })
 }
 
+/// 未设置 `reasoning_efforts` 时对外报的固定五档 —— 与配这功能之前的硬编码一字不变，
+/// 这是「没配置过的虚拟模型行为不变」的落点。
+const DEFAULT_EFFORTS: [&str; 5] = ["minimal", "low", "medium", "high", "xhigh"];
+
 /// 生成虚拟模型的 OpenAI models 列表（含非标准能力扩展，能读的客户端会受益）
 pub fn models_list(models: &[ModelInfo]) -> serde_json::Value {
     let data: Vec<serde_json::Value> = models.iter().map(|m| {
@@ -664,13 +668,37 @@ pub fn models_list(models: &[ModelInfo]) -> serde_json::Value {
             item["capabilities"] = serde_json::json!(m.capabilities);
         }
         if reasoning {
-            item["supported_parameters"] = serde_json::json!([
-                "tools", "tool_choice", "reasoning_effort", "reasoning", "thinking", "max_completion_tokens"
-            ]);
-            item["reasoning"] = serde_json::json!({
-                "efforts": ["minimal", "low", "medium", "high", "xhigh"],
-                "budget_tokens": true
-            });
+            let configured = !m.efforts.is_empty();
+            let efforts: &[String] = if configured { &m.efforts } else { &[] };
+            let params: Vec<&str> = if !configured {
+                ["tools", "tool_choice", "reasoning_effort", "reasoning", "thinking", "max_completion_tokens"].to_vec()
+            } else {
+                // 列表里一个档位形状的值都没有（只有 none/disabled）时不再声称支持
+                // reasoning_effort —— 那等于继续对客户端谎报一个实际不存在的参数。
+                let has_level = efforts.iter().any(|e| {
+                    !matches!(crate::protocol::reasoning::ReasoningEffort::parse(e),
+                        Some(crate::protocol::reasoning::ReasoningEffort::None))
+                });
+                let mut v = vec!["tools", "tool_choice"];
+                if has_level {
+                    v.push("reasoning_effort");
+                }
+                v.push("reasoning");
+                v.push("thinking");
+                v.push("max_completion_tokens");
+                v
+            };
+            item["supported_parameters"] = serde_json::json!(params);
+            let mut reasoning_obj = serde_json::json!({ "budget_tokens": true });
+            if configured {
+                reasoning_obj["efforts"] = serde_json::json!(efforts);
+                if let Some(d) = m.default_effort.as_deref().filter(|d| !d.is_empty()) {
+                    reasoning_obj["default"] = serde_json::json!(d);
+                }
+            } else {
+                reasoning_obj["efforts"] = serde_json::json!(DEFAULT_EFFORTS);
+            }
+            item["reasoning"] = reasoning_obj;
         } else if tool {
             item["supported_parameters"] = serde_json::json!(["tools", "tool_choice"]);
         }
@@ -679,10 +707,14 @@ pub fn models_list(models: &[ModelInfo]) -> serde_json::Value {
     serde_json::json!({ "object": "list", "data": data })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelInfo {
     pub name: String,
     pub capabilities: Vec<String>,
+    /// 虚拟模型配置的对外思考等级；空 = 未设置 → 报 `DEFAULT_EFFORTS`
+    pub efforts: Vec<String>,
+    /// 请求没带思考参数时网关补的默认等级；None = 不补（不出现在响应里）
+    pub default_effort: Option<String>,
 }
 
 #[cfg(test)]
@@ -758,6 +790,7 @@ mod tests {
         let models = vec![ModelInfo {
             name: "virt".into(),
             capabilities: vec!["Reasoning".into(), "Tool".into()],
+            ..Default::default()
         }];
         let v = models_list(&models);
         assert_eq!(v["data"][0]["capabilities"][0], "Reasoning");
@@ -767,6 +800,63 @@ mod tests {
             .iter()
             .any(|p| p == "reasoning_effort"));
         assert_eq!(v["data"][0]["reasoning"]["budget_tokens"], true);
+        // 未设置思考等级 = 配这功能之前的固定五档，一字不变
+        assert_eq!(
+            v["data"][0]["reasoning"]["efforts"],
+            serde_json::json!(["minimal", "low", "medium", "high", "xhigh"])
+        );
+        assert!(v["data"][0]["reasoning"].get("default").is_none());
+    }
+
+    #[test]
+    fn models_list_uses_configured_efforts() {
+        let models = vec![ModelInfo {
+            name: "virt".into(),
+            capabilities: vec!["Reasoning".into()],
+            efforts: vec!["low".into(), "high".into(), "max".into()],
+            default_effort: Some("high".into()),
+        }];
+        let v = models_list(&models);
+        assert_eq!(
+            v["data"][0]["reasoning"]["efforts"],
+            serde_json::json!(["low", "high", "max"])
+        );
+        assert_eq!(v["data"][0]["reasoning"]["default"], "high");
+        // 有档位形状的值 → 继续声称支持 reasoning_effort；自定义名（max）不影响这一判断
+        assert!(v["data"][0]["supported_parameters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p == "reasoning_effort"));
+    }
+
+    #[test]
+    fn models_list_drops_effort_param_when_only_none() {
+        // 只暴露「可以关」的虚拟模型：不再对客户端声称支持 reasoning_effort
+        let models = vec![ModelInfo {
+            name: "virt".into(),
+            capabilities: vec!["Reasoning".into()],
+            efforts: vec!["none".into()],
+            default_effort: None,
+        }];
+        let v = models_list(&models);
+        let params = v["data"][0]["supported_parameters"].as_array().unwrap();
+        assert!(!params.iter().any(|p| p == "reasoning_effort"), "{:?}", params);
+        assert!(params.iter().any(|p| p == "tools"));
+    }
+
+    #[test]
+    fn models_list_non_reasoning_model_unchanged() {
+        let models = vec![ModelInfo {
+            name: "plain".into(),
+            capabilities: vec!["Tool".into()],
+            efforts: vec!["low".into()],
+            default_effort: Some("low".into()),
+        }];
+        let v = models_list(&models);
+        // 没有 Reasoning 能力时，思考配置一概不出现
+        assert!(v["data"][0].get("reasoning").is_none());
+        assert_eq!(v["data"][0]["supported_parameters"], serde_json::json!(["tools", "tool_choice"]));
     }
 
     #[test]

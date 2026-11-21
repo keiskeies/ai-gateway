@@ -164,7 +164,7 @@ Same-protocol non-streaming responses pass through unchanged (only `model` is re
 
 ### 🧠 Reasoning: the client decides
 
-Whatever reasoning parameters the client sends are translated into what the upstream understands. If the client sends none, the gateway does not turn reasoning on.
+Whatever reasoning parameters the client sends are translated into what the upstream understands. If the client sends none, the gateway does not turn reasoning on — unless the virtual model has a **default reasoning level** configured (see below).
 
 | Client sends | Upstream is Claude | Upstream is an OpenAI-compatible reasoning model |
 |---|---|---|
@@ -175,6 +175,7 @@ Whatever reasoning parameters the client sends are translated into what the upst
 - `Auto` resolves by upstream type: `thinking` for Anthropic, `reasoning_effort` otherwise; `param_overrides` is merged last and wins
 - Anthropic thinking signatures are replayed unchanged; cross-protocol tool loops use an in-memory signature cache (30 minutes, keyed by `tool_use.id`), and reasoning is disabled rather than fabricating a signature on a miss
 - `/v1/models` exposes `capabilities` / `supported_parameters` / `reasoning` for reasoning models; whether a client shows a reasoning control still depends on its own model capability table
+- **Reasoning levels are configurable per virtual model** (virtual model → routing config): pick the levels to expose (custom values such as `max` are allowed) and `/v1/models` reports that list under `reasoning.efforts`; you can also pick a **default reasoning level** that the gateway fills in when a request carries no reasoning parameter at all. Leaving it unset keeps today's behavior: the fixed `minimal/low/medium/high/xhigh` list and no injection. A client that sends a level, or explicitly turns reasoning off (`reasoning_effort: "none"` / `thinking: {type: "disabled"}`), always wins — the gateway neither validates nor clamps client-supplied levels. A custom level name is forwarded on Anthropic thinking upstreams with medium's actual budget; use `param_overrides` when you need an exact budget
 
 ### 🛡️ Retries and backend rotation
 

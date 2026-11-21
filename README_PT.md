@@ -164,7 +164,7 @@ Respostas sem streaming do mesmo protocolo são repassadas sem alteração (apen
 
 ### 🧠 Raciocínio: o cliente decide
 
-Quaisquer parâmetros de raciocínio enviados pelo cliente são traduzidos para o formato que o upstream entende. Se o cliente não enviar nenhum, o gateway não ativa o raciocínio por conta própria.
+Quaisquer parâmetros de raciocínio enviados pelo cliente são traduzidos para o formato que o upstream entende. Se o cliente não enviar nenhum, o gateway não ativa o raciocínio por conta própria — a menos que o modelo virtual tenha um **nível de raciocínio padrão** configurado (veja abaixo).
 
 | O cliente envia | O upstream é Claude | O upstream é um modelo de raciocínio compatível com OpenAI |
 |---|---|---|
@@ -175,6 +175,7 @@ Quaisquer parâmetros de raciocínio enviados pelo cliente são traduzidos para 
 - `Auto` resolve pelo tipo de upstream: `thinking` para Anthropic, `reasoning_effort` nos demais; `param_overrides` é mesclado por último e prevalece
 - Assinaturas do Anthropic são reproduzidas sem alteração; loops de ferramentas entre protocolos usam um cache de assinaturas em memória (30 minutos, indexado por `tool_use.id`), e o raciocínio é desativado em vez de fabricar uma assinatura quando não há correspondência
 - `/v1/models` expõe `capabilities` / `supported_parameters` / `reasoning` para modelos de raciocínio; exibir um controle de raciocínio ainda depende da tabela de capacidades do próprio cliente
+- **Os níveis de raciocínio são configuráveis por modelo virtual** (modelo virtual → configuração de roteamento): marque os níveis expostos (valores personalizados como `max` são aceitos) e o `/v1/models` informa essa lista em `reasoning.efforts`; você também pode escolher um **nível padrão** que o gateway aplica quando a requisição não traz nenhum parâmetro de raciocínio. Deixar em branco mantém o comportamento atual: os cinco fixos `minimal/low/medium/high/xhigh` e nenhuma injeção. Um cliente que envia um nível, ou desliga o raciocínio explicitamente (`reasoning_effort: "none"` / `thinking: {type: "disabled"}`), sempre vence; o gateway não valida nem limita os valores do cliente. Um nome de nível personalizado é encaminhado aos upstreams com Anthropic thinking com o orçamento real de `medium`; use `param_overrides` para um orçamento exato
 
 ### 🛡️ Novas tentativas e troca de backend
 

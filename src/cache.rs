@@ -40,6 +40,10 @@ pub struct ResolvedRoute {
     pub param_overrides: serde_json::Value,
     /// 路由级请求头覆盖（= 虚拟模型级）：追加到上游请求头，可覆盖平台 custom_headers 与鉴权头
     pub headers: serde_json::Value,
+    /// 对外暴露的思考等级列表，空 = 未设置（`/v1/models` 报固定五档、且不补默认值）
+    pub reasoning_efforts: Vec<String>,
+    /// 请求没带任何思考参数时补进去的等级（None = 不补）
+    pub default_effort: Option<String>,
 }
 
 /// 请求热路径的只读快照。整份快照一次原子替换，绝不原地 clear：
@@ -183,6 +187,8 @@ impl RouteCache {
                     request_nonce: route.request_nonce,
                     param_overrides: route.param_overrides,
                     headers: route.headers,
+                    reasoning_efforts: route.reasoning_efforts,
+                    default_effort: route.default_effort,
                 }),
             );
         }

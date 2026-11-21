@@ -497,6 +497,11 @@ fn capture_body(
 }
 
 /// List available models (virtual model names) with capability metadata
+///
+/// 这里走 DB 而不是 `state.cache` 快照，是刻意的：缓存只为「有路由的代理」建条目
+/// （`cache::refresh` 对没有路由的代理直接 `continue`），换成快照会让「建了虚拟模型
+/// 还没配后端」的代理从公开的 `/v1/models` 里消失。这个端点不在请求热路径上，
+/// 一次 `web::block` 的代价换得到那个正确性。
 pub async fn openai_list_models(
     state: web::Data<Arc<ProxyState>>, _req: HttpRequest,
 ) -> Result<HttpResponse, AppError> {
@@ -506,7 +511,12 @@ pub async fn openai_list_models(
         let mut out = Vec::new();
         for proxy in proxies {
             let mut intersection: Option<std::collections::HashSet<String>> = None;
+            // (对外暴露的思考等级, 默认等级)：取自路由（= 虚拟模型级，与 proxies 1:1）
+            let mut efforts: Vec<String> = Vec::new();
+            let mut default_effort: Option<String> = None;
             if let Ok(Some(route)) = crate::db::route::get_by_proxy(&db, &proxy.id) {
+                efforts = route.reasoning_efforts;
+                default_effort = route.default_effort;
                 let backends = crate::db::route::list_backends_by_route(&db, &route.id).unwrap_or_default();
                 for backend in &backends {
                     let caps: std::collections::HashSet<String> =
@@ -520,6 +530,8 @@ pub async fn openai_list_models(
             out.push(openai::ModelInfo {
                 name: proxy.name,
                 capabilities: intersection.map(|s| s.into_iter().collect()).unwrap_or_default(),
+                efforts,
+                default_effort,
             });
         }
         Ok(out)
@@ -1008,11 +1020,19 @@ async fn handle_request(
         } else {
             crate::protocol::nonce::Surface::Messages
         };
+        // 虚拟模型级默认思考等级：请求没带任何思考参数时补上配置的默认档位。
+        let default_effort = default_effort_to_inject(&unified, &resolved_route);
         let mut nonced_unified;
         let mut injected_nonce: Option<String> = None;
-        let unified_ref: &UnifiedRequest = if resolved_route.request_nonce {
+        let unified_ref: &UnifiedRequest = if resolved_route.request_nonce || default_effort.is_some() {
             nonced_unified = unified.clone();
-            injected_nonce = Some(crate::protocol::nonce::apply(&mut nonced_unified, nonce_surface));
+            if let Some(effort) = default_effort {
+                nonced_unified.reasoning =
+                    Some(crate::protocol::reasoning::ReasoningConfig::from_effort_label(effort));
+            }
+            if resolved_route.request_nonce {
+                injected_nonce = Some(crate::protocol::nonce::apply(&mut nonced_unified, nonce_surface));
+            }
             &nonced_unified
         } else {
             &unified
@@ -1473,6 +1493,25 @@ async fn handle_request(
         }
     }
     Err(AppError::Internal(format!("All retries: {}", last_error.unwrap_or_default())))
+}
+
+/// 判定本次请求是否要补虚拟模型级默认思考等级，命中时返回那个档位名。
+///
+/// 「没带」与「显式关」在这里天然分得开：`take_openai_reasoning` /
+/// `take_anthropic_thinking` 只在思考字段**缺席**时返回 `None`，显式关闭返回
+/// `Some(cfg)` 且 `enabled == Some(false)`，所以 `unified.reasoning.is_none()`
+/// 严格等于「客户端什么都没传」。客户端只要传了任何东西（包括 `none`）都不注入。
+///
+/// 还要求默认值是对外暴露列表 `reasoning_efforts` 的成员：防止「列表后来改成
+/// 只剩 high/max，但旧的 default_effort=medium 仍在偷偷注入」。
+fn default_effort_to_inject<'a>(
+    unified: &UnifiedRequest,
+    resolved_route: &'a crate::cache::ResolvedRoute,
+) -> Option<&'a str> {
+    resolved_route.default_effort.as_deref().filter(|d| {
+        unified.reasoning.is_none()
+            && resolved_route.reasoning_efforts.iter().any(|e| e.as_str() == *d)
+    })
 }
 
 fn build_forward_request(
@@ -3415,5 +3454,82 @@ mod tests {
         assert_eq!(body["temperature"], 0.2);
         // backend 没写的字段，route 覆盖生效
         assert_eq!(body["frequency_penalty"], 0.5);
+    }
+
+    // ============ 虚拟模型级默认思考等级 ============
+
+    /// 只关心 `default_effort_to_inject` 读的三个字段，其余给空值
+    fn route_with_efforts(efforts: &[&str], default: Option<&str>) -> crate::cache::ResolvedRoute {
+        crate::cache::ResolvedRoute {
+            route_id: "r1".into(),
+            proxy_id: "p1".into(),
+            backends: vec![],
+            lb_strategy: crate::models::route::LBStrategy::RoundRobin,
+            retry_policy: crate::models::route::RetryPolicy::default(),
+            fallback: None,
+            default_max_tokens: None,
+            request_nonce: false,
+            param_overrides: serde_json::json!({}),
+            headers: serde_json::json!({}),
+            reasoning_efforts: efforts.iter().map(|s| s.to_string()).collect(),
+            default_effort: default.map(str::to_string),
+        }
+    }
+
+    /// 用 OpenAI 入口解析一段 body，得到和真实链路一致的 `unified.reasoning` 形态
+    fn unified_with(body: serde_json::Value) -> crate::protocol::types::UnifiedRequest {
+        let mut raw = body.as_object().unwrap().clone();
+        raw.entry("model".to_string())
+            .or_insert_with(|| serde_json::json!("virtual"));
+        raw.entry("messages".to_string())
+            .or_insert_with(|| serde_json::json!([{"role": "user", "content": "hi"}]));
+        crate::protocol::openai::parse_request(serde_json::Value::Object(raw)).expect("parse")
+    }
+
+    #[test]
+    fn default_effort_injected_only_when_client_sent_nothing() {
+        let route = route_with_efforts(&["low", "high", "max"], Some("high"));
+
+        // 未带任何思考参数 + 默认值是列表成员 → 注入
+        let plain = unified_with(serde_json::json!({}));
+        assert!(plain.reasoning.is_none(), "前置条件：未带思考参数时 reasoning 必须是 None");
+        assert_eq!(super::default_effort_to_inject(&plain, &route), Some("high"));
+
+        // 默认值不在暴露列表里（例如列表后来改成只剩 high/max）→ 不注入
+        let stale = route_with_efforts(&["high", "max"], Some("medium"));
+        assert_eq!(super::default_effort_to_inject(&plain, &stale), None);
+
+        // 完全没配置（现有全部数据都是这形态）→ 不注入
+        let unset = route_with_efforts(&[], None);
+        assert_eq!(super::default_effort_to_inject(&plain, &unset), None);
+    }
+
+    #[test]
+    fn client_explicit_reasoning_always_beats_gateway_default() {
+        let route = route_with_efforts(&["low", "high"], Some("high"));
+
+        // 客户端显式带了自己的等级：原样转发，不校验也不替换
+        let own = unified_with(serde_json::json!({"reasoning_effort": "low"}));
+        assert_eq!(super::default_effort_to_inject(&own, &route), None);
+
+        // 客户端显式关闭：客户端的「关」必须赢，绝不能被默认值重新打开
+        let off = unified_with(serde_json::json!({"reasoning_effort": "none"}));
+        assert!(off.reasoning.is_some(), "前置条件：显式 none 要走 Some(cfg) 而不是 None");
+        assert_eq!(
+            off.reasoning.as_ref().and_then(|c| c.enabled),
+            Some(false),
+            "前置条件：显式关闭要落成 enabled=Some(false)"
+        );
+        assert_eq!(super::default_effort_to_inject(&off, &route), None);
+
+        // Anthropic 入口显式 disabled 同理
+        let anth_off = crate::protocol::anthropic::parse_request(serde_json::json!({
+            "model": "virtual",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "hi"}],
+            "thinking": {"type": "disabled"}
+        }))
+        .expect("parse anthropic");
+        assert_eq!(super::default_effort_to_inject(&anth_off, &route), None);
     }
 }

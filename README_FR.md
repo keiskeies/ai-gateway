@@ -164,7 +164,7 @@ Les réponses non-streaming de même protocole sont transmises telles quelles (s
 
 ### 🧠 Raisonnement : c'est le client qui décide
 
-Quels que soient les paramètres de raisonnement envoyés par le client, la passerelle les traduit dans le format compris par l'upstream. Si le client n'en envoie aucun, la passerelle n'active pas le raisonnement d'elle-même.
+Quels que soient les paramètres de raisonnement envoyés par le client, la passerelle les traduit dans le format compris par l'upstream. Si le client n'en envoie aucun, la passerelle n'active pas le raisonnement d'elle-même — sauf si le modèle virtuel a un **niveau de raisonnement par défaut** configuré (voir ci-dessous).
 
 | Le client envoie | L'upstream est Claude | L'upstream est un modèle de raisonnement compatible OpenAI |
 |---|---|---|
@@ -175,6 +175,7 @@ Quels que soient les paramètres de raisonnement envoyés par le client, la pass
 - `Auto` résout selon le type d'upstream : `thinking` pour Anthropic, `reasoning_effort` sinon ; `param_overrides` est fusionné en dernier et gagne
 - Les signatures Anthropic sont rejouées à l'identique ; les boucles d'outils inter-protocoles utilisent un cache de signatures en mémoire (30 minutes, indexé par `tool_use.id`), et le raisonnement est désactivé plutôt que de fabriquer une signature en cas d'absence dans le cache
 - `/v1/models` expose `capabilities` / `supported_parameters` / `reasoning` pour les modèles de raisonnement ; l'affichage d'un contrôle de raisonnement dépend toujours de la table de capacités propre au client
+- **Les niveaux de raisonnement se règlent par modèle virtuel** (modèle virtuel → configuration du routage) : cochez les niveaux exposés (les valeurs libres comme `max` sont acceptées) et `/v1/models` rapporte cette liste dans `reasoning.efforts` ; vous pouvez aussi choisir un **niveau par défaut** que la passerelle applique lorsqu'une requête ne porte aucun paramètre de raisonnement. Laisser vide conserve le comportement actuel : les cinq niveaux fixes `minimal/low/medium/high/xhigh` et aucune injection. Un client qui envoie un niveau, ou désactive explicitement le raisonnement (`reasoning_effort: "none"` / `thinking: {type: "disabled"}`), l'emporte toujours ; la passerelle ne valide ni ne borne les valeurs du client. Un nom de niveau libre est transmis aux upstreams Anthropic thinking avec le budget réel de `medium` ; utilisez `param_overrides` pour un budget exact
 
 ### 🛡️ Nouvelles tentatives et bascule de backend
 

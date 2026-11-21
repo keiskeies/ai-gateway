@@ -164,7 +164,7 @@ Anthropic SDK ─────────────────→ POST /v1/me
 
 ### 🧠 思考模式：客户端说了算
 
-客户端传什么思考参数，网关就翻译成上游认识的格式；客户端不传，网关不主动开启。
+客户端传什么思考参数，网关就翻译成上游认识的格式；客户端不传，网关不主动开启 —— 除非这个虚拟模型配了「默认思考等级」（见下）。
 
 | 客户端传入 | 上游是 Claude | 上游是 OpenAI 兼容推理模型 |
 |---|---|---|
@@ -175,6 +175,7 @@ Anthropic SDK ─────────────────→ POST /v1/me
 - `Auto` 按上游类型解析：Anthropic 用 `thinking`，其他平台用 `reasoning_effort`；`param_overrides` 最后合并并优先
 - Anthropic 的 thinking 签名会原样回放；跨协议工具循环使用网关内的签名缓存（30 分钟，按 `tool_use.id` 关联），未命中时关闭思考而不是伪造签名
 - `/v1/models` 对推理模型返回 `capabilities` / `supported_parameters` / `reasoning`；是否展示「思考程度」开关仍取决于客户端自己的模型能力表
+- **思考等级可按虚拟模型配置**（虚拟模型 → 路由配置）：勾出对外暴露的档位（可加自定义值，如 `max`），`/v1/models` 的 `reasoning.efforts` 就按这份上报，还能选一个「默认思考等级」—— 请求没带任何思考参数时网关补进这一档。留空即未设置：继续报固定的 `minimal/low/medium/high/xhigh` 五档，也不注入默认值。客户端显式传了等级或显式关闭（`reasoning_effort: "none"` / `thinking: {type: "disabled"}`）时，客户端永远赢，网关不校验也不钳制客户端传来的值。自定义档位名在 Anthropic thinking 上游上按 medium 的实际预算转发，要精确预算用 `param_overrides`
 
 ### 🛡️ 重试与换后端
 

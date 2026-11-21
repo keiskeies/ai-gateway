@@ -130,6 +130,16 @@ pub struct Route {
     /// 在平台 custom_headers 之后应用，同名可覆盖平台级头（含鉴权头）。
     #[serde(default = "default_param_overrides")]
     pub headers: serde_json::Value,
+    /// 对外暴露的思考等级列表（= 虚拟模型级）。**空 = 未设置**：`/v1/models` 继续报固定的
+    /// 五档，且不往请求里补默认值 —— 这是「没配置过的模型行为一字不变」的保证。
+    /// 允许自定义值（`max` / `auto` …），原样写进 `/v1/models` 并作为默认值的白名单。
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+    /// 请求没带任何思考参数时补进去的等级（None = 不补）。
+    /// 独立成一个字段而不是从 `reasoning_efforts` 推导：否则「设了列表但没选默认值」
+    /// 会因为默认值被迫生效而变成行为变更。注入时要求它是 `reasoning_efforts` 的成员。
+    #[serde(default)]
+    pub default_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,10 +280,18 @@ pub struct CreateRouteRequest {
     pub param_overrides: serde_json::Value,
     #[serde(default = "default_param_overrides")]
     pub headers: serde_json::Value,
+    /// 对外暴露的思考等级列表，空 = 未设置（语义同 `Route::reasoning_efforts`）
+    #[serde(default)]
+    pub reasoning_efforts: Vec<String>,
+    /// 请求没带思考参数时补的默认等级，None = 不补
+    #[serde(default)]
+    pub default_effort: Option<String>,
     pub backends: Vec<CreateBackendRequest>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// 部分更新：每个字段 `None` = 这次没动。所以 `Default` 的含义正好是「什么都不改」，
+/// 调用方（和测试）用 `..Default::default()` 只填要改的那一两个字段。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateRouteRequest {
     pub lb_strategy: Option<LBStrategy>,
     pub retry_policy: Option<RetryPolicy>,
@@ -284,6 +302,12 @@ pub struct UpdateRouteRequest {
     pub param_overrides: Option<serde_json::Value>,
     #[serde(default)]
     pub headers: Option<serde_json::Value>,
+    /// 思考等级列表：Some(list) 写入（空列表 = 清空回「未设置」），None = 不动
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<String>>,
+    /// 默认思考等级：Some("") 清空（回到不注入），Some(其它) 写入，None = 不动
+    #[serde(default)]
+    pub default_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

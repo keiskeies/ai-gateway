@@ -27,7 +27,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-EXE = REPO / "target" / "debug" / "ai-gateway.exe"
+# cargo 在 Windows 上给二进制加 .exe，在 macOS/Linux 上不加；写死一种就是另外两个平台跑不起来
+EXE = REPO / "target" / "debug" / ("ai-gateway.exe" if os.name == "nt" else "ai-gateway")
 STATIC = REPO / "static"
 AXE_JS = REPO / "frontend" / "node_modules" / "axe-core" / "axe.min.js"
 RUNTIME_ROOT = Path(os.environ.get("AIGW_E2E_DIR", REPO / ".dsh-tmp" / "e2e"))
@@ -210,6 +211,25 @@ def api(instances) -> Api:
     return instance.api
 
 
+# 假上游收到的请求体（按到达顺序）。网关只把「入站」正文落库（capture_request_bodies），
+# 转发出去的那份库里没有，所以想断言「上游实际收到了什么思考参数」只能让 mock 自己留一份。
+UPSTREAM_BODIES: list[dict] = []
+
+
+def _record_upstream_body(raw: str) -> None:
+    try:
+        UPSTREAM_BODIES.append(json.loads(raw))
+    except json.JSONDecodeError:
+        UPSTREAM_BODIES.append({"__unparsed__": raw})
+
+
+@pytest.fixture
+def upstream_bodies():
+    """用例期间假上游收到的请求体列表（每个是一条 chat/completions）。"""
+    UPSTREAM_BODIES.clear()
+    yield UPSTREAM_BODIES
+
+
 @pytest.fixture(scope="session")
 def mock_upstream():
     """假上游：只为让链路里出现一次真实 200，不接任何外部服务、不花真钱。
@@ -239,6 +259,7 @@ def mock_upstream():
             if not self.path.endswith("/chat/completions"):
                 self._json({"error": "not found"}, status=404)
                 return
+            _record_upstream_body(raw)
             state["hits"] += 1
             text = f"mock answer #{state['hits']}"
             try:

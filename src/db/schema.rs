@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 38;
+pub const CURRENT_SCHEMA_VERSION: i64 = 39;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -367,6 +367,19 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
         )?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 38)", [])?;
         tracing::info!("Database migrated to V38 (drop prefix-redundant request_stats indexes)");
+    }
+
+    if current_version < 39 {
+        // 虚拟模型级「思考等级」：reasoning_efforts 是对外暴露的档位列表（JSON 字符串数组，
+        // 空数组 = 未设置，此时 /v1/models 继续报固定的五档、也不给请求补默认值）；
+        // default_effort 是请求没带任何思考参数时补进去的档位（NULL = 不补）。
+        // 存 '[]' 而不是 NULL：读路径统一 from_str().unwrap_or_default()，不用到处判 None。
+        add_column_if_missing(conn, "routes", "reasoning_efforts",
+            "ALTER TABLE routes ADD COLUMN reasoning_efforts TEXT NOT NULL DEFAULT '[]'")?;
+        add_column_if_missing(conn, "routes", "default_effort",
+            "ALTER TABLE routes ADD COLUMN default_effort TEXT")?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 39)", [])?;
+        tracing::info!("Database migrated to V39 (routes.reasoning_efforts / routes.default_effort)");
     }
 
     Ok(())
