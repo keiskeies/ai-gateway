@@ -429,7 +429,9 @@ pub fn to_request(
         }).collect::<Vec<_>>()).unwrap());
     }
     if let Some(tc) = &unified.tool_choice {
-        req.insert("tool_choice".into(), serde_json::to_value(tc).unwrap());
+        if let Some(v) = normalize_tool_choice(tc) {
+            req.insert("tool_choice".into(), v);
+        }
     }
 
     apply_reasoning(&mut req, unified, target);
@@ -443,6 +445,26 @@ pub fn to_request(
         }
     }
     serde_json::Value::Object(req)
+}
+
+/// OpenAI tool_choice → 合法的 OpenAI 出站形式。
+/// `Object` 变体直接序列化会带出 `function: null`（如 `{"type":"none","function":null}`），
+/// 部分上游（vllm）会按 OpenAI spec 校验并拒绝；这里把平凡的对象形式压成字符串，
+/// `{"type":"function"}` 保留对象。返回 `None` 表示省略该字段。
+fn normalize_tool_choice(tc: &crate::protocol::types::ToolChoice) -> Option<serde_json::Value> {
+    use crate::protocol::types::ToolChoice;
+    match tc {
+        // 字符串形式本来就是合法的 OpenAI tool_choice（"none"/"auto"/"required"），原样透传
+        ToolChoice::None(_) => serde_json::to_value(tc).ok(),
+        ToolChoice::Object { r#type, function } => match r#type.as_str() {
+            "none" | "auto" | "required" => Some(serde_json::json!(r#type)),
+            "function" => function
+                .as_ref()
+                .map(|f| serde_json::json!({"type": "function", "function": {"name": f.name}})),
+            // 未知 type：不猜测语义，原样透传
+            _ => serde_json::to_value(tc).ok(),
+        },
+    }
 }
 
 /// 按 backend 的思考风格写入出站参数；客户端未传思考配置时不主动开启。
@@ -783,6 +805,59 @@ mod tests {
         let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
         assert_eq!(body["max_completion_tokens"], 123);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn tool_choice_object_none_is_normalized_to_string() {
+        // 客户端只给 {"type":"none"} → 序列化后不能带出 function:null（vllm 等按 spec 校验会拒绝）
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f1"}}],
+            "tool_choice": {"type": "none"}
+        });
+        let req = unified(raw);
+        let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert_eq!(body["tool_choice"], "none");
+        assert!(body["tool_choice"].get("function").is_none());
+    }
+
+    #[test]
+    fn tool_choice_string_none_passes_through() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f1"}}],
+            "tool_choice": "none"
+        });
+        let req = unified(raw);
+        let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert_eq!(body["tool_choice"], "none");
+        assert!(body["tool_choice"].is_string());
+    }
+
+    #[test]
+    fn tool_choice_function_object_is_preserved() {
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f1"}}],
+            "tool_choice": {"type": "function", "function": {"name": "f1"}}
+        });
+        let req = unified(raw);
+        let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert_eq!(body["tool_choice"]["type"], "function");
+        assert_eq!(body["tool_choice"]["function"]["name"], "f1");
+    }
+
+    #[test]
+    fn tool_choice_function_without_function_dropped() {
+        // {"type":"function"} 缺 function 对象 → 直接省略，避免发出 function:null
+        let raw = serde_json::json!({
+            "model": "virt", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f1"}}],
+            "tool_choice": {"type": "function"}
+        });
+        let req = unified(raw);
+        let body = to_request(&req, "m", UnknownParams::Auto, &target(ReasoningStyle::OpenAiEffort, ReasoningEcho::Drop));
+        assert!(body.get("tool_choice").is_none());
     }
 
     #[test]
