@@ -404,7 +404,7 @@ fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// 后台线程计算托盘菜单里的「模型名 + token 数」。
-/// 用单连接读，不调用 init_pool —— 后者会建 8 连接池并跑一遍迁移。
+/// 用单连接读，不调用 init_pool —— 后者会建 16 连接池并跑一遍迁移。
 fn compute_tray_entries() -> Vec<(String, String)> {
     let app_config = ai_gateway::config::AppConfig::load_or_default();
     match ai_gateway::db::tray_menu_entries(&app_config.resolved_db_path()) {
@@ -508,8 +508,12 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
         let system_proxy = ai_gateway::config::SystemProxy::detect();
         let http_client = system_proxy.apply_to_builder(
             // 不设 Client 级 timeout：流式长生成远超 request_timeout，
-            // 各请求点均单独设置 per-request timeout
+            // 各请求点均单独设置 per-request timeout。
+            // 连接池与独立服务模式同参数：高并发下复用 keep-idle 连接，减少 TCP+TLS 握手
             reqwest::Client::builder()
+                .pool_max_idle_per_host(64)
+                .pool_idle_timeout(std::time::Duration::from_secs(300))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
         ).build().expect("Failed to create HTTP client");
 
         let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
@@ -549,7 +553,7 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
         tracing::info!("Static dir: {:?}", static_dir);
         tracing::info!("Will serve frontend + API on port {}", admin_port);
 
-        let server = HttpServer::new(move || {
+        let mut server = HttpServer::new(move || {
             App::new()
                 // 与独立服务模式同源：只放行回环/Tauri origin（桌面端 webview 导航到
                 // http://127.0.0.1:{port}，属同源请求，这里只兜端口发现的跨源探测）
@@ -602,6 +606,11 @@ fn start_backend_server(app_handle: tauri::AppHandle) {
         })
         .bind(format!("{}:{}", host, admin_port))
         .expect("Failed to bind server");
+
+        // 桌面端用同一份 config.toml：设置了 [server].workers 就遵循，未设置走 actix 默认
+        if let Some(workers) = app_config.server.workers {
+            server = server.workers(workers);
+        }
 
         // bind 成功后才公布端口与就绪标记：端口被占时这里会 panic，
         // 全局仍保持 0，主线程就不会把一个"其实没起来"的服务当成可用后端去建窗口

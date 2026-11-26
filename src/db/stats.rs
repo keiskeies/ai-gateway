@@ -72,8 +72,86 @@ impl TimeRange {
     }
 }
 
-/// 生成时间范围内的连续周期 key（格式与 SQL 里 STRFTIME 一致），填补无数据周期造成的折线跳空。
-/// - hour 粒度按服务器本地时区（与聚合表达式 datetime(...,'localtime') 口径一致）；
+/// D 第二阶段：把秒级半开区间 [from, to) 拆成「整小时段 + 两个边界」的预聚合查询框架。
+///
+/// 小时表只按整小时桶聚合，而 from/to 是任意秒。直接全用小时表会丢失边界内的精度
+/// （例如 [14:37:12, 15:01:00) 会整桶吞掉 14:00 与 15:00 两小时的全部数据）。
+/// 做法：中间被完整覆盖的小时走 `request_stats_hourly`，首尾两个不完整小时回退明细表。
+/// 三个查询 UNION ALL 后语义与原来全程查明细完全一致。
+///
+/// 桶的时区口径与写端 upsert_hourly_aggregate 一致：本地时区 "%Y-%m-%d %H"。
+#[derive(Debug)]
+struct AggRange {
+    /// 整小时段下界（本地时区桶字符串，包含），None = 没有完整小时（区间不足一小时）
+    mid_from: Option<String>,
+    /// 整小时段上界（本地时区桶字符串，不包含）
+    mid_to: Option<String>,
+    /// 边界明细回退查询用的原边界（沿用调用方已规范化的 UTC from/to，原样透传）
+    from: Option<String>,
+    to: Option<String>,
+    /// 整小时段下界的 UTC 整秒字符串（created_at 可比，含），供前边界明细段作上界
+    core_from: Option<String>,
+    /// 整小时段上界的 UTC 整秒字符串（created_at 可比，不含），供后边界明细段作下界
+    core_to: Option<String>,
+}
+/// 对已规范化的 [from, to) 计算整小时段（本地时区桶口径，与写端一致）：
+/// - mid_from = from 进位到下一个整小时；mid_to = to 截断到当前整小时
+/// - 区间内不足一个完整小时（mid_from >= mid_to）→ 返回 None，调用方整体回退明细
+/// - 开放式范围（缺 from 或缺 to）没有安全边界 → None，回退明细
+/// 小时段边界同时给出两套表示：桶字符串（hourly 表 bucket 比较）与 UTC 整秒
+/// （明细 created_at 比较）——两者各司其职，混用会导致字符串比较失真（'T' vs ' '）。
+fn hourly_agg_range(from: Option<&str>, to: Option<&str>) -> AggRange {
+    use chrono::{DateTime, TimeZone, Timelike};
+    // 返回 (桶字符串, UTC 整秒)。把本地 naive 时刻解释回本地再转 UTC，防 DST 歧义：
+    // 时区跳变导致时刻不存在/重复时解析失败，整体回退明细（安全降级，只丢小时表加速）。
+    let ceil_hour = |s: &str| -> Option<(String, String)> {
+        let dt = DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&chrono::Local);
+        let base = dt.date_naive().and_hms_opt(dt.hour(), 0, 0).expect("hour");
+        let dt_naive = dt.naive_local();
+        let bucket_naive = if base == dt_naive { base } else { base + chrono::Duration::hours(1) };
+        let bucket = bucket_naive.format("%Y-%m-%d %H").to_string();
+        let utc = chrono::Local
+            .from_local_datetime(&bucket_naive)
+            .single()?
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string();
+        Some((bucket, utc))
+    };
+    let floor_hour = |s: &str| -> Option<(String, String)> {
+        let dt = DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&chrono::Local);
+        let naive = dt.date_naive().and_hms_opt(dt.hour(), 0, 0)?;
+        let bucket = naive.format("%Y-%m-%d %H").to_string();
+        let utc = chrono::Local
+            .from_local_datetime(&naive)
+            .single()?
+            .with_timezone(&chrono::Utc)
+            .format("%Y-%m-%dT%H:%M:%S+00:00")
+            .to_string();
+        Some((bucket, utc))
+    };
+    match (from, to) {
+        (Some(f), Some(t)) => {
+            let (from_ceil, to_floor) = (ceil_hour(f), floor_hour(t));
+            let (mid_from, mid_to, core_from, core_to) = match (from_ceil, to_floor) {
+                (Some((a, ca)), Some((b, cb))) if a < b => (Some(a), Some(b), Some(ca), Some(cb)),
+                _ => (None, None, None, None),
+            };
+            AggRange { mid_from, mid_to, core_from, core_to, from: Some(f.to_string()), to: Some(t.to_string()) }
+        }
+        // 开放式范围没有"完整小时段"可言，回退全程明细（与现状一致）
+        _ => AggRange {
+            mid_from: None,
+            mid_to: None,
+            core_from: None,
+            core_to: None,
+            from: from.map(str::to_string),
+            to: to.map(str::to_string),
+        },
+    }
+}
+
+/// 生成时间范围内的连续周期 key（格式与 SQL 里 STRFTIME 一致），填补无数据周期造成的折线跳空。/// - hour 粒度按服务器本地时区（与聚合表达式 datetime(...,'localtime') 口径一致）；
 /// - day/month/year 沿用 UTC（与聚合用裸 created_at 一致）。
 /// 上限 4000 点防失控；解析失败返回空（调用方回退为"仅有数据的周期"）。
 fn fill_periods(granularity: &str, from: &str, to: &str) -> Vec<String> {
@@ -129,6 +207,8 @@ fn fill_periods(granularity: &str, from: &str, to: &str) -> Vec<String> {
 /// 模型时间序列统计：按小时/日/月/年粒度聚合各模型的请求数与 Token 用量。
 /// - 提供 from/to 时以时间范围为准，范围内周期连续补齐（无数据的周期补 0 点）；否则查询所有有数据的周期，按 limit 截取最近 N 个。
 /// - hour 粒度按本地时区聚合（与热力图口径一致），其余粒度沿用 UTC 原始值。
+/// - hour 粒度读 `request_stats_hourly`（bucket 即本地时区整小时，与 STRFTIME(datetime(...,'localtime')) 同口径）；
+///   其余粒度走明细表。
 pub fn model_timeseries(
     pool: &DbPool,
     granularity: &str,
@@ -138,13 +218,240 @@ pub fn model_timeseries(
 ) -> AppResult<ModelTimeSeriesStats> {
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
 
-    // created_at 列：hour 粒度转本地时区，其余保持 UTC（裸列比较可走 idx_stats_created 索引）
-    let time_expr = match granularity {
-        "hour" => "datetime(rs.created_at, 'localtime')",
-        _ => "rs.created_at",
+    // 规范化边界（RFC3339 → UTC 秒精度）；任一存在即以范围为准，跳过 limit 截取
+    let range = TimeRange::parse(from, to)?;
+    let range_mode = !range.is_empty();
+
+    let all_data: Vec<ModelTimeSeriesPoint> = if granularity == "hour" {
+        model_timeseries_hourly(&conn, &range)?
+    } else {
+        model_timeseries_detail(&conn, granularity, from, to)?
     };
+
+    // 收集所有出现过的周期并排序：范围模式下按 from/to 生成连续周期（填补无数据小时的跳空），
+    // 生成失败时回退为"仅有数据的周期"；非范围模式取最近 limit 个。
+    let all_periods: BTreeSet<String> = all_data.iter().map(|p| p.period.clone()).collect();
+    let periods: Vec<String> = if range_mode {
+        let filled = match (&range.from, &range.to) {
+            (Some(f), Some(t)) => fill_periods(granularity, f, t),
+            _ => vec![],
+        };
+        if filled.is_empty() {
+            all_periods.iter().cloned().collect()
+        } else {
+            // 以连续序列为骨架，并保留序列之外仍出现过的周期（如 to 之后的部分数据，
+            // 理论上已被 WHERE 过滤，这里仅作兜底，避免静默丢数据）
+            let mut set: BTreeSet<String> = filled.into_iter().collect();
+            set.extend(all_periods);
+            set.into_iter().collect()
+        }
+    } else {
+        all_periods
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    };
+    let period_set: HashSet<&str> = periods.iter().map(|s| s.as_str()).collect();
+
+    // 只保留选中周期内的数据
+    let data: Vec<ModelTimeSeriesPoint> = all_data
+        .into_iter()
+        .filter(|p| period_set.contains(p.period.as_str()))
+        .collect();
+
+    Ok(ModelTimeSeriesStats {
+        granularity: granularity.to_string(),
+        periods,
+        data,
+    })
+}
+
+/// hour 粒度的实现：数据来自 `request_stats_hourly`，只在完整小时段命中；
+/// 首尾两个不完整小时回退明细（created_at 与 UTC 整秒比较），三段 UNION ALL 后
+/// 按 (period, model_id) 归组——与查询明细的分桶口径逐字段一致（query_metrics 同构）。
+/// bucket 列即本地时区整小时字符串，明细段的 period 用
+/// STRFTIME('%Y-%m-%d %H', datetime(rs.created_at,'localtime')) 生成，两段对齐。
+fn model_timeseries_hourly(
+    conn: &rusqlite::Connection,
+    range: &TimeRange,
+) -> AppResult<Vec<ModelTimeSeriesPoint>> {
+    let agg = hourly_agg_range(range.from.as_deref(), range.to.as_deref());
+    // 列序（三段严格一致）：
+    // 0 period / 1 model_id / 2 requests / 3 token_input / 4 token_output
+    // 5 latency_ms_sum / 6 failed_requests / 7 stream_requests / 8 ttft_ms_sum / 9 ttft_samples
+    // 10 cache_read / 11 cache_write / 12 cost_sum / 13 priced_requests
+    let hourly_select = |extra: &str| -> String {
+        format!(
+            "SELECT
+                h.bucket AS period,
+                COALESCE(b.model_id, 'unknown') AS model_id,
+                h.requests,
+                h.token_input,
+                h.token_output,
+                h.latency_ms_sum,
+                h.failed_requests,
+                h.stream_requests,
+                h.ttft_ms_sum,
+                h.ttft_samples,
+                h.cache_read_tokens,
+                h.cache_write_tokens,
+                h.cost_sum,
+                h.priced_requests
+             FROM request_stats_hourly h
+             LEFT JOIN backends b ON b.id = h.backend_id
+             WHERE 1=1{extra}"
+        )
+    };
+    let detail_select = |extra: &str| -> String {
+        format!(
+            "SELECT
+                STRFTIME('%Y-%m-%d %H', datetime(rs.created_at, 'localtime')) AS period,
+                COALESCE(b.model_id, 'unknown') AS model_id,
+                COUNT(*) AS requests,
+                COALESCE(SUM(rs.token_input), 0) AS token_input,
+                COALESCE(SUM(rs.token_output), 0) AS token_output,
+                COALESCE(SUM(rs.latency_ms), 0) AS latency_ms_sum,
+                SUM(CASE WHEN NOT (rs.status_code >= 200 AND rs.status_code < 300) THEN 1 ELSE 0 END) AS failed_requests,
+                SUM(rs.is_stream) AS stream_requests,
+                COALESCE(SUM(rs.ttft_ms), 0) AS ttft_ms_sum,
+                COUNT(rs.ttft_ms) AS ttft_samples,
+                COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(rs.cache_write_tokens), 0) AS cache_write_tokens,
+                SUM(rs.cost) AS cost_sum,
+                COUNT(rs.cost) AS priced_requests
+             FROM request_stats rs
+             LEFT JOIN backends b ON b.id = rs.backend_id
+             WHERE 1=1{extra}
+             GROUP BY period, model_id"
+        )
+    };
+    let (sql, params): (String, Vec<String>) =
+        if let (Some(mf), Some(mt), Some(cf), Some(ct), Some(f), Some(t)) =
+            (&agg.mid_from, &agg.mid_to, &agg.core_from, &agg.core_to, &agg.from, &agg.to)
+        {
+            (
+                format!(
+                    "SELECT
+                        period, model_id,
+                        SUM(requests) AS requests,
+                        SUM(token_input) AS token_input,
+                        SUM(token_output) AS token_output,
+                        SUM(latency_ms_sum) AS latency_ms_sum,
+                        SUM(failed_requests) AS failed_requests,
+                        SUM(stream_requests) AS stream_requests,
+                        SUM(ttft_ms_sum) AS ttft_ms_sum,
+                        SUM(ttft_samples) AS ttft_samples,
+                        SUM(cache_read_tokens) AS cache_read_tokens,
+                        SUM(cache_write_tokens) AS cache_write_tokens,
+                        SUM(cost_sum) AS cost_sum,
+                        SUM(priced_requests) AS priced_requests
+                     FROM (
+                        {}
+                        UNION ALL
+                        {}
+                        UNION ALL
+                        {}
+                     ) u
+                     GROUP BY period, model_id",
+                    hourly_select(" AND h.bucket >= ?1 AND h.bucket < ?2"),
+                    detail_select(" AND rs.created_at >= ?3 AND rs.created_at < ?4"),
+                    detail_select(" AND rs.created_at >= ?5 AND rs.created_at < ?6"),
+                ),
+                vec![mf.clone(), mt.clone(), f.clone(), cf.clone(), ct.clone(), t.clone()],
+            )
+        } else {
+            // 开放式范围或区间不足一小时：全程明细（与 D 之前一致）
+            let cond = match (&agg.from, &agg.to) {
+                (Some(_), Some(_)) => " AND rs.created_at >= ?1 AND rs.created_at < ?2".to_string(),
+                (Some(_), None) | (None, Some(_)) => " AND rs.created_at >= ?1".to_string(),
+                (None, None) => String::new(),
+            };
+            let params: Vec<String> = agg.from.iter().chain(agg.to.iter()).cloned().collect();
+            (
+                format!(
+                    "SELECT
+                        period, model_id,
+                        SUM(requests) AS requests,
+                        SUM(token_input) AS token_input,
+                        SUM(token_output) AS token_output,
+                        SUM(latency_ms_sum) AS latency_ms_sum,
+                        SUM(failed_requests) AS failed_requests,
+                        SUM(stream_requests) AS stream_requests,
+                        SUM(ttft_ms_sum) AS ttft_ms_sum,
+                        SUM(ttft_samples) AS ttft_samples,
+                        SUM(cache_read_tokens) AS cache_read_tokens,
+                        SUM(cache_write_tokens) AS cache_write_tokens,
+                        SUM(cost_sum) AS cost_sum,
+                        SUM(priced_requests) AS priced_requests
+                     FROM (
+                        {}
+                     ) u
+                     GROUP BY period, model_id",
+                    detail_select(&cond),
+                ),
+                params,
+            )
+        };
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(params.iter().map(|s| s.as_str())),
+        |r| {
+            let token_input: i64 = r.get(3)?;
+            let cache_read_tokens: i64 = r.get(10)?;
+            let cache_write_tokens: i64 = r.get(11)?;
+            let latency_sum: f64 = r.get(5)?;
+            let requests: i64 = r.get(2)?;
+            let ttft_sum: f64 = r.get(8)?;
+            let ttft_samples: i64 = r.get(9)?;
+            let token_output: i64 = r.get(4)?;
+            Ok(ModelTimeSeriesPoint {
+                period: r.get::<_, String>(0)?,
+                model_id: r.get::<_, String>(1)?,
+                requests,
+                token_input,
+                token_output,
+                avg_latency_ms: if requests > 0 { latency_sum / requests as f64 } else { 0.0 },
+                failed_requests: r.get::<_, i64>(6)?,
+                stream_requests: r.get::<_, i64>(7)?,
+                avg_ttft_ms: if ttft_samples > 0 { ttft_sum / ttft_samples as f64 } else { 0.0 },
+                output_speed_tps: if latency_sum - ttft_sum > 0.0 {
+                    token_output as f64 * 1000.0 / (latency_sum - ttft_sum)
+                } else {
+                    0.0
+                },
+                cache_read_tokens,
+                cache_write_tokens,
+                // 新增输入 = 总输入 − 缓存读 − 缓存写（saturing 防异常数据）
+                fresh_input_tokens: (token_input - cache_read_tokens - cache_write_tokens).max(0),
+                total_cost: r.get(12)?,
+                priced_requests: r.get::<_, i64>(13)?,
+                ttft_samples,
+            })
+        },
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// day/month/year 粒度的实现：沿用原明细 SQL（created_at 裸列比较可走索引）。
+/// hour 原本也走这里，被 `model_timeseries_hourly` 替代；两者输出列序一致。
+fn model_timeseries_detail(
+    conn: &rusqlite::Connection,
+    granularity: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> AppResult<Vec<ModelTimeSeriesPoint>> {
+    let time_expr = "rs.created_at"; // 非 hour 粒度保持 UTC，裸列比较走 idx_stats_created
     let fmt = match granularity {
-        "hour" => "%Y-%m-%d %H",
         "day" => "%Y-%m-%d",
         "month" => "%Y-%m",
         "year" => "%Y",
@@ -154,17 +461,8 @@ pub fn model_timeseries(
             ))
         }
     };
-
-    // 规范化边界（RFC3339 → UTC 秒精度）；任一存在即以范围为准，跳过 limit 截取
     let range = TimeRange::parse(from, to)?;
-    let range_mode = !range.is_empty();
 
-    // 拼接 time_expr（静态片段 + 粒度白名单，无注入风险）
-    // 性能指标口径：
-    // - avg_ttft_ms：仅统计有 ttft 的行（AVG 自动跳过 NULL）
-    // - output_speed_tps：生成阶段口径 = SUM(token_output)*1000 / (SUM(latency) - SUM(ttft))，
-    //   非流式行 ttft 为空、按 0 计（即全耗时视为生成阶段）
-    // - failed_requests / stream_requests：失败数与流式数
     let sql = format!(
         r#"
         SELECT
@@ -226,53 +524,11 @@ pub fn model_timeseries(
             })
         },
     )?;
-
-    let mut all_data = Vec::new();
+    let mut out = Vec::new();
     for row in rows {
-        all_data.push(row?);
+        out.push(row?);
     }
-
-    // 收集所有出现过的周期并排序：范围模式下按 from/to 生成连续周期（填补无数据小时的跳空），
-    // 生成失败时回退为"仅有数据的周期"；非范围模式取最近 limit 个。
-    let all_periods: BTreeSet<String> = all_data.iter().map(|p| p.period.clone()).collect();
-    let periods: Vec<String> = if range_mode {
-        let filled = match (&range.from, &range.to) {
-            (Some(f), Some(t)) => fill_periods(granularity, f, t),
-            _ => vec![],
-        };
-        if filled.is_empty() {
-            all_periods.iter().cloned().collect()
-        } else {
-            // 以连续序列为骨架，并保留序列之外仍出现过的周期（如 to 之后的部分数据，
-            // 理论上已被 WHERE 过滤，这里仅作兜底，避免静默丢数据）
-            let mut set: BTreeSet<String> = filled.into_iter().collect();
-            set.extend(all_periods);
-            set.into_iter().collect()
-        }
-    } else {
-        all_periods
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    };
-    let period_set: HashSet<&str> = periods.iter().map(|s| s.as_str()).collect();
-
-    // 只保留选中周期内的数据
-    let data: Vec<ModelTimeSeriesPoint> = all_data
-        .into_iter()
-        .filter(|p| period_set.contains(p.period.as_str()))
-        .collect();
-
-    Ok(ModelTimeSeriesStats {
-        granularity: granularity.to_string(),
-        periods,
-        data,
-    })
+    Ok(out)
 }
 
 /// 错误分析：非 2xx 请求按 error_type 聚合（历史悬挂/缺失归入 Unknown）。
@@ -396,13 +652,21 @@ pub fn latency_percentiles(pool: &DbPool, from: Option<&str>, to: Option<&str>) 
 }
 
 pub fn record(pool: &DbPool, stat: &RequestStat) -> AppResult<()> {
-    let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
-    conn.execute("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, cache_savings, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
-        rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
+    let mut conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
+    // 与 record_batch 同口径：明细 + 预聚合小时表同一事务双写。
+    // 读端（overview / proxy_stats / platform_stats / model_summaries）已切到小时表，
+    // 任何不经 record_batch 的单行写路径也必须同步维护小时表，否则报表会漏数据。
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare_cached("INSERT INTO request_stats (proxy_id, route_id, backend_id, status_code, latency_ms, token_input, token_output, error_type, created_at, ttft_ms, cache_read_tokens, cache_write_tokens, is_stream, api_key_id, cost, cache_savings, request_id, replayed_from, path, credits) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)")?;
+        stmt.execute(rusqlite::params![stat.proxy_id, stat.route_id, stat.backend_id, stat.status_code,
             stat.latency_ms, stat.token_input, stat.token_output, stat.error_type, stat.created_at,
             stat.ttft_ms, stat.cache_read_tokens, stat.cache_write_tokens, stat.is_stream as i64,
             stat.api_key_id, stat.cost, stat.cache_savings, stat.request_id, stat.replayed_from,
             stat.path, stat.credits])?;
+    }
+    upsert_hourly_aggregate(&tx, std::slice::from_ref(stat))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -666,6 +930,10 @@ pub fn record_batch(
                 s.path, s.credits])?;
         }
     }
+    // 预聚合小时表：与明细同一事务双写（详见 V41 迁移注释；读端暂未切换，
+    // 表只增数据不读——两阶段里第一阶段先保证数据正确可查）。
+    // 桶按服务器本地时区（与 model_timeseries hour 粒度和热度图口径一致）。
+    upsert_hourly_aggregate(&tx, stats)?;
     {
         let mut stmt = tx.prepare_cached(
             "INSERT INTO request_attempts (request_id, attempt_no, backend_id, platform_id, model_id, status_code, error_type, error_message, latency_ms, started_at, forward_url, nonce)
@@ -705,6 +973,58 @@ pub fn record_batch(
         }
     }
     tx.commit()?;
+    Ok(())
+}
+
+/// 把一批明细累加进 `request_stats_hourly`（与明细同一事务，失败即整体回滚）。
+/// 每行一个 UPSERT：同桶同后端只一行，`requests` 等计数累加。
+/// cost 用 SUM 语义：未定价（None）不加进 cost_sum，但请求本身仍计数（priced_requests 单独记）。
+fn upsert_hourly_aggregate(tx: &rusqlite::Transaction, stats: &[RequestStat]) -> AppResult<()> {
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO request_stats_hourly
+             (bucket, proxy_id, route_id, backend_id,
+              requests, failed_requests, stream_requests,
+              token_input, token_output, cache_read_tokens, cache_write_tokens,
+              latency_ms_sum, ttft_ms_sum, ttft_samples,
+              cost_sum, priced_requests, cache_savings_sum, cache_savings_samples)
+         VALUES (?1,?2,?3,?4, ?5,?6,?7, ?8,?9,?10,?11, ?12,?13,?14, ?15,?16,?17,?18)
+         ON CONFLICT(bucket, proxy_id, route_id, backend_id) DO UPDATE SET
+             requests          = requests + excluded.requests,
+             failed_requests   = failed_requests + excluded.failed_requests,
+             stream_requests   = stream_requests + excluded.stream_requests,
+             token_input       = token_input + excluded.token_input,
+             token_output      = token_output + excluded.token_output,
+             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
+             cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+             latency_ms_sum    = latency_ms_sum + excluded.latency_ms_sum,
+             ttft_ms_sum       = ttft_ms_sum + excluded.ttft_ms_sum,
+             ttft_samples      = ttft_samples + excluded.ttft_samples,
+             cost_sum          = CASE WHEN excluded.cost_sum IS NULL
+                                      THEN cost_sum ELSE COALESCE(cost_sum, 0) + excluded.cost_sum END,
+             priced_requests   = priced_requests + excluded.priced_requests,
+             cache_savings_sum = cache_savings_sum + excluded.cache_savings_sum,
+             cache_savings_samples = cache_savings_samples + excluded.cache_savings_samples",
+    )?;
+    for s in stats {
+        // 桶：RFC3339 UTC → 服务器本地时区，取整小时（与 model_timeseries 的 datetime(...,'localtime') 同口径）
+        let bucket = match chrono::DateTime::parse_from_rfc3339(&s.created_at) {
+            Ok(dt) => dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H").to_string(),
+            // 格式非法的旧行：进不了任何桶直接跳过，不拖累整批写入
+            Err(_) => continue,
+        };
+        let failed = if s.status_code >= 200 && s.status_code < 300 { 0i64 } else { 1i64 };
+        stmt.execute(rusqlite::params![
+            bucket, s.proxy_id, s.route_id, s.backend_id,
+            1i64, failed, s.is_stream as i64,
+            s.token_input.unwrap_or(0), s.token_output.unwrap_or(0),
+            s.cache_read_tokens.unwrap_or(0), s.cache_write_tokens.unwrap_or(0),
+            s.latency_ms, s.ttft_ms.unwrap_or(0),
+            if s.ttft_ms.is_some() { 1i64 } else { 0i64 },
+            s.cost, if s.cost.is_some() { 1i64 } else { 0i64 },
+            s.cache_savings.unwrap_or(0.0),
+            if s.cache_savings.is_some() { 1i64 } else { 0i64 },
+        ])?;
+    }
     Ok(())
 }
 
@@ -873,64 +1193,50 @@ pub fn model_summaries(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let range = TimeRange::parse(from, to)?;
 
-    let sql = r#"
-        SELECT
-            COALESCE(b.model_id, 'unknown') AS model_id,
-            COUNT(*)                        AS requests,
-            SUM(CASE WHEN rs.status_code >= 200 AND rs.status_code < 300 THEN 1 ELSE 0 END) AS success_requests,
-            SUM(CASE WHEN NOT (rs.status_code >= 200 AND rs.status_code < 300) THEN 1 ELSE 0 END) AS failed_requests,
-            SUM(rs.is_stream)               AS stream_requests,
-            COALESCE(SUM(rs.token_input), 0)  AS token_input,
-            COALESCE(SUM(rs.token_output), 0) AS token_output,
-            COALESCE(AVG(rs.latency_ms), 0)   AS avg_latency_ms,
-            COALESCE(AVG(rs.ttft_ms), 0)      AS avg_ttft_ms,
-            CASE WHEN SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)) > 0
-                 THEN COALESCE(SUM(rs.token_output), 0) * 1000.0 / (SUM(rs.latency_ms) - SUM(COALESCE(rs.ttft_ms, 0)))
-                 ELSE 0 END                   AS output_speed_tps,
-            COALESCE(SUM(rs.cache_read_tokens), 0) AS cache_read_tokens,
-            COALESCE(SUM(rs.cache_write_tokens), 0) AS cache_write_tokens,
-            SUM(rs.cost)                        AS total_cost,
-            SUM(rs.cache_savings)               AS cache_savings,
-            COUNT(rs.cost)                      AS priced_requests
-        FROM request_stats rs
-        LEFT JOIN backends b ON rs.backend_id = b.id
-        WHERE 1=1
-          AND (?1 IS NULL OR rs.created_at >= ?1)
-          AND (?2 IS NULL OR rs.created_at <  ?2)
-        GROUP BY model_id
-        ORDER BY requests DESC
-    "#;
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(rusqlite::params![range.from, range.to], |r| {
-        let token_input: i64 = r.get(5)?;
-        let cache_read_tokens: i64 = r.get(10)?;
-        let cache_write_tokens: i64 = r.get(11)?;
-        // 新增输入 = 总输入 − 缓存读 − 缓存写（saturating 防御异常数据）
-        let fresh_input = (token_input - cache_read_tokens - cache_write_tokens).max(0);
-        Ok(ModelSummary {
-            model_id: r.get(0)?,
-            requests: r.get(1)?,
-            success_requests: r.get(2)?,
-            failed_requests: r.get(3)?,
-            stream_requests: r.get(4)?,
-            token_input,
-            token_output: r.get(6)?,
-            avg_latency_ms: r.get(7)?,
-            avg_ttft_ms: r.get(8)?,
-            output_speed_tps: r.get(9)?,
-            cache_read_tokens,
-            fresh_input_tokens: fresh_input,
-            // CC Switch 口径：命中 / (命中 + 新增输入)
-            cache_hit_rate: {
-                let denominator = cache_read_tokens + fresh_input;
-                if denominator > 0 { cache_read_tokens as f64 / denominator as f64 * 100.0 } else { 0.0 }
-            },
-            total_cost: r.get(12)?,
-            cache_savings: r.get(13)?,
-            priced_requests: r.get(14)?,
+    // D 读端第二阶段：hourly 三段 UNION；维度 = model_id（经 backends 关联）。
+    // hourly 段与 detail 段用同一表达式（两侧都 JOIN backends，别名分别为 h/rs）
+    let rows = query_dim_stats(
+        &conn,
+        range.from.as_deref(),
+        range.to.as_deref(),
+        "COALESCE(b.model_id, 'unknown')",
+        "COALESCE(b.model_id, 'unknown')",
+        "LEFT JOIN backends b ON b.id = h.backend_id",
+        "LEFT JOIN backends b ON b.id = rs.backend_id",
+        None,
+    );
+
+    let mut summaries: Vec<ModelSummary> = rows
+        .into_iter()
+        .map(|(model_id, row)| {
+            let fresh_input = (row.token_input - row.cache_read_tokens - row.cache_write_tokens).max(0);
+            ModelSummary {
+                model_id,
+                requests: row.requests,
+                success_requests: row.success,
+                failed_requests: row.requests - row.success,
+                stream_requests: row.stream_requests,
+                token_input: row.token_input,
+                token_output: row.token_output,
+                avg_latency_ms: row.avg_latency_ms,
+                avg_ttft_ms: row.avg_ttft_ms,
+                output_speed_tps: row.output_speed_tps,
+                cache_read_tokens: row.cache_read_tokens,
+                fresh_input_tokens: fresh_input,
+                cache_hit_rate: {
+                    let denominator = row.cache_read_tokens + fresh_input;
+                    if denominator > 0 { row.cache_read_tokens as f64 / denominator as f64 * 100.0 } else { 0.0 }
+                },
+                total_cost: row.total_cost,
+                cache_savings: row.cache_savings,
+                priced_requests: row.priced_requests,
+            }
         })
-    })?;
-    Ok(rows.filter_map(|x| x.ok()).collect())
+        .collect();
+
+    // 排序：旧 SQL 按 requests DESC
+    summaries.sort_by(|a, b| b.requests.cmp(&a.requests));
+    Ok(summaries)
 }
 
 /// 追加一个"列 = ?"精确条件；值为 None 或空串时不追加。
@@ -1576,69 +1882,25 @@ pub fn overview(
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let range = TimeRange::parse(from, to)?;
 
-    // 主体统计：全部带 [from, to) 过滤
-    let count = |extra: &str| -> i64 {
-        conn.query_row(
-            &format!("SELECT COUNT(*) FROM request_stats WHERE 1=1{extra}{}", range.and("created_at")),
-            rusqlite::params_from_iter(range.params()),
-            |r| r.get(0),
-        ).unwrap_or(0)
-    };
-    let total_requests = count("");
-    let success_count = count(" AND status_code >= 200 AND status_code < 300");
-    let avg_latency: f64 = conn.query_row(
-        &format!("SELECT COALESCE(AVG(latency_ms),0) FROM request_stats{}", range.where_clause("created_at")),
-        rusqlite::params_from_iter(range.params()),
-        |r| r.get(0),
-    ).unwrap_or(0.0);
-    let total_token_input: i64 = conn.query_row(
-        &format!("SELECT COALESCE(SUM(token_input),0) FROM request_stats WHERE token_input IS NOT NULL{}", range.and("created_at")),
-        rusqlite::params_from_iter(range.params()),
-        |r| r.get(0),
-    ).unwrap_or(0);
-    let total_token_output: i64 = conn.query_row(
-        &format!("SELECT COALESCE(SUM(token_output),0) FROM request_stats WHERE token_output IS NOT NULL{}", range.and("created_at")),
-        rusqlite::params_from_iter(range.params()),
-        |r| r.get(0),
-    ).unwrap_or(0);
-    // 全局首字 / 速度 / 缓存命中（KPI 副行展示；口径与时序聚合一致）
-    let (avg_ttft, avg_speed, total_cache_read, total_cache_write, total_cost, total_cache_savings, priced_requests):
-        (f64, f64, i64, i64, Option<f64>, Option<f64>, i64) = conn.query_row(
-        &format!(
-            r#"SELECT
-                COALESCE(AVG(ttft_ms), 0) AS avg_ttft,
-                CASE WHEN SUM(latency_ms) - SUM(COALESCE(ttft_ms, 0)) > 0
-                     THEN COALESCE(SUM(token_output), 0) * 1000.0 / (SUM(latency_ms) - SUM(COALESCE(ttft_ms, 0)))
-                     ELSE 0 END AS avg_speed,
-                COALESCE(SUM(cache_read_tokens), 0) AS total_cache_read,
-                COALESCE(SUM(cache_write_tokens), 0) AS total_cache_write,
-                SUM(cost) AS total_cost,
-                SUM(cache_savings) AS total_cache_savings,
-                COUNT(cost) AS priced_requests
-             FROM request_stats{}"#,
-            range.where_clause("created_at")
-        ),
-        rusqlite::params_from_iter(range.params()),
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
-    ).unwrap_or((0.0, 0.0, 0, 0, None, None, 0));
+    // 主体统计：全部带 [from, to) 过滤；D 第二阶段起整小时部分走 request_stats_hourly，
+    // 两个边界小时回退明细，UNION ALL 后口径与全程查明细一致（见 query_metrics）。
+    let m = query_metrics(&conn, range.from.as_deref(), range.to.as_deref());
+    let total_requests = m.requests;
+    let success_count = m.success;
+    let avg_latency = m.avg_latency_ms;
+    let total_token_input = m.token_input;
+    let total_token_output = m.token_output;
+    let (avg_ttft, avg_speed, total_cache_read, total_cache_write, total_cost, total_cache_savings, priced_requests) =
+        (m.avg_ttft_ms, m.avg_speed_tps, m.cache_read_tokens, m.cache_write_tokens, m.cost, m.cache_savings, m.priced_requests);
 
     // 对比周期：指定范围时对比等长的前一段区间；未指定时保持昨日口径
     match prev_range(&range) {
         Some(prev) => {
-            let requests_prev_period: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM request_stats{}", prev.where_clause("created_at")),
-                rusqlite::params_from_iter(prev.params()),
-                |r| r.get(0),
-            ).unwrap_or(0);
-            let avg_latency_prev_period: f64 = conn.query_row(
-                &format!("SELECT COALESCE(AVG(latency_ms),0) FROM request_stats{}", prev.where_clause("created_at")),
-                rusqlite::params_from_iter(prev.params()),
-                |r| r.get(0),
-            ).unwrap_or(0.0);
+            let prev_m = query_metrics(&conn, prev.from.as_deref(), prev.to.as_deref());
             Ok(build_overview(
                 &conn, total_requests, success_count, avg_latency,
                 total_token_input, total_token_output,
-                total_connections_active, requests_prev_period, avg_latency_prev_period,
+                total_connections_active, prev_m.requests, prev_m.avg_latency_ms,
                 avg_ttft, avg_speed, total_cache_read, total_cache_write,
                 total_cost, total_cache_savings, priced_requests,
             ))
@@ -1662,6 +1924,359 @@ pub fn overview(
             ))
         }
     }
+}
+
+/// 一个时间范围内的全量聚合读数（overview 主体 + 对比周期共用）。
+/// D 第二阶段：整小时桶从 `request_stats_hourly` 取，两个边界小时回退 `request_stats` 明细，
+/// 三段 UNION ALL 后的结果与"全程查明细"逐字段等价（cost/cache_savings 的 NULL 语义保留：
+/// 无样本数时返回 None，不是 0）。
+struct Metrics {
+    requests: i64,
+    success: i64,
+    avg_latency_ms: f64,
+    token_input: i64,
+    token_output: i64,
+    avg_ttft_ms: f64,
+    ttft_samples: i64,
+    avg_speed_tps: f64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    cost: Option<f64>,
+    cache_savings: Option<f64>,
+    priced_requests: i64,
+}
+
+fn query_metrics(conn: &rusqlite::Connection, from: Option<&str>, to: Option<&str>) -> Metrics {
+    let agg = hourly_agg_range(from, to);
+    // 三段字段严格同构（列序不可乱）：
+    // 0 requests / 1 failed / 2 stream / 3 token_input / 4 token_output
+    // 5 cache_read / 6 cache_write / 7 latency_sum / 8 ttft_sum / 9 ttft_samples
+    // 10 cost_sum(REAL NULL) / 11 priced / 12 savings_sum / 13 savings_samples
+    let hourly_select = |extra: &str| -> String {
+        format!(
+            "SELECT requests, failed_requests, stream_requests,
+                    token_input, token_output, cache_read_tokens, cache_write_tokens,
+                    latency_ms_sum, ttft_ms_sum, ttft_samples,
+                    cost_sum, priced_requests, cache_savings_sum, cache_savings_samples
+             FROM request_stats_hourly
+             WHERE 1=1{extra}"
+        )
+    };
+    let detail_select = |extra: &str| -> String {
+        format!(
+            "SELECT COUNT(*) AS requests,
+                    SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 0 ELSE 1 END) AS failed_requests,
+                    SUM(is_stream) AS stream_requests,
+                    COALESCE(SUM(token_input), 0) AS token_input, COALESCE(SUM(token_output), 0) AS token_output,
+                    COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                    COALESCE(SUM(latency_ms), 0) AS latency_ms_sum, COALESCE(SUM(ttft_ms), 0) AS ttft_ms_sum, COUNT(ttft_ms) AS ttft_samples,
+                    SUM(cost) AS cost_sum, COUNT(cost) AS priced_requests,
+                    COALESCE(SUM(cache_savings), 0) AS cache_savings_sum, COUNT(cache_savings) AS cache_savings_samples
+             FROM request_stats
+             WHERE 1=1{extra}"
+        )
+    };
+    let (sql, params): (String, Vec<String>) = if let (Some(mf), Some(mt), Some(cf), Some(ct), Some(f), Some(t)) =
+        (&agg.mid_from, &agg.mid_to, &agg.core_from, &agg.core_to, &agg.from, &agg.to)
+    {
+        // 整小时段 [bucket=mf, mt)（hourly 表桶字符串）+ 前边界 [f, cf) + 后边界 [ct, t)
+        // （明细 created_at 与 UTC 整秒比较）。参数序全局：?1=mf ?2=mt ?3=f ?4=cf ?5=ct ?6=t
+        // 三段子查询必须逐列同名（UNION 取第一段列名）——外层全部按小时表列名引用。
+        let sql = format!(
+            "SELECT
+                SUM(u.requests) AS requests,
+                SUM(u.requests) - COALESCE(SUM(u.failed_requests), 0) AS success,
+                CASE WHEN SUM(u.requests) > 0 THEN COALESCE(SUM(u.latency_ms_sum), 0) * 1.0 / SUM(u.requests) ELSE 0 END AS avg_latency_ms,
+                COALESCE(SUM(u.token_input), 0), COALESCE(SUM(u.token_output), 0),
+                COALESCE(SUM(u.cache_read_tokens), 0), COALESCE(SUM(u.cache_write_tokens), 0),
+                CASE WHEN SUM(u.ttft_samples) > 0 THEN COALESCE(SUM(u.ttft_ms_sum), 0) * 1.0 / SUM(u.ttft_samples) ELSE 0 END AS avg_ttft_ms,
+                COALESCE(SUM(u.ttft_samples), 0) AS ttft_samples,
+                CASE WHEN SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum), 0) > 0
+                     THEN COALESCE(SUM(u.token_output), 0) * 1000.0 / (SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum), 0))
+                     ELSE 0 END AS avg_speed_tps,
+                COALESCE(SUM(u.cache_read_tokens), 0), COALESCE(SUM(u.cache_write_tokens), 0),
+                SUM(u.cost_sum) AS total_cost,
+                COALESCE(SUM(u.priced_requests), 0) AS priced_requests,
+                SUM(u.cache_savings_sum) AS total_savings,
+                COALESCE(SUM(u.cache_savings_samples), 0) AS savings_samples
+             FROM (
+                {}
+                UNION ALL
+                {}
+                UNION ALL
+                {}
+             ) u",
+            hourly_select(" AND bucket >= ?1 AND bucket < ?2"),
+            detail_select(" AND created_at >= ?3 AND created_at < ?4"),
+            detail_select(" AND created_at >= ?5 AND created_at < ?6"),
+        );
+        (sql, vec![mf.clone(), mt.clone(), f.clone(), cf.clone(), ct.clone(), t.clone()])
+    } else {
+        // 开放式范围（无 from/to 任一）或区间不足一小时：全程明细，与 D 之前逐字段等价。
+        // 条件按边界存在与否动态拼：无 from 则去掉 >=，无 to 则去掉 <。
+        let cond = match (agg.from.as_ref(), agg.to.as_ref()) {
+            (Some(_), Some(_)) => " AND created_at >= ?1 AND created_at < ?2".to_string(),
+            (Some(_), None) => " AND created_at >= ?1".to_string(),
+            (None, Some(_)) => " AND created_at < ?1".to_string(),
+            (None, None) => String::new(),
+        };
+        let sql = format!(
+            "SELECT
+                SUM(u.requests) AS requests,
+                SUM(u.requests) - COALESCE(SUM(u.failed_requests), 0) AS success,
+                CASE WHEN SUM(u.requests) > 0 THEN COALESCE(SUM(u.latency_ms_sum), 0) * 1.0 / SUM(u.requests) ELSE 0 END AS avg_latency_ms,
+                COALESCE(SUM(u.token_input), 0), COALESCE(SUM(u.token_output), 0),
+                COALESCE(SUM(u.cache_read_tokens), 0), COALESCE(SUM(u.cache_write_tokens), 0),
+                CASE WHEN SUM(u.ttft_samples) > 0 THEN COALESCE(SUM(u.ttft_ms_sum), 0) * 1.0 / SUM(u.ttft_samples) ELSE 0 END AS avg_ttft_ms,
+                COALESCE(SUM(u.ttft_samples), 0) AS ttft_samples,
+                CASE WHEN SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum), 0) > 0
+                     THEN COALESCE(SUM(u.token_output), 0) * 1000.0 / (SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum), 0))
+                     ELSE 0 END AS avg_speed_tps,
+                COALESCE(SUM(u.cache_read_tokens), 0), COALESCE(SUM(u.cache_write_tokens), 0),
+                SUM(u.cost_sum) AS total_cost,
+                COALESCE(SUM(u.priced_requests), 0) AS priced_requests,
+                SUM(u.cache_savings_sum) AS total_savings,
+                COALESCE(SUM(u.cache_savings_samples), 0) AS savings_samples
+             FROM (
+                SELECT COUNT(*) AS requests,
+                       SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 0 ELSE 1 END) AS failed_requests,
+                       SUM(is_stream) AS stream_requests,
+                       COALESCE(SUM(token_input), 0) AS token_input, COALESCE(SUM(token_output), 0) AS token_output,
+                       COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                       COALESCE(SUM(latency_ms), 0) AS latency_ms_sum, COALESCE(SUM(ttft_ms), 0) AS ttft_ms_sum, COUNT(ttft_ms) AS ttft_samples,
+                       SUM(cost) AS cost_sum, COUNT(cost) AS priced_requests,
+                       COALESCE(SUM(cache_savings), 0) AS cache_savings_sum, COUNT(cache_savings) AS cache_savings_samples
+                FROM request_stats
+                WHERE 1=1{} 
+             ) u",
+            cond
+        );
+        let params: Vec<String> = agg.from.iter().chain(agg.to.iter()).cloned().collect();
+        (sql, params)
+    };
+
+    let r = conn
+        .query_row(&sql, rusqlite::params_from_iter(params.iter().map(|s| s.as_str())), |row| {
+            Ok((
+                row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?,
+                row.get::<_, i64>(3)?, row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?, row.get::<_, i64>(6)?,
+                row.get::<_, f64>(7)?, row.get::<_, i64>(8)?,
+                row.get::<_, f64>(9)?, row.get::<_, i64>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, Option<f64>>(12)?, row.get::<_, i64>(13)?,
+                row.get::<_, Option<f64>>(14)?, row.get::<_, i64>(15)?,
+            ))
+        })
+        .unwrap_or((0, 0, 0.0, 0, 0, 0, 0, 0.0, 0, 0.0, 0, 0, None, 0, None, 0));
+
+    let (requests, success, avg_latency_ms, token_input, token_output, cache_read, cache_write, avg_ttft_ms, ttft_samples, avg_speed_tps, _, _, total_cost, priced_requests, total_savings, savings_samples) =
+        (r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9, r.10, r.11, r.12, r.13, r.14, r.15);
+
+    Metrics {
+        requests,
+        success,
+        avg_latency_ms,
+        token_input,
+        token_output,
+        avg_ttft_ms,
+        ttft_samples,
+        avg_speed_tps,
+        cache_read_tokens: cache_read,
+        cache_write_tokens: cache_write,
+        // 无已定价请求 → None（与明细 SUM(cost) NULL 语义一致）
+        cost: if priced_requests > 0 { total_cost } else { None },
+        // 无任何一条可比价差 → None（samples 还原明细 NULL 语义）
+        cache_savings: if savings_samples > 0 { total_savings } else { None },
+        priced_requests,
+    }
+}
+
+/// 维度报表（proxy / platform / model）的三段 UNION 装配（D 读端第二阶段）。
+/// 与 `query_metrics` 同构，但外层按维度再分组：整小时段走 hourly 表、两个边界小时走明细，
+/// 三段每段 `GROUP BY <dim>`，UNION ALL 后外层再按维度合并，逐字段口径与全程查明细一致。
+///
+/// `dim_expr` 是维度表达式（模块内常量，无注入风险）；`hourly_join` / `detail_join` 分别给出
+/// 从 tiny 表别名 `h` / 明细别名 `rs` 补出维度所需的 JOIN 片段（例如按 backend_id 关联 backends）。
+/// 返回 (维度值, 该维度的聚合)。
+struct DimAggRow {
+    requests: i64,
+    success: i64,
+    stream_requests: i64,
+    avg_latency_ms: f64,
+    token_input: i64,
+    token_output: i64,
+    avg_ttft_ms: f64,
+    output_speed_tps: f64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    total_cost: Option<f64>,
+    cache_savings: Option<f64>,
+    priced_requests: i64,
+}
+
+/// 维度聚合的核心实现：`from`/`to` 为已规范化（UTC 秒）边界。
+/// 开放式范围或区间不足一小时时回退「全程明细」——与 D 之前行为完全一致。
+/// `filter_dim` 存在时只聚合该维度值（单实体口径，如 `proxy_stats`），
+/// 值绑到每段各自追加的占位符上；与 `hourly_dim`/`detail_dim` 是同一个表达式。
+#[allow(clippy::too_many_arguments)]
+fn query_dim_stats(
+    conn: &rusqlite::Connection,
+    from: Option<&str>,
+    to: Option<&str>,
+    hourly_dim: &str,
+    detail_dim: &str,
+    hourly_join: &str,
+    detail_join: &str,
+    filter_dim: Option<&str>,
+) -> Vec<(String, DimAggRow)> {
+    let agg = hourly_agg_range(from, to);
+    let hourly_select = |extra: &str| -> String {
+        format!(
+            "SELECT {hourly_dim} AS dim,
+                    requests, failed_requests, stream_requests,
+                    token_input, token_output, cache_read_tokens, cache_write_tokens,
+                    latency_ms_sum, ttft_ms_sum, ttft_samples,
+                    cost_sum, priced_requests, cache_savings_sum, cache_savings_samples
+             FROM request_stats_hourly h
+             {hourly_join}
+             WHERE 1=1{extra}",
+            hourly_dim = hourly_dim,
+            hourly_join = hourly_join,
+            extra = extra
+        )
+    };
+    let detail_select = |extra: &str| -> String {
+        format!(
+            "SELECT {detail_dim} AS dim,
+                    COUNT(*) AS requests,
+                    SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 0 ELSE 1 END) AS failed_requests,
+                    SUM(is_stream) AS stream_requests,
+                    COALESCE(SUM(token_input),0) AS token_input, COALESCE(SUM(token_output),0) AS token_output,
+                    COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens,
+                    COALESCE(SUM(latency_ms),0) AS latency_ms_sum, COALESCE(SUM(ttft_ms),0) AS ttft_ms_sum, COUNT(ttft_ms) AS ttft_samples,
+                    SUM(cost) AS cost_sum, COUNT(cost) AS priced_requests,
+                    COALESCE(SUM(cache_savings),0) AS cache_savings_sum, COUNT(cache_savings) AS cache_savings_samples
+             FROM request_stats rs
+             {detail_join}
+             WHERE 1=1{extra}
+             GROUP BY dim",
+            detail_dim = detail_dim,
+            detail_join = detail_join,
+            extra = extra
+        )
+    };
+    // 外层列序（query_map 按位取）：0 dim / 1 requests / 2 success / 3 avg_latency_ms
+    // 4 token_input / 5 token_output / 6 avg_ttft_ms / 7 output_speed_tps / 8 cache_read
+    // 9 cache_write / 10 total_cost / 11 priced_requests / 12 cache_savings
+    let outer = |from_clauses: &[String]| -> String {
+        format!(
+            "SELECT
+                u.dim,
+                SUM(u.requests) AS requests,
+                SUM(u.requests) - COALESCE(SUM(u.failed_requests),0) AS success,
+                COALESCE(SUM(u.stream_requests),0) AS stream_requests,
+                CASE WHEN SUM(u.requests) > 0
+                     THEN COALESCE(SUM(u.latency_ms_sum),0) * 1.0 / SUM(u.requests)
+                     ELSE 0 END AS avg_latency_ms,
+                COALESCE(SUM(u.token_input),0), COALESCE(SUM(u.token_output),0),
+                CASE WHEN SUM(u.ttft_samples) > 0
+                     THEN COALESCE(SUM(u.ttft_ms_sum),0) * 1.0 / SUM(u.ttft_samples)
+                     ELSE 0 END AS avg_ttft_ms,
+                CASE WHEN SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum),0) > 0
+                     THEN COALESCE(SUM(u.token_output),0) * 1000.0 / (SUM(u.latency_ms_sum) - COALESCE(SUM(u.ttft_ms_sum),0))
+                     ELSE 0 END AS output_speed_tps,
+                COALESCE(SUM(u.cache_read_tokens),0), COALESCE(SUM(u.cache_write_tokens),0),
+                SUM(u.cost_sum) AS total_cost,
+                COALESCE(SUM(u.priced_requests),0) AS priced_requests,
+                CASE WHEN SUM(u.cache_savings_samples) > 0
+                     THEN SUM(u.cache_savings_sum) ELSE NULL END AS cache_savings
+             FROM (
+                {}
+             ) u
+             GROUP BY u.dim",
+            from_clauses.join("\n                UNION ALL\n                ")
+        )
+    };
+
+    let sql: String;
+    let mut params: Vec<String>;
+    // filter 值按段各自绑定：三段模式占位符从 7 起（1-6 是区间边界），单段模式接着区间条件；
+    // 过滤条件复用各段的 dim 表达式（hourly_dim / detail_dim），参数绑的就是调用方给的维度值
+    if let (Some(mf), Some(mt), Some(cf), Some(ct), Some(f), Some(t)) =
+        (&agg.mid_from, &agg.mid_to, &agg.core_from, &agg.core_to, &agg.from, &agg.to)
+    {
+        let filter_sql = filter_dim.map(|_| format!(" AND {hourly_dim} = ?7"));
+        let filter_sql2 = filter_dim.map(|_| format!(" AND {detail_dim} = ?8"));
+        let filter_sql3 = filter_dim.map(|_| format!(" AND {detail_dim} = ?9"));
+        sql = outer(&[
+            {
+                let mut s = hourly_select(" AND bucket >= ?1 AND bucket < ?2");
+                if let Some(fs) = &filter_sql { s.push_str(fs); }
+                s
+            },
+            {
+                let mut s = detail_select(" AND created_at >= ?3 AND created_at < ?4");
+                if let Some(fs) = &filter_sql2 { s.push_str(fs); }
+                s
+            },
+            {
+                let mut s = detail_select(" AND created_at >= ?5 AND created_at < ?6");
+                if let Some(fs) = &filter_sql3 { s.push_str(fs); }
+                s
+            },
+        ]);
+        params = vec![mf.clone(), mt.clone(), f.clone(), cf.clone(), ct.clone(), t.clone()];
+        if let Some(d) = filter_dim { params.extend([d.to_string(), d.to_string(), d.to_string()]); }
+    } else {
+        let (cond, n_params) = match (&agg.from, &agg.to) {
+            (Some(_), Some(_)) => (" AND created_at >= ?1 AND created_at < ?2".to_string(), 2),
+            (Some(_), None) | (None, Some(_)) => (" AND created_at >= ?1".to_string(), 1),
+            (None, None) => (String::new(), 0),
+        };
+        let filter_sql = filter_dim.map(|_| format!(" AND {detail_dim} = ?{}", n_params + 1));
+        let mut dsel = detail_select(&cond);
+        if let Some(fs) = &filter_sql { dsel.push_str(fs); }
+        sql = outer(&[dsel]);
+        params = agg.from.iter().chain(agg.to.iter()).cloned().collect();
+        if let Some(d) = filter_dim { params.push(d.to_string()); }
+    }
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("query_dim_stats prepare failed: {e}");
+            return Vec::new();
+        }
+    };
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter().map(|s| s.as_str())), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                DimAggRow {
+                    requests: r.get(1)?,
+                    success: r.get(2)?,
+                    stream_requests: r.get(3)?,
+                    avg_latency_ms: r.get(4)?,
+                    token_input: r.get(5)?,
+                    token_output: r.get(6)?,
+                    avg_ttft_ms: r.get(7)?,
+                    output_speed_tps: r.get(8)?,
+                    cache_read_tokens: r.get(9)?,
+                    cache_write_tokens: r.get(10)?,
+                    total_cost: r.get(11)?,
+                    priced_requests: r.get(12)?,
+                    cache_savings: r.get(13)?,
+                },
+            ))
+        });
+    let mut out = Vec::new();
+    if let Ok(rows) = rows {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1781,26 +2396,19 @@ pub fn proxy_stats(pool: &DbPool, proxy_id: &str, from: Option<&str>, to: Option
         |r| r.get(0)
     ).unwrap_or_default();
 
-    let count = |extra: &str| -> i64 {
-        conn.query_row(
-            &format!("SELECT COUNT(*) FROM request_stats WHERE proxy_id = ?1{extra}{}", range.and("created_at")),
-            rusqlite::params_from_iter(
-                std::iter::once(proxy_id.to_string())
-                    .chain(range.params().into_iter().map(|s| s.to_string())),
-            ),
-            |r| r.get(0),
-        ).unwrap_or(0)
-    };
-    let total_requests = count("");
-    let success_count = count(" AND status_code >= 200 AND status_code < 300");
-
-    let avg_latency: f64 = conn.query_row(
-        &format!("SELECT COALESCE(AVG(latency_ms),0) FROM request_stats WHERE proxy_id = ?1{}", range.and("created_at")),
-        rusqlite::params_from_iter(
-            std::iter::once(proxy_id.to_string()).chain(range.params().into_iter().map(|s| s.to_string())),
-        ),
-        |r| r.get(0),
-    ).unwrap_or(0.0);
+    // D 读端第二阶段：单实体也走 hourly 三段 UNION（口径与 bulk 完全一致，只是各段加维度过滤）。
+    // 悬挂行（网关已删）不会命中 proxies 表，aggregate 为空 → 下方按 0 口径兜底。
+    let rows = query_dim_stats(
+        &conn,
+        range.from.as_deref(),
+        range.to.as_deref(),
+        "h.proxy_id",
+        "rs.proxy_id",
+        "",
+        "",
+        Some(proxy_id),
+    );
+    let row = rows.into_iter().next().map(|(_, r)| r);
 
     // 今日请求数：与原口径一致（固定"今日"，不受时段筛选影响）
     let requests_today: i64 = conn.query_row(
@@ -1809,41 +2417,17 @@ pub fn proxy_stats(pool: &DbPool, proxy_id: &str, from: Option<&str>, to: Option
         |r| r.get(0)
     ).unwrap_or(0);
 
-    let total_token_input: i64 = conn.query_row(
-        &format!("SELECT COALESCE(SUM(token_input),0) FROM request_stats WHERE proxy_id = ?1 AND token_input IS NOT NULL{}", range.and("created_at")),
-        rusqlite::params_from_iter(
-            std::iter::once(proxy_id.to_string()).chain(range.params().into_iter().map(|s| s.to_string())),
-        ),
-        |r| r.get(0),
-    ).unwrap_or(0);
-
-    let total_token_output: i64 = conn.query_row(
-        &format!("SELECT COALESCE(SUM(token_output),0) FROM request_stats WHERE proxy_id = ?1 AND token_output IS NOT NULL{}", range.and("created_at")),
-        rusqlite::params_from_iter(
-            std::iter::once(proxy_id.to_string()).chain(range.params().into_iter().map(|s| s.to_string())),
-        ),
-        |r| r.get(0),
-    ).unwrap_or(0);
-    // 成本：全 NULL 时 SUM 返回 NULL（一条都没定价），已定价请求数用于覆盖率
-    let (total_cost, priced_requests): (Option<f64>, i64) = conn.query_row(
-        &format!("SELECT SUM(cost), COUNT(cost) FROM request_stats WHERE proxy_id = ?1{}", range.and("created_at")),
-        rusqlite::params_from_iter(
-            std::iter::once(proxy_id.to_string()).chain(range.params().into_iter().map(|s| s.to_string())),
-        ),
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap_or((None, 0));
-
     Ok(ProxyStats {
         proxy_id: proxy_id.to_string(),
         proxy_name,
-        total_requests,
-        success_rate: if total_requests > 0 { success_count as f64 / total_requests as f64 * 100.0 } else { 0.0 },
-        avg_latency_ms: avg_latency,
+        total_requests: row.as_ref().map_or(0, |r| r.requests),
+        success_rate: row.as_ref().map_or(0.0, |r| if r.requests > 0 { r.success as f64 / r.requests as f64 * 100.0 } else { 0.0 }),
+        avg_latency_ms: row.as_ref().map_or(0.0, |r| r.avg_latency_ms),
         requests_today,
-        total_token_input,
-        total_token_output,
-        total_cost,
-        priced_requests,
+        total_token_input: row.as_ref().map_or(0, |r| r.token_input),
+        total_token_output: row.as_ref().map_or(0, |r| r.token_output),
+        total_cost: row.as_ref().and_then(|r| r.total_cost),
+        priced_requests: row.as_ref().map_or(0, |r| r.priced_requests),
     })
 }
 
@@ -1852,58 +2436,83 @@ pub fn proxy_stats_all(pool: &DbPool, from: Option<&str>, to: Option<&str>) -> A
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let range = TimeRange::parse(from, to)?;
 
-    let sql = format!(
-        r#"
-        SELECT
-            p.id,
-            p.name,
-            COUNT(rs.proxy_id)                                                                  AS total_requests,
-            SUM(CASE WHEN rs.status_code >= 200 AND rs.status_code < 300 THEN 1 ELSE 0 END)     AS success_requests,
-            COALESCE(AVG(rs.latency_ms), 0)                                                     AS avg_latency_ms,
-            COALESCE(SUM(rs.token_input), 0)                                                    AS token_input,
-            COALESCE(SUM(rs.token_output), 0)                                                   AS token_output,
-            SUM(rs.cost)                                                                        AS total_cost,
-            COUNT(rs.cost)                                                                      AS priced_requests
-        FROM proxies p
-        LEFT JOIN request_stats rs ON rs.proxy_id = p.id{}
-        GROUP BY p.id, p.name
-        "#,
-        range.and("rs.created_at")
+    // 现有 proxies 全名单（含没有任何请求的，报表必须给 0 行；名查 id 补上 name）
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, name FROM proxies")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in mapped.flatten() {
+            names.insert(row.0, row.1);
+        }
+    }
+
+    // D 读端第二阶段：hourly 三段 UNION；维度 = proxy（hourly 表自带 proxy_id）。
+    // 只查有数据的维度；外层兜底补无数据 proxy 的 0 行。
+    // hourly 段别名 h、detail 段别名 rs，dim 表达式必须各自成立——这是两套表达式的原因
+    let rows = query_dim_stats(
+        &conn,
+        range.from.as_deref(),
+        range.to.as_deref(),
+        "h.proxy_id",
+        "rs.proxy_id",
+        "",
+        "",
+        None,
     );
 
-    let mut stmt = conn.prepare(&sql)?;
-    let mut stats: Vec<ProxyStats> = stmt
-        .query_map(rusqlite::params_from_iter(range.params()), |r| {
-            let total_requests: i64 = r.get(2)?;
-            let success_requests: i64 = r.get::<_, Option<i64>>(3)?.unwrap_or(0);
-            Ok(ProxyStats {
-                proxy_id: r.get(0)?,
-                proxy_name: r.get(1)?,
-                total_requests,
-                success_rate: if total_requests > 0 {
-                    success_requests as f64 / total_requests as f64 * 100.0
-                } else {
-                    0.0
-                },
-                avg_latency_ms: r.get(4)?,
-                requests_today: 0,
-                total_token_input: r.get(5)?,
-                total_token_output: r.get(6)?,
-                total_cost: r.get(7)?,
-                priced_requests: r.get(8)?,
-            })
-        })?
-        .filter_map(|x| x.ok())
+    // 只保留现存网关维度：悬挂 `proxy_id`（网关已删）的请求仍计入它所处平台的统计，
+    // 但不属于任何网关——旧批量 SQL 从 proxies 表驱动，天然排除，这里显式过滤保持一致
+    let mut stats: Vec<ProxyStats> = rows
+        .into_iter()
+        .filter(|(proxy_id, _)| names.contains_key(proxy_id))
+        .map(|(proxy_id, row)| {
+            let name = names.get(&proxy_id).cloned().unwrap_or_default();
+            let mut s = ProxyStats {
+                proxy_name: name,
+                total_requests: row.requests,
+                success_rate: if row.requests > 0 { row.success as f64 / row.requests as f64 * 100.0 } else { 0.0 },
+                avg_latency_ms: row.avg_latency_ms,
+                requests_today: 0, // 下方统一补
+                total_token_input: row.token_input,
+                total_token_output: row.token_output,
+                total_cost: row.total_cost,
+                priced_requests: row.priced_requests,
+                proxy_id: String::new(),
+            };
+            s.proxy_id = proxy_id;
+            s
+        })
         .collect();
+
+    // 零流量的 proxy 也要有自己的行：报表口径「没请求 = 0」，不是「没有这一行」
+    let seen: std::collections::HashSet<String> = stats.iter().map(|s| s.proxy_id.clone()).collect();
+    for (id, name) in &names {
+        if !seen.contains(id) {
+            stats.push(ProxyStats {
+                proxy_id: id.clone(),
+                proxy_name: name.clone(),
+                total_requests: 0,
+                success_rate: 0.0,
+                avg_latency_ms: 0.0,
+                requests_today: 0,
+                total_token_input: 0,
+                total_token_output: 0,
+                total_cost: None,
+                priced_requests: 0,
+            });
+        }
+    }
 
     // 今日请求数与原口径一致：固定"今日"，不受时段筛选影响
     let mut today = std::collections::HashMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT proxy_id, COUNT(*) FROM request_stats WHERE proxy_id IS NOT NULL AND date(created_at) = date('now') GROUP BY proxy_id",
-    )?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-    for row in rows.flatten() {
-        today.insert(row.0, row.1);
+    {
+        let mut stmt = conn.prepare(
+            "SELECT proxy_id, COUNT(*) FROM request_stats WHERE proxy_id IS NOT NULL AND date(created_at) = date('now') GROUP BY proxy_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for row in rows.flatten() {
+            today.insert(row.0, row.1);
+        }
     }
     for item in stats.iter_mut() {
         item.requests_today = today.get(&item.proxy_id).copied().unwrap_or(0);
@@ -1918,49 +2527,65 @@ pub fn platform_stats_all(pool: &DbPool, from: Option<&str>, to: Option<&str>) -
     let conn = pool.get().map_err(|e| crate::error::AppError::Internal(e.to_string()))?;
     let range = TimeRange::parse(from, to)?;
 
-    let sql = format!(
-        r#"
-        SELECT
-            p.id,
-            p.name,
-            COUNT(rs.id)                                                                        AS total_requests,
-            SUM(CASE WHEN rs.status_code >= 200 AND rs.status_code < 300 THEN 1 ELSE 0 END)     AS success_requests,
-            COALESCE(AVG(rs.latency_ms), 0)                                                     AS avg_latency_ms,
-            COALESCE(SUM(rs.token_input), 0)                                                    AS token_input,
-            COALESCE(SUM(rs.token_output), 0)                                                   AS token_output,
-            SUM(rs.cost)                                                                        AS total_cost,
-            COUNT(rs.cost)                                                                      AS priced_requests
-        FROM platforms p
-        LEFT JOIN backends b ON b.platform_id = p.id
-        LEFT JOIN request_stats rs ON rs.backend_id = b.id{}
-        GROUP BY p.id, p.name
-        "#,
-        range.and("rs.created_at")
+    // D 读端第二阶段：hourly 三段 UNION；维度 = platform（hourly 有 backend_id → backends 拿 platform_id）。
+    // 两侧都 JOIN backends，仅别名不同（h/rs），dim 表达式同文
+    let rows = query_dim_stats(
+        &conn,
+        range.from.as_deref(),
+        range.to.as_deref(),
+        "b.platform_id",
+        "b.platform_id",
+        "LEFT JOIN backends b ON b.id = h.backend_id",
+        "LEFT JOIN backends b ON b.id = rs.backend_id",
+        None,
     );
 
-    let mut stmt = conn.prepare(&sql)?;
-    let stats = stmt
-        .query_map(rusqlite::params_from_iter(range.params()), |r| {
-            let total_requests: i64 = r.get(2)?;
-            let success_requests: i64 = r.get::<_, Option<i64>>(3)?.unwrap_or(0);
-            Ok(PlatformStats {
-                platform_id: r.get(0)?,
-                platform_name: r.get(1)?,
-                total_requests,
-                success_rate: if total_requests > 0 {
-                    success_requests as f64 / total_requests as f64 * 100.0
-                } else {
-                    0.0
-                },
-                avg_latency_ms: r.get(4)?,
-                total_token_input: r.get(5)?,
-                total_token_output: r.get(6)?,
-                total_cost: r.get(7)?,
-                priced_requests: r.get(8)?,
-            })
-        })?
-        .filter_map(|x| x.ok())
-        .collect();
+    // platform 全名单（含零流量的，报表给 0 行）；悬挂 backend 行（platform_id 为 NULL）不归属任何平台
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, name FROM platforms")?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        for row in mapped.flatten() {
+            names.insert(row.0, row.1);
+        }
+    }
+
+    let mut stats: Vec<PlatformStats> = Vec::new();
+    for (platform_id, row) in rows {
+        if platform_id.is_empty() {
+            // 悬挂 backend 的行在全部平台视角里不归属；与旧 LEFT JOIN 语义一致
+            continue;
+        }
+        stats.push(PlatformStats {
+            platform_id: platform_id.clone(),
+            platform_name: names.get(&platform_id).cloned().unwrap_or_default(),
+            total_requests: row.requests,
+            success_rate: if row.requests > 0 { row.success as f64 / row.requests as f64 * 100.0 } else { 0.0 },
+            avg_latency_ms: row.avg_latency_ms,
+            total_token_input: row.token_input,
+            total_token_output: row.token_output,
+            total_cost: row.total_cost,
+            priced_requests: row.priced_requests,
+        });
+    }
+
+    let seen: std::collections::HashSet<String> = stats.iter().map(|s| s.platform_id.clone()).collect();
+    for (id, name) in &names {
+        if !seen.contains(id) {
+            stats.push(PlatformStats {
+                platform_id: id.clone(),
+                platform_name: name.clone(),
+                total_requests: 0,
+                success_rate: 0.0,
+                avg_latency_ms: 0.0,
+                total_token_input: 0,
+                total_token_output: 0,
+                total_cost: None,
+                priced_requests: 0,
+            });
+        }
+    }
+
     Ok(stats)
 }
 
@@ -1975,58 +2600,31 @@ pub fn platform_stats(pool: &DbPool, platform_id: &str, from: Option<&str>, to: 
         |r| r.get(0)
     ).unwrap_or_default();
 
-    // 悬挂统计兜底：backend 被删除后 request_stats 仍可能留着旧 backend_id。
-    // 用 LEFT JOIN 关联 platforms；匹配不上的行归入 "unknown"（platform_id 为空），避免重复/遗漏。
-    // 注意：悬挂行只能按 backend_id 聚合，无法再判定其 platform，因此归入 unknown。
-    let base = "COALESCE(b.platform_id, 'unknown') = ?1";
-    let query_val = |select: &str, extra: &str| -> f64 {
-        conn.query_row(
-            &format!(
-                "SELECT {select} FROM request_stats rs
-                 LEFT JOIN backends b ON rs.backend_id = b.id
-                 WHERE {base}{extra}{}",
-                range.and("rs.created_at")
-            ),
-            rusqlite::params_from_iter(
-                std::iter::once(platform_id.to_string())
-                    .chain(range.params().into_iter().map(|s| s.to_string())),
-            ),
-            |r| r.get(0),
-        ).unwrap_or(0.0)
-    };
-
-    let total_requests = query_val("COUNT(*)", "") as i64;
-    let success_count = query_val("COUNT(*)", " AND rs.status_code >= 200 AND rs.status_code < 300") as i64;
-    let avg_latency = query_val("COALESCE(AVG(rs.latency_ms),0)", "");
-    let total_token_input = query_val("COALESCE(SUM(rs.token_input),0)", " AND rs.token_input IS NOT NULL") as i64;
-    let total_token_output = query_val("COALESCE(SUM(rs.token_output),0)", " AND rs.token_output IS NOT NULL") as i64;
-    // 成本：SUM 在全 NULL 时返回 NULL（= 这个平台的请求一条都没定价），另取已定价请求数算覆盖率
-    let (total_cost, priced_requests): (Option<f64>, i64) = conn
-        .query_row(
-            &format!(
-                "SELECT SUM(rs.cost), COUNT(rs.cost) FROM request_stats rs
-                 LEFT JOIN backends b ON rs.backend_id = b.id
-                 WHERE {base}{}",
-                range.and("rs.created_at")
-            ),
-            rusqlite::params_from_iter(
-                std::iter::once(platform_id.to_string())
-                    .chain(range.params().into_iter().map(|s| s.to_string())),
-            ),
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .unwrap_or((None, 0));
+    // D 读端第二阶段：单实体也走 hourly 三段 UNION（口径与 bulk 完全一致，各段加维度过滤）。
+    // 悬挂 backend 行（platform_id 为 NULL）不归属任何平台——旧实现里显式归 "unknown"，
+    // bulk 视角则跳过 NULL，这里配合 dim = ?N 只在非悬挂行上命中，两边数字一致。
+    let rows = query_dim_stats(
+        &conn,
+        range.from.as_deref(),
+        range.to.as_deref(),
+        "b.platform_id",
+        "b.platform_id",
+        "LEFT JOIN backends b ON b.id = h.backend_id",
+        "LEFT JOIN backends b ON b.id = rs.backend_id",
+        Some(platform_id),
+    );
+    let row = rows.into_iter().next().map(|(_, r)| r);
 
     Ok(PlatformStats {
         platform_id: platform_id.to_string(),
         platform_name,
-        total_requests,
-        success_rate: if total_requests > 0 { success_count as f64 / total_requests as f64 * 100.0 } else { 0.0 },
-        avg_latency_ms: avg_latency,
-        total_token_input,
-        total_token_output,
-        total_cost,
-        priced_requests,
+        total_requests: row.as_ref().map_or(0, |r| r.requests),
+        success_rate: row.as_ref().map_or(0.0, |r| if r.requests > 0 { r.success as f64 / r.requests as f64 * 100.0 } else { 0.0 }),
+        avg_latency_ms: row.as_ref().map_or(0.0, |r| r.avg_latency_ms),
+        total_token_input: row.as_ref().map_or(0, |r| r.token_input),
+        total_token_output: row.as_ref().map_or(0, |r| r.token_output),
+        total_cost: row.as_ref().and_then(|r| r.total_cost),
+        priced_requests: row.as_ref().map_or(0, |r| r.priced_requests),
     })
 }
 
@@ -2185,6 +2783,211 @@ mod tests {
             request_id: None, replayed_from: None,
             credits: None, path: None,
         }
+    }
+
+    /// 预聚合小时表：同一桶同一后端累加，跨桶分行；失败数、流式数、成本 NULL 语义与明细一致。
+    #[test]
+    fn hourly_aggregate_accumulates_same_bucket_and_respects_cost_null() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+
+            // 三个请求：两条同一小时（一成一败、一有价一无价）、一条不同小时
+            let mut ok_priced = stat("k", Some(0.01));
+            ok_priced.latency_ms = 50;
+            ok_priced.token_input = Some(100);
+            ok_priced.is_stream = true;
+            let mut fail_unpriced = stat("k", None);
+            fail_unpriced.status_code = 502;
+            fail_unpriced.error_type = Some("ServerError".into());
+            fail_unpriced.latency_ms = 200;
+            let mut next_hour = stat("k", Some(0.02));
+            next_hour.created_at = "2026-01-01T02:00:00.000Z".into();
+
+            super::record_batch(&pool, &[ok_priced, fail_unpriced, next_hour], &[], &[], &[], &[])
+                .expect("batch with upsert");
+
+            let rows: Vec<(String, i64, i64, i64, i64, i64, i64, i64, Option<f64>, f64)> = conn
+                .prepare("SELECT bucket, requests, failed_requests, stream_requests, token_input, latency_ms_sum, ttft_samples, priced_requests, cost_sum, cache_savings_sum FROM request_stats_hourly ORDER BY bucket")
+                .expect("query")
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?)))
+                .expect("map")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect");
+
+            assert_eq!(rows.len(), 2, "两个不同小时桶");
+            let (b1, b2) = (&rows[0], &rows[1]);
+            // 第一条小时桶：成功（无失败）+ 失败（无成功）→ requests=2, failed=1, stream=1
+            assert_eq!((b1.1, b1.2, b1.3), (2, 1, 1), "同桶两条累加：2 请求 1 失败 1 流式");
+            // 有价 0.01 + 无价 None → cost_sum=0.01, priced_requests=1
+            assert_eq!((b1.8, b1.9), (Some(0.01), 0.0), "cost_sum 只累加有价行");
+            // token 只来自有价那条（fail_unpriced 继承默认 1000）
+            assert_eq!(b1.4, 1100, "100 + 1000");
+            // latency 两条都算
+            assert_eq!(b1.5, 250, "50 + 200");
+            // ttft_samples：两条都无 ttft
+            assert_eq!(b1.6, 0);
+            // 第二条小时桶：单条成功有价
+            assert_eq!((b2.1, b2.2, b2.8, b2.9), (1, 0, Some(0.02), 0.0));
+        }
+        cleanup_db(&path);
+    }
+
+    /// 预聚合表与明细同事务：明细失败时聚合也不该落（事务原子性由 record_batch 保证）。
+    /// 这里验证「非法 created_at 的行被跳过而不致整批失败」——聚合是尽力而为，明细照写。
+    #[test]
+    fn hourly_aggregate_skips_malformed_timestamps_without_breaking_the_batch() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            let mut bad = stat("k", Some(0.01));
+            bad.created_at = "not-a-timestamp".into();
+            let mut good = stat("k", Some(0.01));
+
+            super::record_batch(&pool, &[bad, good], &[], &[], &[], &[])
+                .expect("batch with one malformed timestamp");
+
+            // 明细两条都在
+            let detail: i64 = conn.query_row("SELECT COUNT(*) FROM request_stats", [], |r| r.get(0)).unwrap();
+            assert_eq!(detail, 2, "明细不受聚合影响");
+            // 聚合只落了一条（good 那条），bad 被跳过
+            let agg: i64 = conn.query_row("SELECT COUNT(*) FROM request_stats_hourly", [], |r| r.get(0)).unwrap();
+            assert_eq!(agg, 1, "非法时间戳的行不进聚合，但整批不失败");
+        }
+        cleanup_db(&path);
+    }
+
+    /// 整小时段切分（D 读端核心）：按本地时区的整小时边界切开，边界小时保持原秒级边界。
+    /// 只有在一个完整小时及以上时才给出核心段 —— 不足一小时 / 开放式范围不得用小时表。
+    #[test]
+    fn hourly_agg_range_splits_only_on_complete_hours() {
+        use super::hourly_agg_range;
+
+        // 桶是服务器本地时区的 "YYYY-MM-DD HH"，测试机时区不定，只断言不变量：
+        // 跨多个小时的区间一定给出非空核心段，且核心段落在两个边界之间（单调）。
+        let agg = hourly_agg_range(Some("2026-01-01T10:30:00+00:00"), Some("2026-01-01T12:30:00+00:00"));
+        let (Some(mf), Some(mt)) = (&agg.mid_from, &agg.mid_to) else {
+            panic!("跨小时区间必须有核心段：{agg:?}");
+        };
+        assert_eq!(mf.len(), 13, "桶必须形如 YYYY-MM-DD HH");
+        assert_eq!(mt.len(), 13);
+        assert!(mf < mt, "核心段必须严格非空");
+
+        // 不足一小时 [10:30, 11:30) → 无核心段，整体回退明细
+        let under = hourly_agg_range(Some("2026-01-01T10:30:00+00:00"), Some("2026-01-01T11:30:00+00:00"));
+        assert_eq!(under.mid_from, None);
+        assert_eq!(under.mid_to, None);
+
+        // 开放式范围（缺 from / 缺 to）→ 无核心段
+        let open = hourly_agg_range(None, Some("2026-01-01T12:00:00+00:00"));
+        assert_eq!(open.mid_from, None);
+        assert_eq!(open.mid_to, None);
+
+        // 边界原样透传（调用方已规范化，口径是 UTC 秒）
+        assert_eq!(agg.from.as_deref(), Some("2026-01-01T10:30:00+00:00"));
+        assert_eq!(agg.to.as_deref(), Some("2026-01-01T12:30:00+00:00"));
+    }
+
+    /// 读端三段 UNION 与「全程查明细」逐字段等价：跨小时边界、失败/流式/成本/NULL 语义，
+    /// 以及缺失数据（表空）时的降级路径都不能改变读出口。
+    #[test]
+    fn query_metrics_matches_pure_detail_query_across_hour_bounds() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            use super::query_metrics;
+
+            // 三小时边界：10:59、11:00（整点入下一小时桶）、11:59、12:00、12:01
+            // 时区：测试机本地时区即数据库 datetime(...,'localtime') 的口径；
+            // 这里用带 +00:00 的 UTC 字面量，桶按服务器本地时区切。
+            let times = [
+                "2026-01-01T10:59:30Z",  // 前边界桶
+                "2026-01-01T11:00:00Z",
+                "2026-01-01T11:59:59Z",
+                "2026-01-01T12:00:00Z",
+                "2026-01-01T12:01:00Z",  // 后边界桶，须严格小于 to（12:01:30Z）
+            ];
+            let mut rows = Vec::new();
+            for (i, ts) in times.iter().enumerate() {
+                let mut s = stat(&format!("k{i}"), Some(0.01 + i as f64 * 0.001));
+                s.created_at = (*ts).to_string();
+                if i == 1 {
+                    s.status_code = 502; // 失败行
+                    s.error_type = Some("ServerError".into());
+                }
+                if i == 3 {
+                    s.cache_savings = Some(0.005); // 价差行
+                }
+                s.latency_ms = 100 + i as i64;
+                s.ttft_ms = Some(10 + i as i64);
+                s.is_stream = i % 2 == 1;
+                rows.push(s);
+            }
+            super::record_batch(&pool, &rows, &[], &[], &[], &[]).expect("batch with upsert");
+
+            // 跨多个整小时：核心段在内小时表走，两端小时明细走
+            let agg = hourly_agg_range(
+                Some("2026-01-01T10:59:30Z"),
+                Some("2026-01-01T12:01:30Z"),
+            );
+            assert!(agg.mid_from.is_some(), "跨小时区间必须有核心段");
+            let got = query_metrics(&conn, Some("2026-01-01T10:59:30Z"), Some("2026-01-01T12:01:30Z"));
+
+            // 对照：全程查明细（等价旧口径）
+            let direct = conn
+                .query_row(
+                    "SELECT COUNT(*) AS n FROM request_stats WHERE created_at >= ?1 AND created_at < ?2",
+                    rusqlite::params!["2026-01-01T10:59:30Z", "2026-01-01T12:01:30Z"],
+                    |r| r.get::<_, i64>(0),
+                )
+                .expect("count");
+
+            assert_eq!(got.requests, direct, "请求总数与明细一致");
+            // 已知行：5 行全在区间内
+            assert_eq!(got.requests, 5);
+            assert_eq!(got.success, 4, "502 那行不算成功");
+            assert_eq!(got.token_input, 5 * 1000, "每行 token_input=1000");
+            assert_eq!(got.cache_read_tokens, 0);
+            assert_eq!(got.cache_write_tokens, 0);
+            // 失败行 502 也算 latency 与 ttft 样本
+            assert_eq!(got.priced_requests, 5, "5 行全有价");
+            let cost = got.cost.expect("有价必须给总数");
+            assert!((cost - (5.0 * 0.01 + 0.001 * 10.0)).abs() < 1e-9, "cost 之和");
+            // 价差行有一条
+            let savings = got.cache_savings.expect("有价差必须给总数");
+            assert!((savings - 0.005).abs() < 1e-12, "cache_savings 之和");
+
+            // 空库（直接删掉明细、从小时表删）→ 降级路径也无 NULL 崩溃
+            conn.execute("DELETE FROM request_stats", []).expect("clear detail");
+            conn.execute("DELETE FROM request_stats_hourly", []).expect("clear hourly");
+            let empty = query_metrics(&conn, Some("2026-01-01T10:59:30Z"), Some("2026-01-01T12:01:30Z"));
+            assert_eq!(empty.requests, 0);
+            assert_eq!(empty.cost, None, "空库成本必须是 None 不是 0");
+            assert_eq!(empty.cache_savings, None);
+        }
+        cleanup_db(&path);
+    }
+
+    /// 单小时区间（不足整数小时）也必须走明细口径 —— 这是 `hourly_agg_range` 返回 None 的落点。
+    #[test]
+    fn query_metrics_sub_hour_range_falls_back_to_detail() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            use super::query_metrics;
+
+            let mut a = stat("k-a", None);
+            a.created_at = "2026-01-01T10:10:00Z".into();
+            let mut b = stat("k-b", None);
+            b.created_at = "2026-01-01T10:50:00Z".into();
+            super::record_batch(&pool, &[a, b], &[], &[], &[], &[]).expect("batch");
+
+            let got = query_metrics(&conn, Some("2026-01-01T10:00:00Z"), Some("2026-01-01T11:00:00Z"));
+            assert_eq!(got.requests, 2);
+            assert_eq!(got.cost, None, "两行都未定价 → None");
+            assert_eq!(got.cache_savings, None);
+        }
+        cleanup_db(&path);
     }
 
     /// 时序点要带齐单模型分时图需要的聚合：新增输入、缓存写、成本覆盖、首字样本来数。
@@ -3093,6 +3896,230 @@ mod tests {
         let pl_idle = bulk_platform.iter().find(|p| p.platform_id == "pl-idle").expect("pl-idle");
         assert_eq!((pl_idle.total_requests, pl_idle.total_cost, pl_idle.success_rate), (0, None, 0.0));
 
+        cleanup_db(&path);
+    }
+
+    /// D 读端三段 UNION 的随机对等性：随机时间戳摆布在多个小时桶与边界上，
+    /// `query_metrics` 的输出与「只查明细手工聚合同样字段」必须逐字段全等——
+    /// 这是验证核心段 + 边界段不重不漏的最直接证据（任一段边界错位就会差请求数或成本）。
+    #[test]
+    fn query_metrics_equals_pure_detail_aggregation_on_random_spread() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            use super::query_metrics;
+
+            // 用固定种子保证可复现；时间跨 3 个整点小时（UTC 视角），本地时区可能偏移，
+            // 但无论偏移到哪个桶，三段 UNION 的总和都必须等于明细全图。
+            let mut seed = 0x5DEECE66Du64;
+            let mut next = move || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (seed >> 33) as u32
+            };
+            let mut rows = Vec::new();
+            for i in 0..120 {
+                let secs: u32 = next() % 3 * 3600 + next() % 3600; // 分布在 00:00–03:00 UTC
+                let ts = format!("2026-01-01T{:02}:{:02}:{:02}Z", secs / 3600, (secs % 3600) / 60, secs % 60);
+                let mut s = stat(&format!("k{i}"), if i % 3 == 0 { Some(0.001 * f64::from(i)) } else { None });
+                s.created_at = ts;
+                s.status_code = if i % 7 == 0 { 500 } else { 200 };
+                s.latency_ms = i64::from(next() % 3000);
+                s.ttft_ms = if i % 5 == 0 { Some(i64::from(next() % 500)) } else { None };
+                s.is_stream = i % 2 == 0;
+                if i % 11 == 0 {
+                    s.cache_savings = Some(0.0001 * f64::from(i));
+                }
+                rows.push(s);
+            }
+            super::record_batch(&pool, &rows, &[], &[], &[], &[]).expect("batch");
+
+            // 范围：覆盖 00:00Z 到 03:00Z 前 30 秒（跨整点小时，确保核心段 + 两个边界段都激活）
+            let got = query_metrics(&conn, Some("2026-01-01T00:00:00Z"), Some("2026-01-01T03:00:30Z"));
+
+            // 对照：纯明细聚合，逐字段同口径
+            let direct: (i64, i64, i64, i64, i64, f64, i64, f64, Option<f64>, i64, Option<f64>, i64) = conn
+                .query_row(
+                    "SELECT
+                        COUNT(*),
+                        SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 0 ELSE 1 END),
+                        SUM(is_stream),
+                        COALESCE(SUM(token_input),0), COALESCE(SUM(token_output),0),
+                        COALESCE(AVG(latency_ms),0),
+                        SUM(CASE WHEN ttft_ms IS NOT NULL THEN 1 ELSE 0 END),
+                        COALESCE(AVG(ttft_ms),0),
+                        SUM(cost), COUNT(cost),
+                        SUM(cache_savings), COUNT(cache_savings)
+                     FROM request_stats
+                     WHERE created_at >= ?1 AND created_at < ?2",
+                    rusqlite::params!["2026-01-01T00:00:00Z", "2026-01-01T03:00:30Z"],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                        r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?)),
+                )
+                .expect("direct");
+
+            // 手工重算 speed：SUMQ / SUMG 与逐行 ROUND 不同，不能拿 SQL 里那个 SUM(逐行除法) 当对照
+            // —— 直接按口径手工算：总输出 / 总生成时长
+            let (direct_requests, direct_failed, _direct_stream, direct_tin, direct_tout, direct_avg_lat,
+                direct_ttft_samples, direct_avg_ttft, direct_cost_sum, direct_priced, direct_savings_sum,
+                direct_savings_samples) = direct;
+            let speed_denominator: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(latency_ms),0) - COALESCE(SUM(ttft_ms),0) FROM request_stats
+                 WHERE created_at >= ?1 AND created_at < ?2",
+                rusqlite::params!["2026-01-01T00:00:00Z", "2026-01-01T03:00:30Z"],
+                |r| r.get::<_, i64>(0),
+            ).expect("speed denom");
+
+            assert_eq!(got.requests, direct_requests, "请求数");
+            assert_eq!(got.success, direct_requests - direct_failed, "成功数");
+            assert_eq!(got.token_input, direct_tin, "输入 token");
+            assert_eq!(got.token_output, direct_tout, "输出 token");
+            assert_eq!(got.cache_read_tokens, 0);
+            assert_eq!(got.cache_write_tokens, 0);
+            assert!((got.avg_latency_ms - direct_avg_lat).abs() < 1e-9, "平均延迟");
+            assert_eq!(got.priced_requests, direct_priced, "已定价");
+            // 浮点对照用容差：hourly 分桶累加与明细一次 SUM 的加法顺序不同，末位可能差 1 ulp
+            let both_some = |a: Option<f64>, b: Option<f64>| a.zip(b).map(|(x, y)| (x - y).abs() < 1e-9).unwrap_or(false);
+            assert!(
+                both_some(got.cost, if direct_priced > 0 { direct_cost_sum } else { None }),
+                "成本（NULL 语义）：got {:?} ≠ 明细 {:?}",
+                got.cost,
+                if direct_priced > 0 { direct_cost_sum } else { None }
+            );
+            assert!(
+                both_some(got.cache_savings, if direct_savings_samples > 0 { direct_savings_sum } else { None }),
+                "价差（NULL 语义）：got {:?} ≠ 明细 {:?}",
+                got.cache_savings,
+                if direct_savings_samples > 0 { direct_savings_sum } else { None }
+            );
+            // ttft 平均：样本数相等 + 总和要求相等
+            let got_ttft_total = got.avg_ttft_ms * got.ttft_samples as f64;
+            let direct_ttft_total = direct_avg_ttft * direct_ttft_samples as f64;
+            assert_eq!(got.ttft_samples, direct_ttft_samples, "ttft 样本数");
+            assert!((got_ttft_total - direct_ttft_total).abs() < 1e-9, "ttft 总和");
+            // speed：总输出 ×1000 / 总生成时长（SQL 里同口径）
+            let expected_speed = if speed_denominator > 0 {
+                direct_tout as f64 * 1000.0 / speed_denominator as f64
+            } else {
+                0.0
+            };
+            assert!((got.avg_speed_tps - expected_speed).abs() < 1e-9, "生成速度");
+
+            // 空范围（from >= to）→ 无核心段，整体明细回退，返回 0 而非崩溃
+            let empty_range = query_metrics(&conn, Some("2026-01-01T00:00:00Z"), Some("2026-01-01T00:00:00Z"));
+            assert_eq!(empty_range.requests, 0);
+            assert_eq!(empty_range.cost, None);
+        }
+        cleanup_db(&path);
+    }
+
+    /// hour 粒度读 hourly 表后必须与明细逐字段一致——这是墙的默认视图，
+    /// 口径漂移会直接变成屏上数字变了。用随机散布的跨整点数据同时激活
+    /// hourly 核心段边界（bucket 比较）与明细段的 UTC created_at 比较，
+    /// 再钉住 fresh_input / cost / savings 的 NULL 语义。
+    #[test]
+    fn model_timeseries_hourly_equals_pure_detail_on_random_spread() {
+        let (pool, path) = test_db();
+        {
+            let conn = pool.get().expect("conn");
+            conn.execute(
+                "INSERT INTO platforms (id,name,type,base_url,api_key,created_at,updated_at) VALUES ('pl','p','openai','http://x','k','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("platform");
+            conn.execute(
+                "INSERT INTO proxies (id,name,created_at) VALUES ('px','px','2026-01-01T00:00:00Z')",
+                [],
+            ).expect("proxy");
+            conn.execute("INSERT INTO routes (id,proxy_id) VALUES ('rt','px')", []).expect("route");
+            conn.execute(
+                "INSERT INTO backends (id,route_id,platform_id,model_id,weight,priority) VALUES
+                 ('b-a','rt','pl','model-a',1,0),('b-b','rt','pl','model-b',1,0)",
+                [],
+            ).expect("backends");
+
+            // 随机散布：00:00Z ~ 03:59Z，跨四个整点；部分行定价、部分行无 token/ttft
+            let mut rows = Vec::new();
+            let mut seed = 42u64;
+            let mut next = move || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (seed >> 33) % 100
+            };
+            for i in 0..60 {
+                let hour = i % 4;
+                let minute = next() % 60;
+                let sec = next() % 60;
+                let model = if next() % 2 == 0 { "b-a" } else { "b-b" };
+                let priced = next() % 3 == 0;
+                let stream = next() % 2 == 0;
+                let mut row = stat(&format!("k{i}"), if priced { Some(0.01 + 0.001 * i as f64) } else { None });
+                row.proxy_id = "px".into();
+                row.route_id = "rt".into();
+                row.backend_id = model.into();
+                row.status_code = if next() % 5 == 0 { 429 } else { 200 };
+                row.latency_ms = (next() as i64) * 10 + 1;
+                row.token_input = if next() % 4 == 0 { None } else { Some((next() * 100) as i64) };
+                row.token_output = if next() % 4 == 0 { None } else { Some((next() * 50) as i64) };
+                row.is_stream = stream;
+                row.ttft_ms = if stream && next() % 2 == 0 { Some((next() * 2 + 1) as i64) } else { None };
+                row.cache_read_tokens = if next() % 3 == 0 { Some((next() * 40) as i64) } else { None };
+                row.cache_write_tokens = if next() % 5 == 0 { Some((next() * 20) as i64) } else { None };
+                row.created_at = format!("2026-01-01T{hour:02}:{minute:02}:{sec:02}Z");
+                rows.push(row);
+            }
+            super::record_batch(&pool, &rows, &[], &[], &[], &[]).expect("batch");
+
+            let from = "2026-01-01T00:00:00Z";
+            let to = "2026-01-02T00:00:00Z";
+            let hourly = model_timeseries(&pool, "hour", 24, Some(from), Some(to)).expect("hourly");
+            // 对照：纯明细聚合。同批数据按 day 粒度跑（明细表），hour 桶加总后逐字段相等
+            let daily = model_timeseries(&pool, "day", 0, Some(from), Some(to)).expect("daily");
+            let by_model_day: std::collections::HashMap<&str, &ModelTimeSeriesPoint> =
+                daily.data.iter().map(|p| (p.model_id.as_str(), p)).collect();
+            assert_eq!(by_model_day.len(), 2, "两个模型都应有速写");
+            // (requests, tin, tout, caches, failed, stream, ttft_samples, latency_total, ttft_total)
+            let mut acc: std::collections::HashMap<&str, (i64,i64,i64,i64,i64,i64,i64,i64,f64,f64)> = Default::default();
+            for p in &hourly.data {
+                let e = acc.entry(p.model_id.as_str()).or_default();
+                e.0 += p.requests;
+                e.1 += p.token_input;
+                e.2 += p.token_output;
+                e.3 += p.cache_read_tokens;
+                e.4 += p.cache_write_tokens;
+                e.5 += p.failed_requests;
+                e.6 += p.stream_requests;
+                e.7 += p.ttft_samples;
+                e.8 += p.avg_latency_ms * p.requests as f64;
+                e.9 += p.avg_ttft_ms * p.ttft_samples as f64;
+            }
+            for (model_id, &(r, tin, tout, cr, cw, fail, stream, ttfts, lat_tot, ttft_tot)) in &acc {
+                let d = by_model_day.get(model_id).expect("model in daily");
+                assert_eq!(d.requests, r, "{model_id} 请求数");
+                assert_eq!(d.token_input, tin, "{model_id} 输入");
+                assert_eq!(d.token_output, tout, "{model_id} 输出");
+                assert_eq!(d.cache_read_tokens, cr, "{model_id} 缓存读");
+                assert_eq!(d.cache_write_tokens, cw, "{model_id} 缓存写");
+                assert_eq!(d.failed_requests, fail, "{model_id} 失败");
+                assert_eq!(d.stream_requests, stream, "{model_id} 流式");
+                assert_eq!(d.ttft_samples, ttfts, "{model_id} ttft 样本");
+                assert!(
+                    (d.avg_latency_ms * d.requests as f64 - lat_tot).abs() < 1e-9,
+                    "{model_id} 延迟总和"
+                );
+                assert!(
+                    (d.avg_ttft_ms * d.ttft_samples as f64 - ttft_tot).abs() < 1e-9,
+                    "{model_id} ttft 总和"
+                );
+                // fresh_input：两套实现同公式，这里钉公式本身
+                let expected_fresh = (tin - cr - cw).max(0);
+                let fresh_acc: i64 = hourly.data.iter()
+                    .filter(|p| p.model_id == *model_id)
+                    .map(|p| p.fresh_input_tokens).sum();
+                assert_eq!(fresh_acc, expected_fresh, "{model_id} fresh 合计");
+            }
+            // cost 逐点加总（NULL 语义已在 daily/hourly 内各自成立，对比总和一致即可）
+            let cost_daily: f64 = daily.data.iter().filter_map(|p| p.total_cost).sum();
+            let cost_hourly: f64 = hourly.data.iter().filter_map(|p| p.total_cost).sum();
+            assert!((cost_daily - cost_hourly).abs() < 1e-9, "成本 {cost_daily} vs {cost_hourly}");
+        }
         cleanup_db(&path);
     }
 }

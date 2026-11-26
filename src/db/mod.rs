@@ -45,7 +45,7 @@ pub fn init_pool(db_path: &Path) -> Result<DbPool, AppError> {
             Ok(())
         });
     let pool = Pool::builder()
-        .max_size(8)
+        .max_size(16)
         // 池被长只读报表占满时快速失败，而不是让热路径排 30 秒
         .connection_timeout(std::time::Duration::from_secs(5))
         .build(manager)
@@ -64,7 +64,7 @@ pub fn get_conn(pool: &DbPool) -> Result<r2d2::PooledConnection<SqliteConnection
 }
 
 /// 桌面端托盘菜单的「模型名 + token 数」。
-/// 刻意用一条裸连接而不是 `init_pool`：后者会建 8 连接池并跑一遍迁移，
+/// 刻意用一条裸连接而不是 `init_pool`：后者会建 16 连接池并跑一遍迁移，
 /// 放在 UI 线程上就是启动卡顿的直接来源。这里只读、只开一个连接。
 pub fn tray_menu_entries(db_path: &Path) -> Result<Vec<(String, String)>, AppError> {
     let conn = rusqlite::Connection::open(db_path)

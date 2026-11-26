@@ -4,7 +4,7 @@ use crate::error::AppResult;
 /// 本程序编译进来的表结构版本（= `run_migrations` 会跑到的最后一步）。
 /// 有单测把两者钉在一起，加迁移时不改常量就编译不过测试，不会悄悄漂移。
 /// 备份还原用的是它，而不是当前库的版本：见 `db::backup::restore`。
-pub const CURRENT_SCHEMA_VERSION: i64 = 39;
+pub const CURRENT_SCHEMA_VERSION: i64 = 42;
 
 /// 库当前的表结构版本。`_schema_version` 还没建（全新库）按 0 处理。
 /// 备份还原也要读它：版本不一致的快照不能就地假定本机代码读得懂。
@@ -380,6 +380,96 @@ pub fn run_migrations(conn: &Connection) -> AppResult<()> {
             "ALTER TABLE routes ADD COLUMN default_effort TEXT")?;
         conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 39)", [])?;
         tracing::info!("Database migrated to V39 (routes.reasoning_efforts / routes.default_effort)");
+    }
+
+    if current_version < 40 {
+        // proxy_stats（平台面板）的查询形态是 WHERE proxy_id = ? AND created_at BETWEEN …，
+        // 单列 idx_stats_proxy 只能定位到 proxy 再扫全部历史行；复合索引让时间范围也走索引。
+        // 复合索引 (proxy_id, created_at) 前缀覆盖原单列 idx_stats_proxy（proxy_id），
+        // 与 V38 同一原则：前缀冗余的单列索引只按行付写放大，删掉，让优化器只留一条可选的。
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_stats_proxy_created ON request_stats(proxy_id, created_at);
+             DROP INDEX IF EXISTS idx_stats_proxy;",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 40)", [])?;
+        tracing::info!("Database migrated to V40 (request_stats(proxy_id, created_at) composite index)");
+    }
+
+    if current_version < 41 {
+        // 报表预聚合小时表（docs/high-concurrency-plan.md §3.1 第一阶段：先建表 + 写端双写，
+        // 读端等压测确认命中后再切）。聚合粒度 (bucket, proxy_id, route_id, backend_id)：
+        // - model 维度不落列：backend 绑定 platform.model_id，读端按 backend 聚合再 join
+        //   backends 表即得模型维度，无需冗余存 model_id；
+        // - api_key 维度不落列：api_key_usage 已有 (api_key_id, created_at) 复合索引，
+        //   明细即可，预聚合表要服务的是 overview / proxy_stats / platform_stats 这类全量扫。
+        // WITHOUT ROWID + 自然主键：同一桶同一后端只一行，UPSERT 即累加，无自增孤儿。
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS request_stats_hourly (
+                 bucket            TEXT    NOT NULL,
+                 proxy_id          TEXT    NOT NULL,
+                 route_id          TEXT    NOT NULL,
+                 backend_id        TEXT    NOT NULL,
+                 requests          INTEGER NOT NULL DEFAULT 0,
+                 failed_requests   INTEGER NOT NULL DEFAULT 0,
+                 stream_requests   INTEGER NOT NULL DEFAULT 0,
+                 token_input       INTEGER NOT NULL DEFAULT 0,
+                 token_output      INTEGER NOT NULL DEFAULT 0,
+                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                 cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                 latency_ms_sum    INTEGER NOT NULL DEFAULT 0,
+                 ttft_ms_sum       INTEGER NOT NULL DEFAULT 0,
+                 ttft_samples      INTEGER NOT NULL DEFAULT 0,
+                 cost_sum          REAL,
+                 priced_requests   INTEGER NOT NULL DEFAULT 0,
+                 cache_savings_sum REAL    NOT NULL DEFAULT 0,
+                 cache_savings_samples INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (bucket, proxy_id, route_id, backend_id)
+             ) WITHOUT ROWID;",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 41)", [])?;
+        tracing::info!("Database migrated to V41 (request_stats_hourly pre-aggregation table)");
+    }
+
+    if current_version < 42 {
+        // D 第二阶段：读端切到小时表前，必须先把 V41 之前的历史明细一次性回填进小时表，
+        // 否则切完读端会瞬间"丢"全部历史数据（13 万行只会看到 V41 之后双写出来的那部分）。
+        // 桶口径必须与写端 upsert_hourly_aggregate 完全一致：本地时区 "%Y-%m-%d %H"。
+        // 用 INSERT OR REPLACE（整桶覆盖）而不是 ON CONFLICT 累加：回填跑一次，覆盖任何
+        // 已在桶里累加的部分，结果等于"从明细全量重算该桶"，与 upsert 的累加结果一致。
+        // cache_savings_samples 记录桶内非空 savings 行数：读端用它还原明细 SUM(NULL 语义)——
+        // "这条范围没有任何一条可比价差"应显示 None（—），而不是 0。
+        add_column_if_missing(
+            conn,
+            "request_stats_hourly",
+            "cache_savings_samples",
+            "ALTER TABLE request_stats_hourly ADD COLUMN cache_savings_samples INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            "INSERT OR REPLACE INTO request_stats_hourly
+                (bucket, proxy_id, route_id, backend_id,
+                 requests, failed_requests, stream_requests,
+                 token_input, token_output, cache_read_tokens, cache_write_tokens,
+                 latency_ms_sum, ttft_ms_sum, ttft_samples,
+                 cost_sum, priced_requests, cache_savings_sum, cache_savings_samples)
+             SELECT
+                STRFTIME('%Y-%m-%d %H', DATETIME(created_at, 'localtime'))          AS bucket,
+                proxy_id, route_id, backend_id,
+                COUNT(*)                                                            AS requests,
+                SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 0 ELSE 1 END) AS failed_requests,
+                SUM(is_stream)                                                      AS stream_requests,
+                COALESCE(SUM(token_input), 0), COALESCE(SUM(token_output), 0),
+                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0),
+                COUNT(ttft_ms)                                                      AS ttft_samples,
+                SUM(cost)                                                           AS cost_sum,
+                COUNT(cost)                                                         AS priced_requests,
+                COALESCE(SUM(cache_savings), 0),
+                COUNT(cache_savings)                                                AS cache_savings_samples
+             FROM request_stats
+             GROUP BY bucket, proxy_id, route_id, backend_id;",
+        )?;
+        conn.execute("INSERT OR REPLACE INTO _schema_version (id, value) VALUES (1, 42)", [])?;
+        tracing::info!("Database migrated to V42 (backfill request_stats_hourly from history)");
     }
 
     Ok(())
@@ -826,7 +916,7 @@ CREATE TABLE IF NOT EXISTS request_stats (
     created_at  TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_stats_proxy ON request_stats(proxy_id);
+CREATE INDEX IF NOT EXISTS idx_stats_proxy_created ON request_stats(proxy_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_stats_route ON request_stats(route_id);
 CREATE INDEX IF NOT EXISTS idx_stats_backend ON request_stats(backend_id);
 CREATE INDEX IF NOT EXISTS idx_stats_created ON request_stats(created_at);
@@ -1344,7 +1434,7 @@ mod tests {
                 "idx_stats_backend_created",
                 "idx_request_stats_api_key",
                 "idx_stats_created",
-                "idx_stats_proxy",
+                "idx_stats_proxy_created",
                 "idx_stats_route",
             ] {
                 assert!(
@@ -1369,6 +1459,10 @@ mod tests {
                     ["idx_stats_api_key_created", "idx_request_stats_api_key"].as_slice()),
                 ("SELECT COUNT(*) FROM request_stats WHERE backend_id='b3' AND created_at >= '2026-11-01T00:00:00+00:00'",
                     ["idx_stats_backend_created"].as_slice()),
+                ("SELECT COUNT(*) FROM request_stats WHERE proxy_id='p3' AND created_at >= '2026-11-01T00:00:00+00:00'",
+                    ["idx_stats_proxy_created"].as_slice()),
+                ("SELECT COUNT(*) FROM request_stats WHERE proxy_id='p3'",
+                    ["idx_stats_proxy_created"].as_slice()),
             ] {
                 let got = plan(sql);
                 assert!(

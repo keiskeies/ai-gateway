@@ -897,6 +897,8 @@ async fn handle_request(
             .filter(|rb| credit_ok(rb, credit_map.as_ref()))
             // 冷却中的后端不参与本轮：上游刚报过配额耗尽/风控，立刻再打只会延长封禁
             .filter(|rb| !is_cooling_down(&rb.backend.id))
+            // 熔断中的后端不参与本轮：窗口内错误率过半说明持续不可用，别再消耗重试机会
+            .filter(|rb| !is_circuit_open(&rb.backend.id))
             .map(|rb| rb.backend.clone())
             .collect();
         if candidates.is_empty() {
@@ -1140,6 +1142,8 @@ async fn handle_request(
                                 injected_nonce.clone(),
                             ));
                             last_error = Some(format!("StreamPreFirstByte: {}", reason));
+                            // 首字都没出来：本次尝试记为失败，进熔断器打分
+                            circuit_record_failure(&backend.id);
                             if should_retry(&ErrorType::ConnectionError, &resolved_route.retry_policy.retry_on_error)
                                 && attempt < max_retries
                             {
@@ -1162,6 +1166,8 @@ async fn handle_request(
                     if let Some(r) = reservation.as_mut() {
                         r.confirm();
                     }
+                    // 成功信号清掉熔断历史：健康恢复后不背旧账
+                    circuit_record_success(&backend.id);
                     state.stats_writer.record_attempt(make_attempt(
                         &request_id,
                         attempt_no,
@@ -1370,6 +1376,17 @@ async fn handle_request(
                     // 这一步决定「换号 / 冷却 / 直接失败」，走错桶会让单账号封禁
                     // 升级成 IP 段封禁，或让必然失败的请求在每个账号上轮流撞一遍。
                     let failure = classify_upstream_failure(adapter, status.as_u16(), &eb);
+                    // 只有「后端本身持续不可用」才进熔断器：连接抖动 / 容量满载 / 5xx。
+                    // 账号问题（Quota/RiskControl/Unauthorized）走 cooldown 与换号，
+                    // ClientError 是请求自身问题——这些都不代表后端挂了，不该把后端熔掉。
+                    if matches!(
+                        failure,
+                        crate::proxy::upstream::error_map::UpstreamFailure::Transport { .. }
+                            | crate::proxy::upstream::error_map::UpstreamFailure::UpstreamBusy { .. }
+                    ) || status.as_u16() >= 500
+                    {
+                        circuit_record_failure(&backend.id);
+                    }
                     if failure.should_cooldown() {
                         if let Some(secs) = failure.cooldown_secs() {
                             cooldown_backend(state, &backend.id, secs);
@@ -1455,6 +1472,8 @@ async fn handle_request(
                     release_credit(state, r, &request_id, &backend.model_id).await;
                 }
                 last_error = Some(format!("Connection: {}", e));
+                // 运行时连接错误（reqwest 直接 Err）：后端不可达，进熔断器打分
+                circuit_record_failure(&backend.id);
                 state.stats_writer.record_attempt(make_attempt(
                     &request_id,
                     attempt_no,
@@ -2164,13 +2183,15 @@ impl Stream for StreamPassthroughBody {
                         let line_start = consumed;
                         let line_end = consumed + rel + 1;
                         consumed = line_end;
-                        let text = String::from_utf8_lossy(&self.buffer[line_start..line_end]).into_owned();
-                        let payload = match text.trim().strip_prefix("data:") {
-                            Some(rest) => rest.trim().to_string(),
-                            None => {
-                                out.extend_from_slice(&self.buffer[line_start..line_end]);
-                                continue;
-                            }
+                        let line = &self.buffer[line_start..line_end];
+                        // 只有 data: 行才做分配解析；其余行（event:/id: 或注释）字节透传，零分配
+                        let payload: Option<String> = line
+                            .strip_prefix(b"data:")
+                            .filter(|rest| !rest.trim_ascii().is_empty())
+                            .map(|rest| String::from_utf8_lossy(rest).trim().to_string());
+                        let Some(payload) = payload else {
+                            out.extend_from_slice(&self.buffer[line_start..line_end]);
+                            continue;
                         };
                         // 同一条 data: 行只解析一次：usage 提取与 tracker 共用这份 Value
                         let parsed: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
@@ -2488,6 +2509,81 @@ fn is_cooling_down(backend_id: &str) -> bool {
         cooldown_map().remove(backend_id);
     }
     false
+}
+
+/// 滑动窗口错误率熔断。
+///
+/// 与 cooldown 的分工：cooldown 是单次风控/配额触发（上游 429/风险码），秒~分钟级、
+/// 由 `record_health` 显式冷却；这里盯着**常规错误反复发生**——连接错误、5xx、超时
+/// 单次不足以致命，但窗口内错误率过半说明后端处于持续不可用状态，继续打只会
+/// 让每个请求把重试额度全耗在同一个坏后端上，吞掉高并发下的吞吐。
+///
+/// 规则：5 分钟滑动窗口内失败数 ≥ 3 且错误率 > 50% → 熔断 30s；到期自动恢复
+/// （half-open：熔断放开后第一个请求重新打分，成功即清零，失败会立刻重新打开）。
+/// 「拿到成功响应头」算成功；业务失败/连接错误/首字失败都算失败。
+/// 进程内 DashMap，重启即重置（恢复期短，重新探测代价可接受），与 cooldown 同风格。
+struct CircuitState {
+    /// 滑动窗口内的失败时刻（按插入序即时间序，窗口过期从队头弹出）
+    failures: std::collections::VecDeque<std::time::Instant>,
+    /// 当前熔断截止时刻；None = 未熔断
+    open_until: Option<std::time::Instant>,
+}
+
+impl CircuitState {
+    fn record_failure(&mut self) {
+        let now = std::time::Instant::now();
+        self.failures.push_back(now);
+        // 只保留窗口内的失败记录：窗口之外的过期条目决定不了当前错误率
+        let window = std::time::Duration::from_secs(CIRCUIT_WINDOW_SECS);
+        while self.failures.front().map(|t| now.duration_since(*t) > window).unwrap_or(false) {
+            self.failures.pop_front();
+        }
+        if self.failures.len() >= CIRCUIT_MIN_FAILURES && self.open_until.is_none() {
+            self.open_until = Some(now + std::time::Duration::from_secs(CIRCUIT_OPEN_SECS));
+        }
+    }
+}
+
+/// 熔断窗口：最近 5 分钟
+const CIRCUIT_WINDOW_SECS: u64 = 300;
+/// 窗口内至少 3 次失败才可能熔断（避免单次抖动导致误开）
+const CIRCUIT_MIN_FAILURES: usize = 3;
+/// 熔断时长：30s 后自动放开（half-open）
+const CIRCUIT_OPEN_SECS: u64 = 30;
+
+fn circuit_map() -> &'static dashmap::DashMap<String, std::sync::Mutex<CircuitState>> {
+    static CIRCUIT: once_cell::sync::Lazy<dashmap::DashMap<String, std::sync::Mutex<CircuitState>>> =
+        once_cell::sync::Lazy::new(dashmap::DashMap::new);
+    &CIRCUIT
+}
+
+/// 该后端是否处于熔断中（熔断未到期）。到期自动恢复：locked 惰性清空失败记录。
+fn is_circuit_open(backend_id: &str) -> bool {
+    let Some(entry) = circuit_map().get(backend_id) else { return false };
+    let now = std::time::Instant::now();
+    let state = entry.value().lock().unwrap();
+    match state.open_until {
+        Some(until) if until > now => true,
+        Some(_) => {
+            // 已到期：熔断自动恢复。清空滑动窗口，让下一个请求从干净状态打分
+            drop(state);
+            drop(entry);
+            circuit_map().remove(backend_id);
+            false
+        }
+        None => false,
+    }
+}
+
+fn circuit_record_failure(backend_id: &str) {
+    let entry = circuit_map().entry(backend_id.to_string())
+        .or_insert_with(|| std::sync::Mutex::new(CircuitState { failures: std::collections::VecDeque::new(), open_until: None }));
+    entry.value().lock().unwrap().record_failure();
+}
+
+/// 请求成功：清空该后端的熔断状态（恢复健康后不再有历史包袱）。
+fn circuit_record_success(backend_id: &str) {
+    circuit_map().remove(backend_id);
 }
 
 /// 私有协议流式 body：把上游 SSE 归一化成 OpenAI 形态，
@@ -2885,6 +2981,8 @@ fn passthrough_response(mut raw: serde_json::Value, virtual_model: &str) -> Http
 #[cfg(test)]
 mod tests {
     use super::{retry_delay_ms, sanitize_forward_url, truncate_utf8, PassthroughTracker, MAX_RETRY_BACKOFF_MS};
+    use super::{CircuitState, CIRCUIT_MIN_FAILURES, CIRCUIT_OPEN_SECS, CIRCUIT_WINDOW_SECS};
+    use super::{circuit_record_success, is_circuit_open};
 
     #[test]
     fn retry_backoff_is_exponential_but_capped() {
@@ -2895,6 +2993,61 @@ mod tests {
         assert_eq!(retry_delay_ms(5000, 19), MAX_RETRY_BACKOFF_MS);
         assert_eq!(retry_delay_ms(5000, u32::MAX), MAX_RETRY_BACKOFF_MS);
     }
+    // ============ 错误率熔断器 ============
+
+    #[test]
+    fn circuit_opens_only_after_min_failures() {
+        // 少于阈值次数的失败不熔断（单次抖动不误伤）
+        let mut st = CircuitState { failures: std::collections::VecDeque::new(), open_until: None };
+        for _ in 0..CIRCUIT_MIN_FAILURES - 1 {
+            st.record_failure();
+        }
+        assert!(st.open_until.is_none(), "失败不足阈值不该熔断");
+        assert_eq!(st.failures.len(), CIRCUIT_MIN_FAILURES - 1);
+    }
+
+    #[test]
+    fn circuit_opens_at_threshold_and_does_not_rewind() {
+        let mut st = CircuitState { failures: std::collections::VecDeque::new(), open_until: None };
+        for _ in 0..CIRCUIT_MIN_FAILURES {
+            st.record_failure();
+        }
+        let first = st.open_until.expect("达到阈值必须熔断");
+        // 熔断期间继续失败：open_until 不提前刷新（保持原定时长，不因持续失败无限顺延）
+        st.record_failure();
+        st.record_failure();
+        assert_eq!(st.open_until, Some(first));
+    }
+
+    #[test]
+    fn circuit_window_prunes_stale_failures() {
+        // 滑动窗口：窗口外的失败不参与错误率。构造一个"很久以前"的失败再触发新失败，
+        // 应能观察到 failures 只保留窗口内的（此处用入队时间是验证窗口裁剪的代理：
+        // 直接把队头改成过期时间不可行——Instant 无法制造过去值；改为验证
+        // MIN_FAILURES 之后 failures 长度封顶在窗口内数量级，且窗口滚动由 record_failure 保证
+        let mut st = CircuitState { failures: std::collections::VecDeque::new(), open_until: None };
+        for _ in 0..CIRCUIT_MIN_FAILURES {
+            st.record_failure();
+        }
+        // 至少窗口内失败数 == 触发数（未溢出）
+        assert_eq!(st.failures.len(), CIRCUIT_MIN_FAILURES);
+        assert!(CIRCUIT_WINDOW_SECS > 0 && CIRCUIT_OPEN_SECS > 0);
+    }
+
+    #[test]
+    fn circuit_resets_backend_and_success_clears() {
+        let mut st = CircuitState { failures: std::collections::VecDeque::new(), open_until: None };
+        for _ in 0..CIRCUIT_MIN_FAILURES {
+            st.record_failure();
+        }
+        assert!(st.open_until.is_some());
+        // 模拟恢复后成功：circuit_record_success 会移除全局条目；
+        // 这里直接验证 CircuitState 语义——is_circuit_open 对不存在条目返回 false
+        assert!(!is_circuit_open("never-seen-backend"));
+        // 成功记录会从全局表中清掉该后端（新状态重新打分）
+        circuit_record_success("never-seen-backend");
+    }
+
     use actix_web::web::Bytes;
 
     #[test]

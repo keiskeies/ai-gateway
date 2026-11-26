@@ -45,6 +45,9 @@ pub struct ServerConfig {
     pub host: String,
     pub admin_port: u16,
     pub log_level: String,
+    /// actix 工作线程数；None = 走 actix 默认（= CPU 核数）。容器/桌面机核数少时可调低，
+    /// 高并发机可调高；对长流式连接占多数的工作负载，workers 数不等于并发上限。
+    pub workers: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -323,6 +326,7 @@ impl Default for AppConfig {
                 host: "0.0.0.0".to_string(),
                 admin_port: 1994,
                 log_level: "info".to_string(),
+                workers: None,
             },
             database: DatabaseConfig {
                 path: PathBuf::from("data/ai-gateway.db"),
@@ -371,6 +375,9 @@ impl AppConfig {
                         }
                         if let Some(v) = server.get("log_level").and_then(|v| v.as_str()) {
                             config.server.log_level = v.to_string();
+                        }
+                        if let Some(v) = server.get("workers").and_then(|v| v.as_integer()) {
+                            config.server.workers = Some(v.max(1) as usize);
                         }
                     }
                     if let Some(db) = value.get("database") {
@@ -452,11 +459,24 @@ impl AppConfig {
     }
 
     pub fn to_toml_string(&self) -> Result<String, String> {
+        // workers 是可选调优项：None 时不在模板里出现，load 时读不到就保持 None（actix 默认）
+        let workers_line = self
+            .server
+            .workers
+            .map(|w| format!("workers = {}\n", w))
+            .unwrap_or_default();
         Ok(format!(
             r#"[server]
 host = "{}"
 admin_port = {}
 log_level = "{}"
+{}"#,
+            self.server.host,
+            self.server.admin_port,
+            self.server.log_level,
+            workers_line,
+        ) + &format!(
+            r#"
 
 [database]
 path = "{}"
@@ -476,9 +496,6 @@ capture_request_bodies = {}
 capture_response_bodies = {}
 auto_purge_days = {}
 "#,
-            self.server.host,
-            self.server.admin_port,
-            self.server.log_level,
             self.database.path.display(),
             self.security.encrypt_key,
             self.defaults.lb_strategy,

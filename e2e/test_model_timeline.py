@@ -70,6 +70,45 @@ def _seed_instance(instance, upstream: str) -> None:
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
+        # 生产写路径对每条明细同步 UPSERT 小时桶（V41 双写）；读端已切到 request_stats_hourly，
+        # 种子必须模拟同样的双写，否则中间整小时段的读端会"看不见"这些行。
+        # 桶 = 服务器本地时区整小时（与后端 upsert_hourly_aggregate 同口径）。
+        from collections import defaultdict
+        buckets: dict[tuple, dict] = {}
+        now_local = datetime.now().astimezone()
+        for (p, r, b, status, lat, tin, tout, _err, at, ttft, cr, cw, stream, _key, cost, _rid, _rep) in rows:
+            bucket = datetime.fromisoformat(at).astimezone().strftime("%Y-%m-%d %H")
+            key = (bucket, p, r, b)
+            agg = buckets.setdefault(key, {
+                "requests": 0, "failed": 0, "stream": 0, "tin": 0, "tout": 0,
+                "cr": 0, "cw": 0, "lat_sum": 0, "ttft_sum": 0, "ttft_n": 0,
+                "cost_sum": None, "priced": 0,
+            })
+            agg["requests"] += 1
+            if not (200 <= status < 300):
+                agg["failed"] += 1
+            agg["stream"] += stream
+            agg["tin"] += tin or 0
+            agg["tout"] += tout or 0
+            agg["cr"] += cr or 0
+            agg["cw"] += cw or 0
+            agg["lat_sum"] += lat
+            if ttft is not None:
+                agg["ttft_sum"] += ttft
+                agg["ttft_n"] += 1
+            if cost is not None:
+                agg["cost_sum"] = (agg["cost_sum"] or 0) + cost
+                agg["priced"] += 1
+        conn.executemany(
+            "INSERT INTO request_stats_hourly (bucket, proxy_id, route_id, backend_id, "
+            "requests, failed_requests, stream_requests, token_input, token_output, "
+            "cache_read_tokens, cache_write_tokens, latency_ms_sum, ttft_ms_sum, ttft_samples, "
+            "cost_sum, priced_requests, cache_savings_sum, cache_savings_samples) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)",
+            [(k[0], k[1], k[2], k[3], v["requests"], v["failed"], v["stream"], v["tin"], v["tout"],
+              v["cr"], v["cw"], v["lat_sum"], v["ttft_sum"], v["ttft_n"],
+              v["cost_sum"], v["priced"]) for k, v in buckets.items()],
+        )
         conn.commit()
 
 

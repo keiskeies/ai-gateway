@@ -32,8 +32,13 @@ async fn main() -> std::io::Result<()> {
     let system_proxy = SystemProxy::detect();
     let http_client = system_proxy.apply_to_builder(
         // 不设 Client 级 timeout：流式长生成远超 request_timeout，
-        // 各请求点（转发/测活/拉模型）均单独设置 per-request timeout
+        // 各请求点（转发/测活/拉模型）均单独设置 per-request timeout。
+        // 连接池是并发吞吐的第一杠杆：高并发下每请求新建 TCP+TLS 握手会直接打满 CPU
+        // 与 fd；keep-idle 复用后大部分请求命中已建立的连接。
         reqwest::Client::builder()
+            .pool_max_idle_per_host(64)
+            .pool_idle_timeout(std::time::Duration::from_secs(300))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
     ).build().expect("Failed to create HTTP client");
 
     let shared_config: SharedAppConfig = Arc::new(RwLock::new(app_config.clone()));
@@ -76,7 +81,8 @@ async fn main() -> std::io::Result<()> {
     let api_cache = Arc::new(cache.clone());
     let login_limiter = web::Data::new(ai_gateway::api::auth::LoginLimiter::new());
 
-    HttpServer::new(move || {
+    // HttpServer 默认线程数 = 可用 CPU 核数；config.toml [server].workers 显式覆盖
+    let mut http_server = HttpServer::new(move || {
         App::new()
             // 只放行回环/Tauri origin：permissive 会连 supports_credentials 一起打开，
             // 等于允许任意外站带着 7 天会话 cookie 读 /api。同源请求（局域网打开控制台）
@@ -127,7 +133,9 @@ async fn main() -> std::io::Result<()> {
                     })),
             )
     })
-    .bind(format!("{}:{}", host, admin_port))?
-    .run()
-    .await
+    .bind(format!("{}:{}", host, admin_port))?;
+    if let Some(workers) = app_config.server.workers {
+        http_server = http_server.workers(workers);
+    }
+    http_server.run().await
 }

@@ -21,7 +21,9 @@ pub struct StreamConverter {
     upstream_model: String,
 
     // ---- SSE 输入缓冲：按空行分割事件，event:/data: 行聚合 ----
-    line_buf: String,
+    // 字节缓冲：chunk 直接 extend，逐行游标消费（见 push_chunk），
+    // 避免整块 from_utf8_lossy 转换与每行一次 drain 的整体左移拷贝
+    line_buf: Vec<u8>,
     cur_event: String,
     cur_data: String,
 
@@ -78,7 +80,7 @@ impl StreamConverter {
             model: model.to_string(),
             backend_id: backend_id.to_string(),
             upstream_model: upstream_model.to_string(),
-            line_buf: String::new(),
+            line_buf: Vec::new(),
             cur_event: String::new(),
             cur_data: String::new(),
             out: String::new(),
@@ -107,11 +109,21 @@ impl StreamConverter {
     /// 上游到达一批字节，返回应转发给客户端的字节（可能为空）
     pub fn push_chunk(&mut self, bytes: &[u8]) -> String {
         self.out.clear();
-        self.line_buf.push_str(&String::from_utf8_lossy(bytes));
-        while let Some(nl) = self.line_buf.find('\n') {
-            let line: String = self.line_buf.drain(..=nl).collect();
-            self.process_line(line.trim_end_matches(['\r', '\n']));
+        self.line_buf.extend_from_slice(bytes);
+        // 把缓冲整体挪到局部变量再解析：对 self.line_buf 的不可变借用与
+        // self 的可变借用（process_line 内部）不冲突。结束后把残余半行塞回。
+        let mut buf = std::mem::take(&mut self.line_buf);
+        let mut consumed = 0usize;
+        while let Some(rel) = buf[consumed..].iter().position(|&b| b == b'\n') {
+            let nl = consumed + rel;
+            self.process_line(&buf[consumed..nl]);
+            consumed = nl + 1;
         }
+        // 一次性丢弃已消费的行前缀，保留未完成的半行
+        if consumed > 0 {
+            buf.drain(..consumed);
+        }
+        self.line_buf = buf;
         // mem::take 交出所有权：每 chunk clone 整段累积输出是 O(chunk × 行数) 的浪费
         std::mem::take(&mut self.out)
     }
@@ -119,15 +131,20 @@ impl StreamConverter {
     /// 上游流结束：补发收尾事件（若上游未正常收尾）并返回剩余输出
     pub fn finish(&mut self) -> String {
         self.out.clear();
-        // 残留半行：尽力解析一次
-        let rest = self.line_buf.trim().to_string();
-        self.line_buf.clear();
-        if !rest.is_empty() {
-            if let Some(data) = rest.strip_prefix("data:") {
-                self.cur_data.push_str(data.trim());
-                self.dispatch_current();
+        // 残留半行：尽力解析一次（挪出缓冲避免借用冲突）
+        let mut buf = std::mem::take(&mut self.line_buf);
+        {
+            let rest = buf.trim_ascii();
+            if !rest.is_empty() {
+                if let Some(data) = rest.strip_prefix(b"data:") {
+                    let data = String::from_utf8_lossy(data);
+                    self.cur_data.push_str(data.trim());
+                    self.dispatch_current();
+                }
             }
         }
+        buf.clear();
+        self.line_buf = buf;
         if !self.finished {
             if self.client_anthropic {
                 self.finish_anthropic();
@@ -196,19 +213,25 @@ impl StreamConverter {
 
     // ================= 内部：SSE 解析 =================
 
-    fn process_line(&mut self, line: &str) {
+    fn process_line(&mut self, line: &[u8]) {
+        // 统一去行尾 \r（CRLF；\n 已在切行时排除），与原先 trim_end_matches(['\r','\n']) 等价
+        let mut line = line;
+        while let Some(stripped) = line.strip_suffix(b"\r") {
+            line = stripped;
+        }
         if line.is_empty() {
             // 空行 = 事件边界
             self.dispatch_current();
             return;
         }
-        if let Some(rest) = line.strip_prefix("event:") {
-            self.cur_event = rest.trim().to_string();
-        } else if let Some(rest) = line.strip_prefix("data:") {
+        if let Some(rest) = line.strip_prefix(b"event:") {
+            self.cur_event = String::from_utf8_lossy(rest).trim().to_string();
+        } else if let Some(rest) = line.strip_prefix(b"data:") {
             if !self.cur_data.is_empty() {
                 self.cur_data.push('\n');
             }
-            self.cur_data.push_str(rest.trim());
+            // 借用转换+trim，不额外分配整行
+            self.cur_data.push_str(&String::from_utf8_lossy(rest).trim());
         }
         // 注释行（: 开头）与其他字段忽略
     }

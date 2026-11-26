@@ -98,6 +98,24 @@ def cost_instance(instances, mock_upstream):
             "VALUES (?,?,?,200,200,300,50,NULL,?,NULL,NULL,NULL,0,NULL,NULL,NULL,NULL,NULL)",
             (proxy["id"], route["id"], backends["mock-large"], now),
         )
+        # 读端已切到 request_stats_hourly（V41 双写 + V42 backfill），种子直写明细后
+        # 必须同步 UPSERT 小时桶，否则中间整小时段读端"看不见"。桶 = 本地时区整小时，
+        # 与后端 upsert_hourly_aggregate 同口径；这两行都在当前时刻 → 同一桶。
+        from datetime import datetime as _dt
+        bucket = _dt.now().astimezone().strftime("%Y-%m-%d %H")
+        conn.executemany(
+            "INSERT INTO request_stats_hourly (bucket, proxy_id, route_id, backend_id, "
+            "requests, failed_requests, stream_requests, token_input, token_output, "
+            "cache_read_tokens, cache_write_tokens, latency_ms_sum, ttft_ms_sum, ttft_samples, "
+            "cost_sum, priced_requests, cache_savings_sum, cache_savings_samples) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)",
+            [
+                (bucket, proxy["id"], route["id"], backends["mock-mini"],
+                 1, 0, 1, 1000, 500, 200, 0, 100, 100, 1, 0.0057, 1, 0.0003),
+                (bucket, proxy["id"], route["id"], backends["mock-large"],
+                 1, 0, 0, 300, 50, 0, 0, 200, 0, 0, None, 0, 0),
+            ],
+        )
         conn.commit()
 
     return instance
