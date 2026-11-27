@@ -22,6 +22,19 @@ type UpstreamByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error
 /// 客户端早就超时；封顶后语义仍是「越重试越慢」，但不会荒谬到不可用。
 const MAX_RETRY_BACKOFF_MS: u64 = 60_000;
 
+/// 请求级错误（4xx / 私有协议业务码）也允许重试，但单独限次数。
+///
+/// 400/404 大多数是真·请求错误，换号也会失败；但同一路由下多账号的模型目录
+/// 并不总是同步（某账号缺模型、某账号对参数更挑剔），给它 2 次机会就能覆盖
+/// 这类「换一个账号就好了」的情况，又不至于让必然失败的请求在每个账号上撞一遍。
+const MAX_CLIENT_ERROR_RETRIES: u32 = 2;
+
+/// 候选后端全部在冷却/熔断时，最多等这么久再重试。
+///
+/// 熔断 30s、常见配额冷却 60s 都能覆盖；401 的 300s 与风控的 3600s 不空转
+/// （等下去只会把调用者拖到超时，不如直接把错误交回去）。
+const MAX_RECOVERY_WAIT_SECS: u64 = 60;
+
 fn retry_delay_ms(backoff_ms: u64, attempt: u32) -> u64 {
     backoff_ms
         .saturating_mul(1u64 << (attempt.min(20) as u32))
@@ -859,6 +872,8 @@ async fn handle_request(
 
     let max_retries = resolved_route.retry_policy.max_retries;
     let mut last_error: Option<String> = None;
+    // 请求级错误的重试单独计数：不能吃满 max_retries（那通常是给限流/抖动留的）
+    let mut client_error_retries: u32 = 0;
     // 一次入站请求一个 ID：所有重试尝试共享，轨迹接口按它串起依次试过的后端
     let request_id = uuid::Uuid::new_v4().to_string();
     // 正文/请求头按这个 request_id 挂到那条统计行上；放在路由解析之后，是为了不给
@@ -905,11 +920,32 @@ async fn handle_request(
             if active.is_empty() {
                 return Err(AppError::Internal("No available backend".to_string()));
             }
-            // 全部在冷却：区分「额度耗尽」与「上游风控」，给出可操作的提示
-            let all_cooling = active.iter().all(|rb| is_cooling_down(&rb.backend.id));
-            if all_cooling {
+            // 候选被冷却/熔断全部挡掉时，别立刻判死：还有重试预算就等到最早恢复
+            // （熔断 30s / 常见配额冷却 60s）。积分耗尽不会随时间恢复，不在这里等。
+            if attempt < max_retries {
+                if let Some(wait) = earliest_recovery_wait(&active, credit_map.as_ref()) {
+                    if wait <= std::time::Duration::from_secs(MAX_RECOVERY_WAIT_SECS) {
+                        tracing::warn!(
+                            "候选后端全部冷却/熔断：等待 {}s 后重试（attempt {}/{}）",
+                            wait.as_secs_f64().ceil() as u64,
+                            attempt + 1,
+                            max_retries
+                        );
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
+            }
+            // 区分「额度耗尽」与「上游健康度」问题，给出可操作的提示
+            if active.iter().all(|rb| credit_ok(rb, credit_map.as_ref())) {
+                let all_cooling = active.iter().all(|rb| is_cooling_down(&rb.backend.id));
+                if all_cooling {
+                    return Err(AppError::TooManyRequests(
+                        "所有上游后端均在冷却中（配额耗尽或风控），请稍后重试".to_string(),
+                    ));
+                }
                 return Err(AppError::TooManyRequests(
-                    "所有上游后端均在冷却中（配额耗尽或风控），请稍后重试".to_string(),
+                    "所有上游后端均在熔断恢复中，请稍后重试".to_string(),
                 ));
             }
             return Err(AppError::TooManyRequests(credit_exhausted_message(&resolved_route)));
@@ -1425,14 +1461,26 @@ async fn handle_request(
                         Some(forward_url.clone()),
                         injected_nonce.clone(),
                     ));
-                    // 是否换后端重试：ClientError / RiskControl 一律不重试
-                    // （前者换号也没用，后者换号会放大封禁）。
+                    // 是否换后端重试：
+                    // - QuotaExhausted / Unauthorized：账号级，换号
+                    // - UpstreamBusy / Transport：限流 / 5xx 抖动，换号或同号退避
+                    // - ClientError：也重试，但单独限次（多账号目录不同步时换号有效）
+                    // - RiskControl：绝不重试——换号会放大封禁，冷却已设
+                    use crate::proxy::upstream::error_map::UpstreamFailure;
+                    let is_client_error = matches!(failure, UpstreamFailure::ClientError { .. });
+                    if is_client_error {
+                        client_error_retries += 1;
+                    }
                     let retry_worthwhile = failure.should_try_another_backend()
+                        || is_client_error
                         || matches!(
                             failure,
-                            crate::proxy::upstream::error_map::UpstreamFailure::UpstreamBusy { .. }
+                            UpstreamFailure::Transport { .. } | UpstreamFailure::UpstreamBusy { .. }
                         );
+                    let client_budget_left =
+                        !is_client_error || client_error_retries <= MAX_CLIENT_ERROR_RETRIES;
                     if retry_worthwhile
+                        && client_budget_left
                         && should_retry(&classify_error(status.as_u16()), &resolved_route.retry_policy.retry_on_error)
                         && attempt < max_retries
                     {
@@ -1508,6 +1556,12 @@ async fn handle_request(
                     replayed_from,
                     path,
                 ));
+                // 不 return 会掉进下一轮循环：等于「不重试也继续打」，既没有退避，
+                // 又会在每次尝试各写一条统计，把一条失败请求显示成好几条。
+                return Err(AppError::Internal(format!(
+                    "All retries: {}",
+                    last_error.clone().unwrap_or_default()
+                )));
             }
         }
     }
@@ -2586,6 +2640,46 @@ fn circuit_record_success(backend_id: &str) {
     circuit_map().remove(backend_id);
 }
 
+/// 冷却剩余时长；None = 没有冷却或已过期。
+fn cooldown_remaining(backend_id: &str) -> Option<std::time::Duration> {
+    let until = *cooldown_map().get(backend_id)?.value();
+    let now = std::time::Instant::now();
+    (until > now).then(|| until - now)
+}
+
+/// 熔断剩余时长；None = 未熔断或已到期。
+fn circuit_remaining(backend_id: &str) -> Option<std::time::Duration> {
+    let entry = circuit_map().get(backend_id)?;
+    let state = entry.value().lock().unwrap();
+    let until = state.open_until?;
+    let now = std::time::Instant::now();
+    (until > now).then(|| until - now)
+}
+
+/// 所有候选都不可用时，最早多久之后会有一个恢复。
+///
+/// 只看「积分还够、只是被冷却/熔断挡住」的后端：积分耗尽要等窗口重置或充值，
+/// 不是睡一觉能解决的。同时命中冷却和熔断的后端按较晚的那个算（两者都过期才可用）。
+fn earliest_recovery_wait(
+    active: &[&crate::cache::ResolvedBackend],
+    credit_map: Option<&std::collections::HashMap<String, crate::db::credit::CreditState>>,
+) -> Option<std::time::Duration> {
+    let mut earliest: Option<std::time::Duration> = None;
+    for rb in active {
+        if !credit_ok(rb, credit_map) {
+            continue;
+        }
+        let remaining = match (cooldown_remaining(&rb.backend.id), circuit_remaining(&rb.backend.id)) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(d) = remaining {
+            earliest = Some(earliest.map_or(d, |e| e.min(d)));
+        }
+    }
+    earliest
+}
+
 /// 私有协议流式 body：把上游 SSE 归一化成 OpenAI 形态，
 /// 再按客户端协议选择「直接透传 OpenAI 事件」或「转成 Anthropic 事件」。
 struct PrivateStreamBody {
@@ -2983,6 +3077,10 @@ mod tests {
     use super::{retry_delay_ms, sanitize_forward_url, truncate_utf8, PassthroughTracker, MAX_RETRY_BACKOFF_MS};
     use super::{CircuitState, CIRCUIT_MIN_FAILURES, CIRCUIT_OPEN_SECS, CIRCUIT_WINDOW_SECS};
     use super::{circuit_record_success, is_circuit_open};
+    use super::{
+        circuit_record_failure, circuit_remaining, cooldown_map, cooldown_remaining,
+        MAX_CLIENT_ERROR_RETRIES, MAX_RECOVERY_WAIT_SECS,
+    };
 
     #[test]
     fn retry_backoff_is_exponential_but_capped() {
@@ -3049,6 +3147,41 @@ mod tests {
     }
 
     use actix_web::web::Bytes;
+
+    #[test]
+    fn cooldown_remaining_is_none_once_expired() {
+        let id = "test-cooldown-remaining";
+        cooldown_map().insert(
+            id.to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        let left = cooldown_remaining(id).expect("未到期应有剩余时长");
+        assert!(left <= std::time::Duration::from_secs(30));
+        cooldown_map().remove(id);
+        assert!(cooldown_remaining(id).is_none(), "过期/不存在都应为 None");
+    }
+
+    #[test]
+    fn circuit_remaining_reports_open_window() {
+        let id = "test-circuit-remaining";
+        for _ in 0..CIRCUIT_MIN_FAILURES {
+            circuit_record_failure(id);
+        }
+        assert!(is_circuit_open(id));
+        let left = circuit_remaining(id).expect("熔断中应有剩余时长");
+        assert!(left <= std::time::Duration::from_secs(CIRCUIT_OPEN_SECS));
+        circuit_record_success(id);
+        assert!(circuit_remaining(id).is_none());
+    }
+
+    #[test]
+    fn retry_budgets_are_sane() {
+        // 请求级错误给 1 次首试 + 2 次重试，且不能超过常规重试预算
+        assert_eq!(MAX_CLIENT_ERROR_RETRIES, 2);
+        // 恢复等待必须覆盖熔断 30s，但不能把 401（300s）也等下去
+        assert!(MAX_RECOVERY_WAIT_SECS >= CIRCUIT_OPEN_SECS);
+        assert!(MAX_RECOVERY_WAIT_SECS < 300);
+    }
 
     #[test]
     fn utf8_truncation_never_splits_a_character() {

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum UpstreamFailure {
     /// 请求级错误：模型不在目录、参数非法、权益不足。
-    /// **不换号、不冷却、不重试**——换号也一样失败。
+    /// **不冷却、不进换号轮转**。handler 侧会给它最多 2 次重试
+    /// （多账号的模型目录未必同步），但不会像配额错误那样一路轮下去。
     ClientError { status: u16, message: String },
     /// 账号配额耗尽：换号 + 冷却 + 计入额度台账。
     QuotaExhausted { retry_after_secs: u64, message: String },
